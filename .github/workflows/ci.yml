@@ -102,13 +102,13 @@ jobs:
 
       - name: Pin SBF-compatible transitive crates
         run: |
-          cargo update -p blake3 --precise 1.8.2
-          cargo update -p constant_time_eq --precise 0.3.1
-          cargo update -p borsh@1.8.0 --precise 1.5.7
-          cargo update -p proc-macro-crate@3.5.0 --precise 3.3.0
-          cargo update -p indexmap --precise 2.11.4
-          cargo update -p solana-zk-sdk@2.3.13 --precise 2.2.1
-          cargo update -p bytemuck_derive --precise 1.8.1
+          cargo update -p solana-program --precise 2.1.0
+          cargo update -p blake3 --precise 1.5.4
+          cargo update -p constant_time_eq --precise 0.3.0
+          cargo update -p borsh@1.8.0 --precise 1.5.1
+          cargo update -p proc-macro-crate@3.5.0 --precise 3.1.0
+          cargo update -p indexmap --precise 2.6.0
+          cargo update -p bytemuck_derive --precise 1.8.0
           cargo update -p zeroize --precise 1.8.1
           cargo update -p zeroize_derive --precise 1.4.2
 
