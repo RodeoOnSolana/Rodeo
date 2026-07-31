@@ -1,0 +1,19 @@
+[toolchain]
+anchor_version = "0.31.1"
+package_manager = "pnpm"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+rodeo_core = "uVDSyoysQD1fJdHisuhg9WUtCEBuBhVYAga4bqaNn6w"
+rodeo_market = "Dai9iNJRoNVh3iFVrzaWy4n731iuM7tHaSHvMEfUdj5k"
+rodeo_router = "4FT2cokb4yL9kdeiCN1zkG78zNZUYzaxrxdvWGWTcXY6"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "pnpm --filter @rodeo/integration test"

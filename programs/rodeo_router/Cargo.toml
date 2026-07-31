@@ -1,0 +1,20 @@
+[package]
+name = "rodeo_router"
+version = "0.1.0"
+description = "Rodeo Phase 0 router program boundary"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "rodeo_router"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+
+[dependencies]
+anchor-lang = "0.31.1"

@@ -1,0 +1,18 @@
+{
+  "name": "rodeo",
+  "private": true,
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "test": "pnpm build && pnpm -r --if-present test",
+    "typecheck": "pnpm build && pnpm -r --if-present typecheck",
+    "anchor:build": "anchor build",
+    "anchor:deploy:localnet": "anchor build && anchor keys sync && anchor build && anchor deploy",
+    "sdk:generate": "pnpm --filter @rodeo/sdk generate"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  }
+}
