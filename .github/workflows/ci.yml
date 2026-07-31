@@ -100,8 +100,17 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --all -- --check
 
+      - name: Pin SBF-compatible transitive crates
+        run: |
+          cargo update -p blake3 --precise 1.8.2
+          cargo update -p constant_time_eq --precise 0.3.1
+          cargo update -p indexmap --precise 2.11.4
+          cargo update -p bytemuck_derive --precise 1.8.1
+          cargo update -p zeroize --precise 1.8.1
+          cargo update -p zeroize_derive --precise 1.4.2
+
       - name: Rust checks
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --locked
 
       - name: Upload generated Cargo lockfile
         uses: actions/upload-artifact@v4
