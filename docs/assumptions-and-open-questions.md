@@ -14,7 +14,7 @@
 10. Fee revenue and ANSEM are distinct integer units. The simulator requires an explicit conversion ratio and does not infer market prices.
 11. Program IDs are deterministic localnet-only identities generated from public repository labels into ignored `target/deploy` output. They are not secret and must never be used for a production deployment.
 12. The program remains upgradeable under the deploying local wallet in Phase 0; production upgrade governance is unresolved.
-13. The reproducible verification environment is Ubuntu 24.04, Rust 1.83.0, Solana/Agave CLI 2.1.0, Anchor CLI 0.31.1, Node.js 22, and pnpm 10.30.3.
+13. The reproducible verification environment is Ubuntu 24.04, Rust 1.85.1, Solana/Agave CLI 2.1.0, Anchor CLI 0.31.1, Node.js 22, and pnpm 10.30.3.
 
 ## Precision and rounding rules
 
@@ -33,7 +33,7 @@
 | --- | --- | --- |
 | Anchor CLI / `anchor-lang` / `anchor-spl` | 0.31.1 | Workspace, programs, token CPI, IDLs. |
 | Solana/Agave CLI | 2.1.0 | Local validator, program build/deploy. |
-| Rust/Cargo | 1.83.0 | Anchor CLI compilation, formatting, and host checks. |
+| Rust/Cargo | 1.85.1 | Anchor CLI compilation, formatting, and host checks. |
 | Node.js | 22+ | TypeScript workspace and SDK generation. |
 | pnpm | 10.30.3 | Monorepo package manager. |
 | TypeScript | 5.8.3 | Strict SDK/simulator/application typing. |

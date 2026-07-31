@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main, phase-0-foundation]
+    branches: [main]
 
 permissions:
   contents: read
@@ -16,7 +16,7 @@ jobs:
     env:
       SOLANA_VERSION: v2.1.0
       ANCHOR_VERSION: 0.31.1
-      RUST_VERSION: 1.83.0
+      RUST_VERSION: 1.85.1
       SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install/active_release
 
     steps:

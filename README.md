@@ -6,7 +6,7 @@ Phase 0 scaffolding for the Rodeo Solana risk-to-earn protocol. Economic behavio
 
 - Node.js 22+
 - pnpm 10.30.3
-- Rust 1.83.0
+- Rust 1.85.1
 - Solana/Agave CLI 2.1.0
 - Anchor CLI 0.31.1
 
