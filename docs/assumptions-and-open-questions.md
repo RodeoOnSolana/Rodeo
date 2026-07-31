@@ -15,8 +15,8 @@
 11. Program IDs are deterministic localnet-only identities generated from public repository labels into ignored `target/deploy` output. They are not secret and must never be used for a production deployment.
 12. The program remains upgradeable under the deploying local wallet in Phase 0; production upgrade governance is unresolved.
 13. The reproducible verification environment is Ubuntu 24.04, Rust 1.85.1, Solana/Agave CLI 2.1.0, Anchor CLI 0.31.1, Node.js 22, and pnpm 10.30.3.
-14. Agave 2.1.0's SBF platform tools use Rust/Cargo 1.79. The committed lockfile follows Anchor 0.31.1's release lock with `solana-program` 2.1.0, `blake3` 1.5.4, `constant_time_eq` 0.3.0, `borsh` 1.5.1, `proc-macro-crate` 3.1.0, `indexmap` 2.6.0, `bytemuck_derive` 1.8.0, and `zeroize` 1.8.1 instead of later transitive releases that require Edition 2024.
-15. `anchor-spl` default features are disabled; Phase 0 enables only classic SPL Token support and does not resolve unused Token-2022 or ZK dependencies.
+14. Agave 2.1.0's SBF platform tools use Rust/Cargo 1.79. The committed lockfile follows Anchor 0.31.1's release lock with `solana-program` and `solana-zk-sdk` 2.1.0, `blake3` 1.5.4, `constant_time_eq` 0.3.0, `borsh` 1.5.1, `proc-macro-crate` 3.1.0, `indexmap` 2.6.0, `bytemuck_derive` 1.8.0, and `zeroize` 1.8.1 instead of later transitive releases that require Edition 2024.
+15. `anchor-spl` enables classic token plus `token_2022` module support because Anchor 0.31.1 account-constraint macros reference its token interface during expansion; Token-2022 extensions are not enabled or used by Phase 0.
 
 ## Precision and rounding rules
 

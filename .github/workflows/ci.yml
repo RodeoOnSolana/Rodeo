@@ -103,6 +103,7 @@ jobs:
       - name: Pin SBF-compatible transitive crates
         run: |
           cargo update -p solana-program --precise 2.1.0
+          cargo update -p solana-zk-sdk --precise 2.1.0
           cargo update -p blake3 --precise 1.5.4
           cargo update -p constant_time_eq --precise 0.3.0
           cargo update -p borsh@1.8.0 --precise 1.5.1
