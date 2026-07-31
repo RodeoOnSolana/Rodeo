@@ -107,6 +107,7 @@ jobs:
           cargo update -p borsh@1.8.0 --precise 1.5.7
           cargo update -p proc-macro-crate@3.5.0 --precise 3.3.0
           cargo update -p indexmap --precise 2.11.4
+          cargo update -p solana-zk-sdk@2.3.13 --precise 2.2.1
           cargo update -p bytemuck_derive --precise 1.8.1
           cargo update -p zeroize --precise 1.8.1
           cargo update -p zeroize_derive --precise 1.4.2
