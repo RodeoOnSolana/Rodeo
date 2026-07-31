@@ -75,8 +75,15 @@ pub mod rodeo_core {
     pub fn mock_reveal(ctx: Context<MockReveal>, secret: [u8; 32]) -> Result<()> {
         let pending = &mut ctx.accounts.pending_randomness;
         require!(!pending.settled, RodeoError::AlreadySettled);
-        require_keys_eq!(pending.owner, ctx.accounts.owner.key(), RodeoError::InvalidOwner);
-        require!(hashv(&[&secret]).to_bytes() == pending.commitment, RodeoError::InvalidReveal);
+        require_keys_eq!(
+            pending.owner,
+            ctx.accounts.owner.key(),
+            RodeoError::InvalidOwner
+        );
+        require!(
+            hashv(&[&secret]).to_bytes() == pending.commitment,
+            RodeoError::InvalidReveal
+        );
 
         let position = &mut ctx.accounts.position;
         require!(
@@ -84,7 +91,8 @@ pub mod rodeo_core {
             RodeoError::AlreadySettled
         );
         let position_key = position.key();
-        let randomness = hashv(&[b"rodeo-local-mock-v1", &secret, position_key.as_ref()]).to_bytes();
+        let randomness =
+            hashv(&[b"rodeo-local-mock-v1", &secret, position_key.as_ref()]).to_bytes();
 
         pending.settled = true;
         position.mock_randomness = randomness;
