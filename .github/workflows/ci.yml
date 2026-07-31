@@ -37,8 +37,9 @@ jobs:
           rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
           rustup override set "$RUST_VERSION"
 
-      - name: Cache Rust and Solana toolchains
-        uses: actions/cache@v4
+      - name: Restore Rust, Anchor, and Solana toolchains
+        id: toolchain-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/bin/anchor
@@ -62,6 +63,17 @@ jobs:
           if ! command -v anchor >/dev/null || [ "$(anchor --version)" != "anchor-cli $ANCHOR_VERSION" ]; then
             cargo install anchor-cli --version "$ANCHOR_VERSION" --locked
           fi
+
+      - name: Save Rust, Anchor, and Solana toolchains
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/bin/anchor
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.local/share/solana/install
+          key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
 
       - name: Report toolchain
         run: |

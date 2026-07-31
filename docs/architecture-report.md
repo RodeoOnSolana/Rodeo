@@ -62,7 +62,7 @@ The reducer describes accounting mechanics for testing hypotheses. Event rates, 
 
 ## Reproducible verification
 
-The pinned environment uses Ubuntu 24.04, Rust 1.85.1, Solana/Agave CLI 2.1.0, Anchor CLI 0.31.1, Node.js 22, pnpm 10.30.3, and the committed pnpm lockfile. `environment.yaml` describes interactive setup, while `.github/workflows/ci.yml` runs TypeScript build/tests, Rust formatting/checks, Anchor build, IDL-backed SDK generation, local validator deployment/integration tests, and generated-client drift detection.
+The pinned environment uses Ubuntu 24.04, Rust 1.85.1, Solana/Agave CLI 2.1.0, Anchor CLI 0.31.1, Node.js 22, pnpm 10.30.3, and committed pnpm/Cargo lockfiles. Cargo resolves transitive crates against the Agave SBF platform tools' Rust 1.79 compatibility floor before freezing the graph. `environment.yaml` describes interactive setup, while `.github/workflows/ci.yml` runs TypeScript build/tests, Rust formatting/checks, Anchor build, IDL-backed SDK generation, local validator deployment/integration tests, and generated-client drift detection.
 
 Localnet program keypairs are deterministically derived from public labels by `scripts/prepare-localnet-program-keys.mjs`. They exist only under ignored `target/deploy`, make deployments reproducible, and are categorically unsuitable for any non-local deployment.
 
