@@ -58,7 +58,13 @@ The reducer describes accounting mechanics for testing hypotheses. Event rates, 
 
 ## SDK and IDLs
 
-`anchor build` creates JSON IDLs in `target/idl`. `pnpm sdk:generate` converts every IDL to a checked TypeScript constant and IDL type under `packages/sdk/src/generated`. Generation fails when no IDL exists rather than producing stale clients.
+`anchor build` creates JSON IDLs in `target/idl`. `pnpm sdk:generate` converts every IDL to a checked TypeScript constant and IDL type under `packages/sdk/src/generated`. Generation fails when no IDL exists rather than producing stale clients. `pnpm sdk:validate` verifies that all three IDs match across `Anchor.toml`, Rust `declare_id!` macros, actual IDLs, and generated clients.
+
+## Reproducible verification
+
+The pinned environment uses Ubuntu 24.04, Rust 1.83.0, Solana/Agave CLI 2.1.0, Anchor CLI 0.31.1, Node.js 22, pnpm 10.30.3, and the committed pnpm lockfile. `environment.yaml` describes interactive setup, while `.github/workflows/ci.yml` runs TypeScript build/tests, Rust formatting/checks, Anchor build, IDL-backed SDK generation, local validator deployment/integration tests, and generated-client drift detection.
+
+Localnet program keypairs are deterministically derived from public labels by `scripts/prepare-localnet-program-keys.mjs`. They exist only under ignored `target/deploy`, make deployments reproducible, and are categorically unsuitable for any non-local deployment.
 
 ## Verification gates before Phase 1
 

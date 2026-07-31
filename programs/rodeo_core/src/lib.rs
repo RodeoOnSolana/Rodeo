@@ -1,7 +1,7 @@
 use anchor_lang::{prelude::*, solana_program::hash::hashv};
 use anchor_spl::token::{self, Mint, Token, TokenAccount, TransferChecked};
 
-declare_id!("uVDSyoysQD1fJdHisuhg9WUtCEBuBhVYAga4bqaNn6w");
+declare_id!("EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z");
 
 #[program]
 pub mod rodeo_core {

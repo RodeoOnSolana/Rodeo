@@ -1,4 +1,5 @@
 .devin/
+.anchor/
 node_modules/
 target/
 dist/

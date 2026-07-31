@@ -6,17 +6,22 @@ Phase 0 scaffolding for the Rodeo Solana risk-to-earn protocol. Economic behavio
 
 - Node.js 22+
 - pnpm 10.30.3
-- Rust and Cargo
-- Solana CLI
+- Rust 1.83.0
+- Solana/Agave CLI 2.1.0
 - Anchor CLI 0.31.1
 
 ## Commands
 
 ```sh
-pnpm install
-pnpm test
+pnpm install --frozen-lockfile
+pnpm build
 pnpm typecheck
-anchor test
+pnpm test
+pnpm program-keys:localnet
+anchor build
+pnpm sdk:generate
+pnpm sdk:validate
+anchor test --skip-build
 ```
 
 For a persistent local validator, run `solana-test-validator`, then:
@@ -26,6 +31,6 @@ pnpm anchor:deploy:localnet
 pnpm sdk:generate
 ```
 
-The first local deployment synchronizes generated local program keypairs into the declared program IDs and rebuilds before deploying.
+Local program identities are deterministically generated under ignored `target/deploy` output. They are public test fixtures derived from repository labels and must never be reused outside local testing.
 
 See `docs/architecture-report.md` and `docs/assumptions-and-open-questions.md` before adding game logic.

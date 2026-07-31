@@ -1,0 +1,133 @@
+name: Phase 0 verification
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, phase-0-foundation]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOLANA_VERSION: v2.1.0
+      ANCHOR_VERSION: 0.31.1
+      RUST_VERSION: 1.83.0
+      SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install/active_release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+          rustup override set "$RUST_VERSION"
+
+      - name: Cache Rust and Solana toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/anchor
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.local/share/solana/install
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-anchor-${{ env.ANCHOR_VERSION }}-solana-${{ env.SOLANA_VERSION }}
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Install Agave CLI
+        run: |
+          if [ ! -x "$SOLANA_INSTALL_DIR/bin/solana" ]; then
+            sh -c "$(curl -sSfL https://release.anza.xyz/$SOLANA_VERSION/install)"
+          fi
+          echo "$SOLANA_INSTALL_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor CLI
+        run: |
+          if ! command -v anchor >/dev/null || [ "$(anchor --version)" != "anchor-cli $ANCHOR_VERSION" ]; then
+            cargo install anchor-cli --version "$ANCHOR_VERSION" --locked
+          fi
+
+      - name: Report toolchain
+        run: |
+          rustc --version
+          cargo --version
+          solana --version
+          solana-test-validator --version
+          anchor --version
+          node --version
+          pnpm --version
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript build
+        run: pnpm build
+
+      - name: TypeScript typecheck
+        run: pnpm typecheck
+
+      - name: TypeScript tests
+        run: pnpm test
+
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Rust checks
+        run: cargo check --workspace --all-targets
+
+      - name: Upload generated Cargo lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-0-cargo-lock
+          path: Cargo.lock
+
+      - name: Prepare localnet identities
+        run: pnpm program-keys:localnet
+
+      - name: Anchor build
+        run: anchor build
+
+      - name: Generate SDK from IDLs
+        run: pnpm sdk:generate
+
+      - name: Validate SDK and program IDs
+        run: |
+          pnpm sdk:validate
+          pnpm build
+
+      - name: Upload generated verification artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-0-generated-artifacts
+          path: |
+            Cargo.lock
+            target/idl/*.json
+            packages/sdk/src/generated/*.ts
+
+      - name: Configure local validator wallet
+        run: |
+          mkdir -p "$HOME/.config/solana"
+          solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
+          solana config set --url localhost
+
+      - name: Anchor localnet integration tests
+        run: anchor test --skip-build
+
+      - name: Confirm generated SDK is committed
+        run: git diff --exit-code -- packages/sdk/src/generated

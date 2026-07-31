@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-declare_id!("4FT2cokb4yL9kdeiCN1zkG78zNZUYzaxrxdvWGWTcXY6");
+declare_id!("CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD");
 
 #[program]
 pub mod rodeo_router {

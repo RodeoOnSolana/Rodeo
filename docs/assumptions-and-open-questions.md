@@ -12,8 +12,9 @@
 8. Every settlement has a unique identifier or monotonic nonce and cannot be applied twice.
 9. Phase 0 role labels (`Cowboy`, `Bull`, `Unassigned`) define state shape, not assignment odds or economics.
 10. Fee revenue and ANSEM are distinct integer units. The simulator requires an explicit conversion ratio and does not infer market prices.
-11. Program IDs are local bootstrap IDs. `anchor keys sync` replaces them with locally generated deployment identities on first deployment.
+11. Program IDs are deterministic localnet-only identities generated from public repository labels into ignored `target/deploy` output. They are not secret and must never be used for a production deployment.
 12. The program remains upgradeable under the deploying local wallet in Phase 0; production upgrade governance is unresolved.
+13. The reproducible verification environment is Ubuntu 24.04, Rust 1.83.0, Solana/Agave CLI 2.1.0, Anchor CLI 0.31.1, Node.js 22, and pnpm 10.30.3.
 
 ## Precision and rounding rules
 
@@ -31,14 +32,15 @@
 | Dependency | Version | Purpose |
 | --- | --- | --- |
 | Anchor CLI / `anchor-lang` / `anchor-spl` | 0.31.1 | Workspace, programs, token CPI, IDLs. |
-| Solana CLI | compatible with Anchor 0.31.1 | Local validator, program build/deploy. |
-| Rust/Cargo | compatible with the selected Solana/Anchor release | BPF/SBF and host builds. |
+| Solana/Agave CLI | 2.1.0 | Local validator, program build/deploy. |
+| Rust/Cargo | 1.83.0 | Anchor CLI compilation, formatting, and host checks. |
 | Node.js | 22+ | TypeScript workspace and SDK generation. |
 | pnpm | 10.30.3 | Monorepo package manager. |
 | TypeScript | 5.8.3 | Strict SDK/simulator/application typing. |
 | Vitest | 3.2.4 | TypeScript tests. |
 | fast-check | 4.2.0 | Property-test generation. |
 | `@coral-xyz/anchor` | 0.31.1 | Generated IDL types and local integration tests. |
+| `@solana/spl-token` | 0.4.13 | Localnet mint, token-account, and principal-vault integration setup. |
 
 No swap venue, price oracle, production randomness provider, database, queue, web framework, or indexing service has been selected.
 

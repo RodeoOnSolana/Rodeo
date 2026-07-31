@@ -4,9 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@coral-xyz/anchor": "0.31.1"
+    "@coral-xyz/anchor": "0.31.1",
+    "@rodeo/sdk": "workspace:*",
+    "@solana/spl-token": "0.4.13"
   }
 }

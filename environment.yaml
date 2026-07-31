@@ -1,0 +1,26 @@
+initialize:
+  - run: |
+      set -euo pipefail
+      rustup toolchain install 1.83.0 --profile minimal --component clippy,rustfmt
+      rustup default 1.83.0
+      sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.0/install)"
+      export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+      cargo install anchor-cli --version 0.31.1 --locked
+      corepack enable
+      corepack prepare pnpm@10.30.3 --activate
+maintenance:
+  - run: |
+      set -euo pipefail
+      export PATH="$HOME/.local/share/solana/install/active_release/bin:$HOME/.cargo/bin:$PATH"
+      pnpm install --frozen-lockfile
+      pnpm program-keys:localnet
+knowledge:
+  - name: verify
+    contents: |
+      Run `pnpm verify` for TypeScript and Rust host checks. Run `anchor build`, `pnpm sdk:generate`, `pnpm sdk:validate`, and `anchor test --skip-build` for the complete localnet verification sequence.
+  - name: toolchain
+    contents: |
+      Rust 1.83.0, Agave CLI 2.1.0, Anchor CLI 0.31.1, Node.js 22, and pnpm 10.30.3 are pinned for Phase 0.
+  - name: localnet
+    contents: |
+      Program keypairs are deterministic localnet-only files generated under ignored `target/deploy` by `pnpm program-keys:localnet`. Never use these identities outside local testing.
