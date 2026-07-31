@@ -15,7 +15,7 @@
 11. Program IDs are deterministic localnet-only identities generated from public repository labels into ignored `target/deploy` output. They are not secret and must never be used for a production deployment.
 12. The program remains upgradeable under the deploying local wallet in Phase 0; production upgrade governance is unresolved.
 13. The reproducible verification environment is Ubuntu 24.04, Rust 1.85.1, Solana/Agave CLI 2.1.0, Anchor CLI 0.31.1, Node.js 22, and pnpm 10.30.3.
-14. Agave 2.1.0's SBF platform tools use Rust/Cargo 1.79. The committed lockfile therefore pins `blake3` 1.8.2, `constant_time_eq` 0.3.1, `indexmap` 2.11.4, `bytemuck_derive` 1.8.1, `zeroize` 1.8.1, and `zeroize_derive` 1.4.2 instead of their Edition 2024 releases.
+14. Agave 2.1.0's SBF platform tools use Rust/Cargo 1.79. The committed lockfile therefore pins `blake3` 1.8.2, `constant_time_eq` 0.3.1, `borsh` 1.5.7, `proc-macro-crate` 3.3.0, `indexmap` 2.11.4, `bytemuck_derive` 1.8.1, `zeroize` 1.8.1, and `zeroize_derive` 1.4.2 instead of transitive releases that require Edition 2024.
 
 ## Precision and rounding rules
 

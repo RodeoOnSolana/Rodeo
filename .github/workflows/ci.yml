@@ -104,6 +104,8 @@ jobs:
         run: |
           cargo update -p blake3 --precise 1.8.2
           cargo update -p constant_time_eq --precise 0.3.1
+          cargo update -p borsh@1.8.0 --precise 1.5.7
+          cargo update -p proc-macro-crate --precise 3.3.0
           cargo update -p indexmap --precise 2.11.4
           cargo update -p bytemuck_derive --precise 1.8.1
           cargo update -p zeroize --precise 1.8.1
