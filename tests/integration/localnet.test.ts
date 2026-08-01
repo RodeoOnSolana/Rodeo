@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { AnchorProvider, BN, Program, setProvider, web3, workspace } from "@coral-xyz/anchor";
+import { AnchorProvider, BN, Idl, Program, setProvider, web3 } from "@coral-xyz/anchor";
 import {
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccount,
@@ -11,7 +12,13 @@ import {
 import { beforeAll, describe, expect, it } from "vitest";
 
 const localnetAvailable = Boolean(process.env.ANCHOR_PROVIDER_URL && process.env.ANCHOR_WALLET);
-process.env.ANCHOR_WORKSPACE_ROOT ??= resolve(import.meta.dirname, "../..");
+const root = resolve(import.meta.dirname, "../..");
+
+function loadIdl(name: string): Idl {
+  const path = resolve(root, "target/idl", `${name}.json`);
+  return JSON.parse(readFileSync(path, "utf8")) as Idl;
+}
+
 const expectedProgramIds = {
   RodeoCore: "EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z",
   RodeoMarket: "9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n",
@@ -21,23 +28,40 @@ const expectedProgramIds = {
 describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   let provider: AnchorProvider;
   let payer: web3.Keypair;
+  const programs = {} as Record<keyof typeof expectedProgramIds, Program>;
 
   beforeAll(() => {
     provider = AnchorProvider.env();
     setProvider(provider);
     payer = (provider.wallet as unknown as { payer: web3.Keypair }).payer;
+
+    programs.RodeoCore = new Program(
+      loadIdl("rodeo_core"),
+      new web3.PublicKey(expectedProgramIds.RodeoCore),
+      provider,
+    );
+    programs.RodeoMarket = new Program(
+      loadIdl("rodeo_market"),
+      new web3.PublicKey(expectedProgramIds.RodeoMarket),
+      provider,
+    );
+    programs.RodeoRouter = new Program(
+      loadIdl("rodeo_router"),
+      new web3.PublicKey(expectedProgramIds.RodeoRouter),
+      provider,
+    );
   });
 
   it("deploys all Phase 0 program boundaries under the pinned IDs", async () => {
     for (const [name, expectedId] of Object.entries(expectedProgramIds)) {
-      const program = workspace[name] as Program;
+      const program = programs[name as keyof typeof expectedProgramIds];
       expect(program.programId.toBase58()).toBe(expectedId);
       expect(await provider.connection.getAccountInfo(program.programId)).not.toBeNull();
     }
   }, 30_000);
 
   it("stakes, enforces the commitment, reveals once, and rejects duplicate reveal", async () => {
-    const program = workspace.RodeoCore as Program;
+    const program = programs.RodeoCore;
     const accounts = program.account as unknown as {
       position: { fetch(address: web3.PublicKey): Promise<any> };
       pendingRandomness: { fetch(address: web3.PublicKey): Promise<any> };
