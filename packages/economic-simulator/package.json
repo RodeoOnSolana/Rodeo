@@ -1,0 +1,21 @@
+{
+  "name": "@rodeo/economic-simulator",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": ".\/dist\/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@rodeo/protocol-definition": "workspace:*",
+    "@rodeo/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "fast-check": "4.2.0"
+  }
+}
