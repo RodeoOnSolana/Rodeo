@@ -59,6 +59,16 @@ describe("Phase 0 invariant scaffolding", () => {
     expect(simulator.state.rewardVaultAnsemAtomic).toBe(simulator.state.ansemLiabilityAtomic);
   });
 
+  it("preserves position identity across ownership transfers", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.apply({ type: "stake", settlementId: "stake", positionId: "p", owner: "alice", role: "cowboy", principalAtomic: 10n });
+    simulator.apply({ type: "transferPosition", settlementId: "transfer-1", positionId: "p", newOwner: "bob" });
+    simulator.apply({ type: "transferPosition", settlementId: "transfer-2", positionId: "p", newOwner: "carol" });
+    expect(simulator.state.positions.has("p")).toBe(true);
+    expect(simulator.state.positions.get("p")?.owner).toBe("carol");
+    expect(simulator.state.positions.size).toBe(1);
+  });
+
   it("moves a position between exactly one owner at a time", () => {
     fc.assert(fc.property(
       fc.array(fc.string({ minLength: 1, maxLength: 32 }), { minLength: 1, maxLength: 30 }),

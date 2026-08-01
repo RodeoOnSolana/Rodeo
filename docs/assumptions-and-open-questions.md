@@ -6,7 +6,9 @@
 2. The requested rolling 10-day runway is exactly 864,000 seconds, or 40 complete six-hour epochs.
 3. All token quantities are non-negative atomic integers. Token decimals are deliberately unknown.
 4. On-chain counters use `u64` unless accumulation may require `u128`; overflow must fail rather than wrap.
-5. A position has exactly one owner pubkey at a time. Shared or fractional position ownership is out of scope.
+5. A position has exactly one owner pubkey at a time. Shared or fractional position ownership is out of scope. `Position.owner` is a mutable field, not part of the PDA, so ownership can move (marketplace sale, gift, mint theft) without the account changing address; `transfer_position` is the sole generic primitive for that change and requires the current owner's signature.
+5a. `position_id` is caller-chosen and, combined with `global_config`, is the Position PDA's entire, immutable identity. It no longer includes the owner, so the ID space is shared across all owners under one `GlobalConfig`; a colliding ID simply fails account creation (`init` cannot reuse an address) rather than causing any state corruption.
+5b. A position's randomness actions (currently only `Reveal`) are individually addressed PDAs keyed by `[position, action_type, action_nonce]`, with `action_nonce` drawn from a per-position monotonic counter. `ActionType` is a stable, append-only integer enum; existing discriminants must never be renumbered or removed. A position cannot be transferred while it has an unresolved randomness action.
 6. Player RODEO principal is reconciled only against the dedicated principal vault, never a treasury balance.
 7. ANSEM claims are valid only when aggregate liabilities do not exceed the reward vault balance.
 8. Every settlement has a unique identifier or monotonic nonce and cannot be applied twice.
@@ -61,8 +63,9 @@ No swap venue, price oracle, production randomness provider, database, queue, we
 - Can one wallet hold multiple positions, merge/split them, or partially unstake?
 - When does a stake become active, and how are epoch boundaries handled?
 - What are the complete position states and legal transitions?
-- Are positions transferable directly, represented by NFTs, or transferable only through the market program?
-- What happens to accrued rewards and pending randomness on transfer?
+- Are positions transferable directly, represented by NFTs, or transferable only through the market program? Phase 0 provides one generic, owner-signed `transfer_position` primitive; which higher-level flows (direct transfer, NFT wrapping, market-only) are allowed to call it is unresolved.
+- What happens to accrued rewards and pending randomness on transfer? Phase 0 currently blocks any transfer outright while a randomness action is outstanding; whether a future action type should instead be transferable with the pending action following the new owner is unresolved.
+- What other actions besides reveal should require the same commit/settle addressing (`ActionType::Unstake` is reserved as a discriminant but has no instruction or economics yet)?
 
 ### Emissions and runway
 

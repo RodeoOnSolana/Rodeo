@@ -19,4 +19,13 @@ export type MockRandomnessRevealedEvent = ProtocolEventEnvelope<"mockRandomnessR
   readonly settlementNonce: bigint;
 }>;
 
-export type RodeoProtocolEvent = PositionStakedEvent | MockRandomnessRevealedEvent;
+export type PositionOwnerChangedEvent = ProtocolEventEnvelope<"positionOwnerChanged", {
+  readonly position: string;
+  readonly previousOwner: string;
+  readonly newOwner: string;
+}>;
+
+export type RodeoProtocolEvent =
+  | PositionStakedEvent
+  | MockRandomnessRevealedEvent
+  | PositionOwnerChangedEvent;

@@ -24,24 +24,26 @@ This report gates further game logic. Phase 0 is infrastructure, state-layout, s
 
 `GlobalConfig` is a PDA with immutable mint and vault addresses and no administrator field. Economic constants are therefore not mutable through it. Its RODEO principal vault and ANSEM reward vault are separate token accounts. Both are program-controlled, but their balances and liabilities are modeled independently. No treasury account can sign for or withdraw player principal in Phase 0.
 
-A `Position` is a PDA derived from owner and caller-selected position ID. Stake transfers RODEO from the owner's token account into only the principal vault. Position ownership is represented by one pubkey. No unstake, treasury withdrawal, role assignment, emission, theft, burn, reroll, claim, or market settlement instruction exists yet.
+A `Position` is a PDA derived from `[b"position", global_config, position_id]`: its address depends only on the global config and a caller-chosen position ID, never on the current owner. `Position.owner` is an ordinary mutable field, changed only through `transfer_position`, so a marketplace sale, gift, or mint-theft resolution can move ownership without the Position account ever changing address, without a close/reopen, and without disturbing anything keyed by that address (listings, indexer state, pending randomness). `transfer_position` requires the current owner's signature and rejects the change while the position has a pending randomness action, so authority and in-flight randomness can never be transferred out from under a settlement. The previous owner has no further authority over the position once ownership changes; `has_one = owner` re-checks the signer against the account's current owner field on every owner-gated instruction. Stake transfers RODEO from the owner's token account into only the principal vault. No unstake, treasury withdrawal, role assignment, emission, theft, burn, reroll, claim, or market settlement instruction exists yet; `transfer_position` is the one generic ownership primitive those flows are expected to call.
 
 ## Initial account definitions
 
 - `GlobalConfig`: schema version, token mints, separate principal/reward vaults, PDA bumps.
 - `RewardState`: epoch marker, fee revenue, emissions, claims, and aggregate ANSEM liability counters.
-- `Position`: one owner, principal, unresolved role, lifecycle status, epoch marker, settlement nonce, and local mock output.
+- `Position`: mutable owner, immutable position ID, principal, unresolved role, lifecycle status, epoch marker, settlement nonce, local mock output, and pending-action lock (active flag, action type, action nonce, next action nonce).
 - `RoleStatistics`: Cowboy/Bull population and principal aggregates per epoch.
 - `BullAccumulator`: integer weight, scaled reward-per-weight, and explicit division remainder storage.
-- `PendingRandomness`: owner/position-bound commitment, commit slot, settlement flag, and PDA bump.
+- `PendingRandomness`: position/action-bound commitment, commit slot, settlement flag, and PDA bump.
 
 Only `GlobalConfig`, `Position`, and `PendingRandomness` are initialized by Phase 0 instructions. The other definitions intentionally have no production transitions until the specification defines them.
 
-## Local mock randomness
+## Local mock randomness and action addressing
 
-`stake_and_commit` escrows principal and records `SHA-256(secret)` supplied as a commitment. `mock_reveal` checks the commitment and derives a deterministic local output from a domain separator, secret, and position pubkey. It increments a settlement nonce and marks both accounts so a second reveal fails.
+`PendingRandomness` is a PDA derived from `[b"randomness", position, action_type, action_nonce]`. `action_type` is a stable, append-only integer enum (`ActionType`: `Reveal = 0`, `Unstake = 1`) identifying what kind of randomness action the request represents; `action_nonce` is drawn from a per-position monotonic counter (`Position.next_action_nonce`) so no two action instances, even of the same type, ever collide on the same address. Because the settling instruction re-derives this PDA from the position account, a fixed expected action type, and the position's own record of which nonce is currently outstanding (`Position.pending_action_nonce`), a randomness request can only ever settle the exact position, action type, and nonce it was opened for — passing any other position, type, or nonce fails PDA/account validation before the instruction body runs. `Position.pending_action_active` is set when a request opens and cleared only when it settles; `transfer_position` is rejected while it is set, so a position can only change hands once its outstanding randomness action is resolved through the explicit reveal path (or, in the future, an equivalent explicit resolution for other action types).
 
-This is not production randomness. It has no oracle, validator entropy, delayed reveal policy, expiry, cancellation, slashing, anti-withholding protection, or economic outcome mapping. It must not be deployed beyond local testing.
+`stake_and_commit` escrows principal and opens a `Reveal` action at nonce zero, recording `SHA-256(secret)` as the commitment. `mock_reveal` checks the commitment and derives a deterministic local output from a domain separator, secret, and position pubkey. It increments the position's settlement nonce, clears the pending-action lock, and marks the request settled so a second reveal fails.
+
+This is not production randomness. It has no oracle, validator entropy, delayed reveal policy, expiry, cancellation, slashing, anti-withholding protection, or economic outcome mapping. It must not be deployed beyond local testing. The `Unstake` action type exists only to reserve a stable discriminant for a future randomness-gated action; Phase 0 implements no unstake instruction or economics.
 
 ## Simulator
 
