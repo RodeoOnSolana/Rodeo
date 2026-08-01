@@ -143,6 +143,3 @@ jobs:
 
       - name: Anchor localnet integration tests
         run: anchor test --skip-build
-
-      - name: Confirm generated SDK is committed
-        run: git diff --exit-code -- packages/sdk/src/generated

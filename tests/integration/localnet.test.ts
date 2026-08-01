@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { resolve } from "node:path";
 import { AnchorProvider, BN, Program, setProvider, web3, workspace } from "@coral-xyz/anchor";
 import {
   TOKEN_PROGRAM_ID,
@@ -10,6 +11,7 @@ import {
 import { beforeAll, describe, expect, it } from "vitest";
 
 const localnetAvailable = Boolean(process.env.ANCHOR_PROVIDER_URL && process.env.ANCHOR_WALLET);
+process.env.ANCHOR_WORKSPACE_ROOT ??= resolve(import.meta.dirname, "../..");
 const expectedProgramIds = {
   RodeoCore: "EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z",
   RodeoMarket: "9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n",
