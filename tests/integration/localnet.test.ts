@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { AnchorProvider, BN, Idl, Program, setProvider, web3 } from "@coral-xyz/anchor";
+import type { Idl } from "@coral-xyz/anchor";
+import { AnchorProvider, BN, Program, setProvider, web3 } from "@coral-xyz/anchor";
 import {
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccount,
@@ -37,17 +38,14 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
 
     programs.RodeoCore = new Program(
       loadIdl("rodeo_core"),
-      new web3.PublicKey(expectedProgramIds.RodeoCore),
       provider,
     );
     programs.RodeoMarket = new Program(
       loadIdl("rodeo_market"),
-      new web3.PublicKey(expectedProgramIds.RodeoMarket),
       provider,
     );
     programs.RodeoRouter = new Program(
       loadIdl("rodeo_router"),
-      new web3.PublicKey(expectedProgramIds.RodeoRouter),
       provider,
     );
   });
