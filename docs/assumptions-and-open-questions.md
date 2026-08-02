@@ -1,6 +1,10 @@
 # Phase 0 assumptions, dependencies, and open questions
 
-## Explicit assumptions
+## Status
+
+This file has been superseded by the Rodeo Protocol Specification v1. All items below are now either resolved by the approved protocol decisions or explicitly marked `BLOCKED: OWNER DECISION REQUIRED` in the v1 sub-documents. The v1 documents (`docs/protocol-v1.md` and the files it references) are the sole source of truth for implementation.
+
+## Explicit assumptions (retained from Phase 0)
 
 1. The requested six-hour epoch is exactly 21,600 seconds.
 2. The requested rolling 10-day runway is exactly 864,000 seconds, or 40 complete six-hour epochs.
@@ -8,19 +12,19 @@
 4. On-chain counters use `u64` unless accumulation may require `u128`; overflow must fail rather than wrap.
 5. A position has exactly one owner pubkey at a time. Shared or fractional position ownership is out of scope. `Position.owner` is a mutable field, not part of the PDA, so ownership can move (marketplace sale, gift, mint theft) without the account changing address; `transfer_position` is the sole generic primitive for that change and requires the current owner's signature.
 5a. `position_id` is caller-chosen and, combined with `global_config`, is the Position PDA's entire, immutable identity. It no longer includes the owner, so the ID space is shared across all owners under one `GlobalConfig`; a colliding ID simply fails account creation (`init` cannot reuse an address) rather than causing any state corruption.
-5b. A position's randomness actions (currently only `Reveal`) are individually addressed PDAs keyed by `[position, action_type, action_nonce]`, with `action_nonce` drawn from a per-position monotonic counter. `ActionType` is a stable, append-only integer enum; existing discriminants must never be renumbered or removed. A position cannot be transferred while it has an unresolved randomness action.
+5b. A position's randomness actions (currently `Reveal` and the reserved `Unstake`) are individually addressed PDAs keyed by `[position, action_type, action_nonce]`, with `action_nonce` drawn from a per-position monotonic counter. `ActionType` is a stable, append-only integer enum; existing discriminants must never be renumbered or removed. A position cannot be transferred while it has an unresolved randomness action.
 6. Player RODEO principal is reconciled only against the dedicated principal vault, never a treasury balance.
 7. ANSEM claims are valid only when aggregate liabilities do not exceed the reward vault balance.
 8. Every settlement has a unique identifier or monotonic nonce and cannot be applied twice.
 9. Phase 0 role labels (`Cowboy`, `Bull`, `Unassigned`) define state shape, not assignment odds or economics.
 10. Fee revenue and ANSEM are distinct integer units. The simulator requires an explicit conversion ratio and does not infer market prices.
 11. Program IDs are deterministic localnet-only identities generated from public repository labels into ignored `target/deploy` output. They are not secret and must never be used for a production deployment.
-12. The program remains upgradeable under the deploying local wallet in Phase 0; production upgrade governance is unresolved.
+12. Production upgrade governance is a Protocol v1 concern; see [treasury-and-governance.md](./treasury-and-governance.md).
 13. The reproducible verification environment is Ubuntu 24.04, Rust 1.85.1, Solana/Agave CLI 2.1.0, Anchor CLI 0.31.1, Node.js 22, and pnpm 10.30.3.
 14. Agave 2.1.0's SBF platform tools use Rust/Cargo 1.79. `Cargo.lock` is seeded directly from Anchor v0.31.1 commit `47284f8f0b9844c6b83234aa90f556bad00e12ed` and adapted only for Rodeo workspace roots, preserving the upstream SBF-compatible dependency graph.
 15. `anchor-spl` enables classic token plus `token_2022` module support because Anchor 0.31.1 account-constraint macros reference its token interface during expansion; Token-2022 extensions are not enabled or used by Phase 0. Exact direct constraints on `solana-program` and `solana-zk-sdk` force the mutually dependent Solana crate family to resolve atomically at 2.1.0.
 
-## Precision and rounding rules
+## Precision and rounding rules (retained)
 
 - No floating-point arithmetic is permitted in protocol definitions, the simulator, SDK amount handling, or programs.
 - Probability tables have an explicit integer denominator. A table is normalized only when every weight is non-negative and the exact sum equals the denominator.
@@ -28,10 +32,9 @@
 - Fee-funded ANSEM purchasing floors output: `revenue * ANSEM numerator / revenue denominator`.
 - Revenue consumed for a chosen ANSEM amount rounds up: `ceil(ANSEM * revenue denominator / ANSEM numerator)`. This prevents creating ANSEM for less than the configured conversion cost.
 - A runway's required amount is the exact sum of the next 40 supplied epoch targets. Coverage is conservative and counts only fully covered epochs.
-- `BullAccumulator.division_remainder_atomic` exists so future integer division remainders can be carried explicitly. Its scale and eventual distribution rule are unresolved.
 - Token display conversion, decimal parsing, and user-facing rounding are unresolved until token decimals are specified.
 
-## Dependencies
+## Dependencies (retained)
 
 | Dependency | Version | Purpose |
 | --- | --- | --- |
@@ -48,69 +51,84 @@
 
 No swap venue, price oracle, production randomness provider, database, queue, web framework, or indexing service has been selected.
 
-## Unresolved protocol questions
+## Resolved protocol questions
+
+All questions formerly listed here are now resolved by Protocol Specification v1. See the referenced sub-documents.
 
 ### Assets and units
 
-- What are the canonical RODEO and ANSEM mint addresses, token programs, and decimals?
-- Are Token-2022 extensions involved, and if so which extensions are accepted?
-- What maximum supply/balance bounds must account sizing and arithmetic support?
-- In what asset are marketplace prices and protocol fees denominated?
+- **Token mints and decimals:** unresolved; now `BLOCKED: OWNER DECISION REQUIRED` in [account-model.md](./account-model.md) and [economic-model.md](./economic-model.md).
+- **Maximum supply/balance bounds:** unresolved; now `BLOCKED: OWNER DECISION REQUIRED` in [account-model.md](./account-model.md).
+- **Marketplace price/fee denomination:** unresolved; now `BLOCKED: OWNER DECISION REQUIRED` in [marketplace-design.md](./marketplace-design.md).
 
 ### Roles, positions, and lifecycle
 
-- What determines Cowboy versus Bull assignment, and what is the exact probability denominator/table?
-- Can one wallet hold multiple positions, merge/split them, or partially unstake?
-- When does a stake become active, and how are epoch boundaries handled?
-- What are the complete position states and legal transitions?
-- Are positions transferable directly, represented by NFTs, or transferable only through the market program? Phase 0 provides one generic, owner-signed `transfer_position` primitive; which higher-level flows (direct transfer, NFT wrapping, market-only) are allowed to call it is unresolved.
-- What happens to accrued rewards and pending randomness on transfer? Phase 0 currently blocks any transfer outright while a randomness action is outstanding; whether a future action type should instead be transferable with the pending action following the new owner is unresolved.
-- What other actions besides reveal should require the same commit/settle addressing (`ActionType::Unstake` is reserved as a discriminant but has no instruction or economics yet)?
+- **Cowboy vs Bull assignment and exact probability table:** resolved in [probabilities-and-rarities.md](./probabilities-and-rarities.md).
+- **Multiple positions, merging/splitting, partial unstake:** resolved — multiple positions allowed per wallet; merging, splitting, and partial unstake are not supported in v1.
+- **Stake activation and epoch boundaries:** resolved in [economic-model.md](./economic-model.md) and [emissions-and-rewards.md](./emissions-and-rewards.md).
+- **Complete position states and transitions:** resolved in [state-machine.md](./state-machine.md).
+- **Transfer mechanics:** positions are transferable through program-controlled receipt asset flows (marketplace, gift, mint theft); generic `transfer_position` remains the primitive. See [marketplace-design.md](./marketplace-design.md).
+- **Pending randomness on transfer:** positions with a pending randomness action cannot be transferred. Whether any future action type should be transferable with the pending action following the new owner is `BLOCKED: OWNER DECISION REQUIRED` in [marketplace-design.md](./marketplace-design.md).
+- **Other action types:** `ActionType::Unstake = 1` is reserved; no other action types are defined in v1.
 
 ### Emissions and runway
 
-- What fee sources fund ANSEM and how are fees converted into ANSEM?
-- What is the exact epoch emission formula, cap, and behavior when funding is insufficient?
-- Does “10-day runway” refer to gross target emissions, net unclaimed liabilities, or another reserve test?
-- What actions occur when runway falls below 10 days?
-- Who closes epochs, what makes closure permissionless, and how are delayed/missed epochs caught up?
-- What is the exact Bull accumulator scale, weighting formula, and remainder policy?
+- **Fee sources and ANSEM conversion:** resolved in [treasury-and-governance.md](./treasury-and-governance.md) and [economic-model.md](./economic-model.md).
+- **Epoch emission formula:** resolved in [emissions-and-rewards.md](./emissions-and-rewards.md).
+- **10-day runway definition:** resolved — required amount is the sum of the next 40 epoch emissions; available is free ANSEM plus purchasable ANSEM from pending revenue.
+- **Runway below 10 days:** emissions continue as long as free ANSEM is positive; runway is a reporting/keeper signal, not an automatic cap.
+- **Epoch closure:** permissionless `close_epoch` instruction, keeper-assisted, catch-up by sequential closure.
+- **Bull accumulator scale:** unresolved; now `BLOCKED: OWNER DECISION REQUIRED` in [account-model.md](./account-model.md).
 
 ### Claims, unstaking, rerolls, burns, and thefts
 
-- What eligibility, cooldown, fee, probability, and rounding rules govern each action?
-- Which quantities are transferred versus burned, and from which vault/account?
-- Can theft alter principal, rewards, role, or all three?
-- What are action ordering rules when multiple instructions target the same position in one slot?
-- Which state transition increments the settlement nonce, and what defines settlement identity?
+- **Eligibility, cooldown, fee, probability, and rounding rules:** resolved in [economic-model.md](./economic-model.md), [probabilities-and-rarities.md](./probabilities-and-rarities.md), [state-machine.md](./state-machine.md), and [emissions-and-rewards.md](./emissions-and-rewards.md).
+- **Transfers versus burns and source vaults:** resolved in [state-machine.md](./state-machine.md) and [economic-model.md](./economic-model.md).
+- **Theft scope:** mint theft transfers the entire position (receipt, role, rank/tier, suit, principal). Unstake theft only diverts pending ANSEM to the Bull pool.
+- **Action ordering:** resolved in [state-machine.md](./state-machine.md).
+- **Settlement identity:** resolved — `(position, action_type, action_nonce)` plus unique transaction/settlement ID.
 
 ### Marketplace and revenue
 
-- What can be listed, who escrows it, and when does ownership move atomically?
-- What are listing, sale, royalty, referral, and cancellation fees?
-- Which revenue is protocol revenue, and which portion funds ANSEM?
-- Are private sales, bids, partial fills, and expirations supported?
-- Which checks prevent stale listings and double settlement?
+- **Listing, escrow, and atomic ownership transfer:** unresolved; now `BLOCKED: OWNER DECISION REQUIRED` in [marketplace-design.md](./marketplace-design.md).
+- **Fees:** marketplace fee is 5% of sale price; gift fee is 0%. Other fees are `BLOCKED: OWNER DECISION REQUIRED`.
+- **Protocol revenue definition:** resolved in [treasury-and-governance.md](./treasury-and-governance.md).
+- **Private sales, bids, partial fills, expirations:** not supported in v1; `BLOCKED: OWNER DECISION REQUIRED` for future versions.
+- **Stale listing and double settlement prevention:** `BLOCKED: OWNER DECISION REQUIRED` in [marketplace-design.md](./marketplace-design.md).
 
 ### Randomness and liveness
 
-- Which production randomness provider and trust model are required?
-- What binds randomness to a position/action/epoch, and what is the replay domain?
-- What are timeout, retry, cancellation, refund, and slashing rules?
-- How are oracle outages and callback failures handled without trapping principal?
-- Is commit/reveal retained as defense-in-depth or removed entirely?
+- **Production randomness provider:** unresolved; now `BLOCKED: OWNER DECISION REQUIRED` in [randomness-design.md](./randomness-design.md).
+- **Randomness binding and replay domain:** resolved in [randomness-design.md](./randomness-design.md).
+- **Timeout, retry, cancellation, refund, slashing:** resolved at the design level; exact timeout duration and recovery action are `BLOCKED: OWNER DECISION REQUIRED` in [randomness-design.md](./randomness-design.md).
+- **Oracle outage handling:** resolved — timeout recovery must not trap principal; exact recovery action is `BLOCKED: OWNER DECISION REQUIRED`.
+- **Commit/reveal:** retained as defense-in-depth; whether it is kept for production is `BLOCKED: OWNER DECISION REQUIRED`.
 
 ### Security and governance
 
-- Is the production deployment immutable or upgradeable, and under what governance/timelock?
-- Which non-economic emergency controls are allowed, and can they ever move principal?
-- How are vault authority, treasury authority, keeper permissions, and market authority separated?
-- What pause behavior preserves claims/unstaking while blocking risky operations?
-- What audit, formal verification, and deployment reproducibility requirements apply?
+- **Upgradeability and governance:** resolved in [treasury-and-governance.md](./treasury-and-governance.md).
+- **Emergency controls:** resolved — pause risky new actions; cannot withdraw principal; safe claims/exits preserved whenever possible.
+- **Authority separation:** resolved in [account-model.md](./account-model.md) and [treasury-and-governance.md](./treasury-and-governance.md).
+- **Pause behavior:** resolved — preserve safe claims and exits.
+- **Audit and formal verification:** deferred to Phase 5; recommended in [implementation-plan.md](./implementation-plan.md).
 
-### Off-chain architecture
+## Remaining BLOCKED decisions
 
-- Which events and account snapshots are canonical for the indexer?
-- What finality, reorg, idempotency, and backfill behavior is required?
-- Which keeper operations exist and what incentives/liveness assumptions apply?
-- What wallet, transaction version, RPC, observability, and data retention requirements apply?
+For the complete list of unresolved owner decisions, see the "Open questions (BLOCKED)" sections in:
+
+- [account-model.md](./account-model.md)
+- [economic-model.md](./economic-model.md)
+- [marketplace-design.md](./marketplace-design.md)
+- [randomness-design.md](./randomness-design.md)
+- [treasury-and-governance.md](./treasury-and-governance.md)
+- [suits-and-social-competition.md](./suits-and-social-competition.md)
+- [public-metrics-and-indexing.md](./public-metrics-and-indexing.md)
+- [implementation-plan.md](./implementation-plan.md)
+
+The most urgent Phase 2 blockers are:
+
+1. `MarketReceipt` asset type and PDA seeds.
+2. `ACCRUAL_WEIGHT_SCALE` and `REWARD_PER_WEIGHT_SCALE` values.
+3. RODEO and ANSEM token decimals.
+4. Wallet-level claim-cooldown account design.
+5. Production randomness provider and timeout recovery policy.

@@ -1,14 +1,45 @@
 export const EPOCH_DURATION_SECONDS = 6n * 60n * 60n;
 export const RUNWAY_WINDOW_SECONDS = 10n * 24n * 60n * 60n;
 export const RUNWAY_EPOCHS = RUNWAY_WINDOW_SECONDS / EPOCH_DURATION_SECONDS;
+export const POT_FILL_SECONDS = 12n * 60n * 60n;
+export const SUIT_EPOCH_DAYS = 7n;
+export const SUIT_EPOCHS = SUIT_EPOCH_DAYS * 24n * 60n * 60n / EPOCH_DURATION_SECONDS;
 
-export const UNRESOLVED_ECONOMIC_PARAMETERS = [
-  "RODEO token decimals",
-  "ANSEM token decimals",
-  "fee rates and fee destinations",
-  "ANSEM emission targets and revenue conversion",
-  "Cowboy and Bull assignment probabilities",
-  "claim, unstaking, reroll, burn, and theft rules",
-  "Bull accumulator precision",
-  "marketplace royalties and protocol revenue share",
-] as const;
+export const TOTAL_RODEO_SUPPLY_ATOMIC = 1_000_000_000n;
+export const STAKE_AMOUNT_ATOMIC = 100_000n;
+export const MIN_STAKE_SECONDS = 24n * 60n * 60n;
+
+export const BPS_DENOMINATOR = 10_000n;
+export const UNSTAKE_TAX_BPS = 500n;
+export const UNSTAKE_RETURN_BPS = 9_500n;
+export const CLAIM_OWNER_BPS = 8_000n;
+export const CLAIM_BULL_POOL_BPS = 2_000n;
+export const DESPERADO_CLAIM_OWNER_BPS = 9_800n;
+export const DESPERADO_CLAIM_BULL_POOL_BPS = 200n;
+export const MINT_THEFT_BPS = 500n;
+export const UNSTAKE_ANSEM_THEFT_BPS = 500n;
+export const MARKETPLACE_FEE_BPS = 500n;
+
+export const MIN_REVEALS_FOR_THEFT = 50n;
+export const MIN_BULLS_FOR_THEFT = 3n;
+
+export const EMISSION_COWBOY_BPS = 9_000n;
+export const EMISSION_SUITS_BPS = 1_000n;
+export const SUIT_EQUAL_SPLIT_BPS = 5_000n;
+export const SUIT_PROPORTIONAL_SPLIT_BPS = 5_000n;
+
+export const REVENUE_ANSEM_BPS = 7_000n;
+export const REVENUE_TEAM_BPS = 1_500n;
+export const REVENUE_BUYBACK_BPS = 1_000n;
+export const REVENUE_SECURITY_BPS = 500n;
+
+export const CLAIM_COOLDOWN_SECONDS = 60n * 60n;
+export const MAX_POSTS_PER_X_ACCOUNT_PER_SUIT_EPOCH = 3n;
+
+// Scaling factors for integer reward accounting. Exact final values are
+// BLOCKED: OWNER DECISION REQUIRED pending token-decimal and max-supply analysis.
+// The protocol uses these placeholders until the owner freezes them.
+export const ACCRUAL_WEIGHT_SCALE = 10_000n;
+export const REWARD_PER_WEIGHT_SCALE = 1_000_000n;
+
+export const PROBABILITY_DENOMINATOR = 10_000_000n;
