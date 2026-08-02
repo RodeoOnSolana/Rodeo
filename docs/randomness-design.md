@@ -43,14 +43,11 @@ The `Position.pending_action_active` lock remains `true` between commit and sett
 
 The settling instruction re-derives the `PendingRandomness` from the live `Position` fields, so the wrong position, action type, or nonce fails PDA validation.
 
-## No cancellation after commitment (except unstake)
+## No cancellation after commitment
 
-Neither the user nor an admin may cancel a randomness request because the result is unfavorable. Cancellation is permitted only in timeout recovery scenarios and for unstake requests:
+Neither the user nor an admin may cancel a randomness request because the result is unfavorable. Once an unstake action is committed, it may only settle from valid randomness or timeout-recover after the 30-minute timeout when no valid oracle value exists. If the oracle value is already available, timeout recovery must fail and permissionless settlement remains available.
 
-- **Unstake request cancellation**: Before the unstake randomness settles, the owner may cancel the unstake request. This closes the `PendingRandomness` account and clears `Position.pending_action_active`, leaving the position staked and Active. This preserves the owner's option value if market conditions change.
-- **Timeout recovery**: If the oracle does not respond within the timeout, a permissionless timeout-recovery instruction closes the pending action and returns the position to a safe state.
-
-Selective cancellation after seeing an unfavorable result is prevented by the commit/settle design: the owner cannot observe the oracle output before settlement.
+Timeout recovery is the only escape path for a stalled oracle. It must not be used to bypass an already-known outcome.
 
 ## Permissionless settlement
 
@@ -86,40 +83,41 @@ Phase 0 used `hashv([b"rodeo-local-mock-v1", &secret, position_key.as_ref()])` f
 
 ## Bull recipient selection (mint theft)
 
-Mint theft requires selecting a Bull recipient weighted by active `buck_power` without scanning every Bull account. The protocol uses the two-level weighted sortition tree defined in [account-model.md](./account-model.md):
+Mint theft requires selecting a Bull recipient weighted by active `buck_power` without scanning every Bull account. The eventual design must use a persistent registry with a Merkle-sum root and monotonically increasing version. The current two-level weighted sortition tree described in [account-model.md](./account-model.md) is a design proposal, not a finalized interface.
 
-- **Level 1** — a global sum tree indexed by owner aggregate `buck_power`.
-- **Level 2** — a per-owner sum tree indexed by that owner's Bull positions.
+Required properties for the final design:
 
-Selection algorithm:
+1. A Merkle-sum root hash and a monotonically increasing registry version.
+2. Immutable root/version snapshot stored in `PendingRandomness` at the time the randomness is requested.
+3. Exact unbiased victim-owner exclusion.
+4. Historical proof availability after the live registry changes, so a reveal settlement can still verify a snapshot that was current at commitment time.
+5. Exact node/page format, account size, and page capacity.
+6. Maximum supported live positions, Bulls, and owners.
+7. Maximum transaction-size and compute-budget benchmarks.
+8. Registry update and proof tests.
 
-1. Compute the effective draw range: `total_active_bull_power - victim_owner_buck_power`. The victim owner is excluded.
-2. Draw `r` in `[0, effective_range)`.
-3. Traverse Level 1 by cumulative owner power, skipping the victim owner node, to select a recipient owner in O(log o).
-4. Within the selected owner, draw `r'` in `[0, owner_buck_power)` and traverse Level 2 to select a Bull position in O(log p).
-
-The settlement transaction supplies the two page paths. The program verifies:
-
-- the supplied pages are part of the `BullRegistry` tree;
-- the cumulative sums match `total_active_bull_power`;
-- the victim owner is not selected;
-- the final selected position is an active Bull.
-
-This design is trustless, verifiable, and bounded in compute. Exact account sizes, page capacity, maximum supported Bull population, and proof serialization are **BLOCKED: OWNER DECISION REQUIRED**.
+The selection algorithm should be O(log n) and verifiable against the snapshot root. The spec must not claim the current node schema is fully bounded or verifiable until these items are completed.
 
 ## Reveal implementation status
 
-Production implementation of the reveal instruction, including mint theft, is **BLOCKED: OWNER DECISION REQUIRED** until the `BullRegistry` design above is reviewed and the maximum supported population and compute costs are confirmed.
+Production implementation of the reveal instruction, including mint theft, is **BLOCKED: OWNER DECISION REQUIRED** until the `BullRegistry` final design satisfies the checklist above and is reviewed for bounded account sizes, compute cost, and verifiable proof availability.
 
-## Provider adapter interface
+## Provider adapter handoff
 
-The provider adapter is an on-chain program (or a CPI-gated module) that:
+The provider adapter is an on-chain program (or a CPI-gated module) invoked by `rodeo_core`. It must deliver normalized randomness to the core program in one of two ways:
 
-- exposes a single `verify_and_emit(position, action_type, action_nonce, proof)` instruction;
-- verifies the oracle proof against the request metadata stored in `PendingRandomness`;
-- emits a normalized `RandomnessVerified` event containing the verifiable random output bytes.
+1. **CPI return data** in the same transaction: the adapter returns the verified random bytes to `rodeo_core` through CPI return data.
+2. **VerifiedRandomness PDA**: the adapter writes a `VerifiedRandomness` account that is consumed exactly once by `rodeo_core`.
 
-The core `rodeo_core` program consumes the verified output, maps it to outcomes using the approved probability tables, and marks the `PendingRandomness` settled.
+`RandomnessVerified` is an observability event only. It is not an on-chain data channel and must not be used by the core program as proof of randomness.
+
+The adapter must verify the oracle proof against the request metadata stored in `PendingRandomness`:
+
+- `provider_program` and `provider_randomness_account`/`request_account` match the committed values;
+- `committed_slot` matches the slot stored at commitment;
+- the provider signature or attestation is valid.
+
+The core program consumes the verified output, maps it to outcomes using the approved probability tables, and marks the `PendingRandomness` settled.
 
 ### Switchboard v1 adapter
 
@@ -131,6 +129,16 @@ Switchboard is the proposed v1 provider. The adapter must:
 - expose the proof to permissionless settlement.
 
 The adapter may be upgraded independently of `rodeo_core` to support future oracle providers, provided the core interface and domain separation remain unchanged.
+
+## Unbiased integer mapping
+
+The provider adapter returns a uniform random byte string. The protocol maps it to each probability table as follows:
+
+1. Derive a domain-separated 32-byte seed for the table: `hash(domain || output || position || action_nonce)`.
+2. Reduce the seed to an integer in `[0, denominator - 1]` using a standard modular reduction.
+3. Select the first table interval whose cumulative weight exceeds the reduced integer.
+
+Because denominators are not powers of two, modular reduction introduces a small, bounded modulo bias. The proposed denominators (`10_000_000`, `9_000_000`, and `1_000_000`) are far smaller than `2^256`, so the bias is negligible. If a future owner requires an exact unbiased draw, the implementation must use rejection sampling or a multiple-of-denominator range. The spec must explicitly document the chosen approach.
 
 ## Open questions (BLOCKED)
 

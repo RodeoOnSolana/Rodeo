@@ -77,11 +77,10 @@ All questions formerly listed here are now resolved by Protocol Specification v1
 
 - **Fee sources and ANSEM conversion:** resolved in [treasury-and-governance.md](./treasury-and-governance.md) and [economic-model.md](./economic-model.md).
 - **Epoch emission formula:** resolved in [emissions-and-rewards.md](./emissions-and-rewards.md).
-- **10-day runway definition:** resolved — required amount is the sum of the next 40 epoch emissions; available is free ANSEM plus purchasable ANSEM from pending revenue.
+- **10-day runway definition:** resolved — `epoch_emission = floor(free_ansem / 40)`; required runway = `epoch_emission * 40`; available is free ANSEM plus purchasable ANSEM from pending revenue.
 - **Runway below 10 days:** emissions continue as long as free ANSEM is positive; runway is a reporting/keeper signal, not an automatic cap.
 - **Epoch closure:** permissionless `close_epochs(max_epochs)` instruction, keeper-assisted, catch-up by sequential closure, maximum `8` epochs per transaction, per-epoch snapshots.
-- **Bull accumulator scale:** resolved — `REWARD_PER_WEIGHT_SCALE = 1_000_000_000_000_000_000`; `ACCRUAL_WEIGHT_SCALE = 10_000`.
-- **Missing epoch emission target:** resolved — transaction reverts if an emission target is missing for a closing epoch.
+- **Accumulator scales:** resolved — `COWBOY_REWARD_INDEX_SCALE = 1_000_000_000_000_000_000` for Cowboy production index; `REWARD_PER_WEIGHT_SCALE = 1_000_000_000_000_000_000` for Bull reward per weight; `ACCRUAL_WEIGHT_SCALE = 10_000` for rank weights only.
 - **Undistributed Cowboy production emission:** resolved — remains free ANSEM in the reward vault, never reserved or burned.
 - **Undistributed suit-competition rewards:** resolved — roll into the next social epoch, never burned.
 
@@ -92,6 +91,7 @@ All questions formerly listed here are now resolved by Protocol Specification v1
 - **Theft scope:** mint theft transfers the entire position (receipt, role, rank/tier, suit, principal). Unstake theft only diverts pending ANSEM to the Bull pool.
 - **Action ordering:** resolved in [state-machine.md](./state-machine.md).
 - **Reroll semantics:** resolved — a "reroll" is performed by fully unstaking and staking again with a new `position_id` and randomness nonce; no in-place reroll instruction exists.
+- **Unstake cancellation:** resolved — no voluntary `cancel_unstake_request`; after commitment an unstake settles or timeout-recovers when no oracle value is available.
 - **Settlement identity:** resolved — `(position, action_type, action_nonce)` plus unique transaction/settlement ID.
 
 ### Marketplace and revenue
@@ -136,11 +136,12 @@ For the complete list of unresolved owner decisions, see the "Open questions (BL
 
 The most urgent remaining Phase 2 blockers are:
 
-1. `BullRegistry` and `BullRegistryNode` account sizes, page capacity, maximum supported Bull population, and proof serialization (reveal implementation blocked until reviewed).
+1. Final `BullRegistry` design, account sizes, page capacity, maximum supported live positions/Bulls/owners, Merkle-sum proof format, historical snapshot availability, and compute benchmarks (mint-theft reveal implementation blocked until reviewed).
 2. Exact per-source-mint `PendingBatch` account schema.
-3. Exact Switchboard integration (queue, task format, CPI vs. callback, proof serialization) and whether commit/reveal hashing is retained.
-4. Marketplace listing expiration policy and future support for bids/auctions/private offers.
-5. Exact Squads program addresses, member pubkeys, and timelock program instances.
-6. Off-chain price oracle for the $100-equivalent minimum batch and Jupiter integration mode.
-7. Incentive/reward for permissionless randomness settler bot.
+3. Exact Metaplex Core plugin configuration and receipt-authority PDA.
+4. Exact Switchboard integration (queue, task format, CPI vs. callback, proof serialization) and whether commit/reveal hashing is retained.
+5. Marketplace listing expiration policy and future support for bids/auctions/private offers.
+6. Exact Squads program addresses, member pubkeys, and timelock program instances.
+7. Off-chain price oracle for the $100-equivalent minimum batch and Jupiter integration mode.
+8. Incentive/reward for permissionless randomness settler bot.
 8. Exact X API integration and post-verification pipeline.

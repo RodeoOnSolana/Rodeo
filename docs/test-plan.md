@@ -23,6 +23,9 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [x] Outcome mapping produces the correct outcome for boundary draws.
 - [x] `isNormalized` rejects negative weights, zero denominator, and mismatched sums.
 - [ ] Rank/tier/suit outcome mapping uses the correct sub-table and domain.
+- [ ] Conditional Cowboy rank probabilities sum to 100% over the Cowboy denominator.
+- [ ] Conditional Bull tier probabilities sum to 100% over the Bull denominator.
+- [ ] Total-probability shares are conditional * role probability.
 
 ### Arithmetic helpers
 
@@ -42,11 +45,11 @@ Every state transition, economic rule, rounding direction, and security invarian
 
 ### Principal conservation
 
-- [ ] For any sequence of stakes, claims, unstakes, transfers, and thefts, `sum(live_position.principal) == principal_vault_balance`.
+- [ ] For any sequence of stakes, claims, unstakes, transfers, and thefts, `accounted_principal_atomic == sum(live_position.principal)` and `principal_vault_balance >= accounted_principal_atomic`.
 
 ### ANSEM liability cap
 
-- [ ] For any sequence of funding, claims, unstake thefts, and suit distributions, `total_ansem_liability <= reward_vault_balance`.
+- [ ] For any sequence of funding, claims, unstake thefts, and suit distributions, `total_ansem_liability <= recognized_reward_balance <= reward_vault_balance`.
 
 ### ANSEM liability reconciliation
 
@@ -97,13 +100,15 @@ Every state transition, economic rule, rounding direction, and security invarian
 
 ### Unstake
 
-- [ ] Unstake returns 95% of principal and burns 5% (rounding dust included in burn).
-- [ ] Normal Cowboy loses pending ANSEM to Bull pool 5% of the time.
-- [ ] Normal Cowboy receives pending ANSEM 95% of the time.
-- [ ] Desperado keeps pending ANSEM.
-- [ ] Bull receives Bull-pool rewards before principal return.
-- [ ] Minimum stake period is enforced.
-- [ ] Unstake request can be cancelled before settlement.
+- [ ] Unstake returns 95% of principal and burns exactly 5% (principal - returned).
+- [ ] Normal Cowboy unstake pays 100% of synchronized pending ANSEM to owner on the 95% outcome.
+- [ ] Normal Cowboy unstake reclassifies 100% of synchronized pending ANSEM to the Bull pool on the 5% outcome.
+- [ ] Normal Cowboy unstake does not apply the 80/20 claim tax.
+- [ ] Desperado keeps 100% of pending ANSEM.
+- [ ] Bull receives 100% of synchronized Bull-pool rewards before principal return.
+- [ ] Minimum stake period is enforced via `Position.unstake_eligible_at`.
+- [ ] Unstake request cannot be cancelled after commitment.
+- [ ] Timeout recovery fails when the oracle value is already available.
 - [ ] Unstake closes the position and burns the receipt.
 
 ### Mint theft
@@ -112,7 +117,7 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] 5% theft rate matches expected distribution.
 - [ ] Victim's Bull cannot be the recipient.
 - [ ] Entire position transfers: principal, role, rank/tier, suit, receipt.
-- [ ] No theft occurs if no eligible external Bull exists.
+- [ ] Ineligibility or absence of an external recipient resolves safely as "not stolen" without reverting.
 
 ### Marketplace sale
 
@@ -121,40 +126,53 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] Buyer starts with zero pending ANSEM.
 - [ ] 5% marketplace fee is routed to external revenue.
 - [ ] Sale is rejected while randomness action is pending.
+- [ ] Sale resets `Position.unstake_eligible_at = transfer_timestamp + 24 hours`.
+- [ ] Owner cannot transfer the receipt directly through MPL Core; Rodeo transfer via delegate succeeds.
+- [ ] Owner cannot burn the receipt directly through MPL Core; Rodeo unstake burn succeeds.
+- [ ] Sale is rejected if `Position.owner` and Core Asset owner do not match.
 - [ ] Stale listing cannot settle.
 
 ### Direct gift
 
-- [ ] Gift changes owner and receipt atomically.
+- [ ] Gift changes owner and receipt atomically via Rodeo delegate.
 - [ ] Force-settles pending ANSEM.
 - [ ] No marketplace fee charged.
 - [ ] Rejected while randomness action is pending.
+- [ ] Resets `Position.unstake_eligible_at = transfer_timestamp + 24 hours`.
+- [ ] Owner cannot transfer or burn the receipt directly through MPL Core.
 
 ### Epoch closure
 
 - [ ] No emission during pot-fill period.
 - [ ] `close_epochs` processes up to `CLOSE_EPOCH_BATCH_MAX` epochs per transaction.
 - [ ] State-changing instructions require elapsed epochs to be closed.
-- [ ] Epoch emission is capped by free ANSEM and uses the approved per-epoch target table.
+- [ ] Epoch emission = `floor(free_ansem / RUNWAY_EPOCHS)`; uses recognized reward balance.
 - [ ] 90/10 split between Cowboy production and suit vault.
 - [ ] Cowboy production emission uses the snapshot of `total_active_cowboy_weight` at the epoch boundary.
-- [ ] Missing epoch targets fail closed (transaction reverts).
+- [ ] If `total_active_cowboy_weight == 0`, Cowboy portion remains free ANSEM.
+- [ ] Suit portion is always reserved.
 - [ ] Runway report reflects covered epochs.
 - [ ] Emission is zero when `free_ansem` is zero.
 
-### External revenue
+### External revenue and reward recognition
 
 - [ ] 70/15/10/5 split applied to realized receipts.
-- [ ] ANSEM purchase deposits into reward vault.
+- [ ] ANSEM purchase deposits into reward vault but is not automatically recognized.
+- [ ] Direct unsolicited transfer to reward vault is tracked as unrecognized surplus.
+- [ ] `recognize_rewards` after catch-up moves ANSEM from surplus to recognized balance.
+- [ ] Emission uses `min(actual_reward_vault_balance, recognized_reward_balance) - total_ansem_liability`.
 - [ ] RODEO buyback is burned.
 - [ ] Failed swap leaves funds pending.
 
 ### Suit competition
 
 - [ ] 10% of each epoch emission accumulates in suit vault.
-- [ ] Winning suit attestation requires valid multisig.
+- [ ] Winning suit attestation requires valid multisig and includes `content_hash`.
 - [ ] 50/50 equal/proportional split is applied.
+- [ ] Proportional allocation is per X account, then divided among that account's eligible positions.
+- [ ] Multi-position X-account allocation conserves the total proportional half.
 - [ ] Ineligible positions receive nothing.
+- [ ] Undistributed vault rolls into the next social epoch.
 
 ## Integration tests (Anchor localnet)
 
@@ -164,7 +182,7 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] `stake_and_commit` rejects non-standard stake amounts.
 - [ ] `settle_reveal` assigns role/rank/tier/suit, creates receipt, and emits `PositionRevealed`.
 - [ ] `claim_cowboy` and `claim_bull` respect role-specific splits and wallet cooldown.
-- [ ] `request_unstake` + `cancel_unstake_request` + `settle_unstake` burn tax, return principal, and close position.
+- [ ] `request_unstake` + `settle_unstake` burn tax, return principal, and close position; no cancel after commitment.
 - [ ] `transfer_position` is blocked while pending action is active and succeeds when cleared.
 - [ ] `close_epochs` updates global reward index and suit vault using snapshot values.
 - [ ] Bull reward pool distribution matches reward-per-buck-power accounting.
@@ -183,13 +201,14 @@ Every state transition, economic rule, rounding direction, and security invarian
 
 Every integration test must assert at least one of:
 
-- `sum(live_position.principal) == principal_vault_balance`
-- `total_ansem_liability <= reward_vault_balance`
+- `accounted_principal_atomic == sum(live_position.principal)`
+- `principal_vault_balance >= accounted_principal_atomic`; surplus is not withdrawable principal
+- `total_ansem_liability <= recognized_reward_balance <= reward_vault_balance`
 - `total_ansem_liability` equals sum of explicit liability buckets
 - `position_claimable_liability == sum(position.claimable_ansem_atomic)`
 - `settlement_nonce` strictly increases on randomness settlement
 - `pending_action_active` cleared after settlement
-- `Position.owner` equals `PositionReceipt` owner
+- `Position.owner` equals `PositionReceipt` Core Asset owner
 
 ## Fuzz targets
 
@@ -199,6 +218,8 @@ Every integration test must assert at least one of:
 - [ ] Delayed `close_epochs` calls that batch many epochs.
 - [ ] Bull-pool distribution with zero, one, and many active Bulls.
 - [ ] Marketplace sale with randomized prices and fees.
+- [ ] Direct reward-vault transfers mixed with recognized funding.
+- [ ] Multi-position X-account suit allocation conservation.
 
 ## Test deliverables
 

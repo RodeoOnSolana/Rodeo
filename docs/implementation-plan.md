@@ -16,10 +16,11 @@
 Implement in the following order so that each layer can be tested before the next is added.
 
 1. **Protocol-definition constants and probability tables**
-   - Add `STAKE_AMOUNT_WHOLE_RODEO`, `EXPECTED_TOTAL_SUPPLY_WHOLE_RODEO`, `STAKE_AMOUNT_ATOMIC`, `EXPECTED_TOTAL_SUPPLY_ATOMIC`, `MIN_STAKE_SECONDS`, tax BPS constants, and runway constants.
+   - Add whole-token supply and stake helpers, `MIN_STAKE_SECONDS`, tax BPS constants, and runway constants.
    - Add approved integer probability tables.
    - Add accrual weights, buck power, and role/rank/tier/suit outcome mapping.
-   - Add `Suit` enum and `OwnershipChangeReason` values.
+   - Add `COWBOY_REWARD_INDEX_SCALE` and `REWARD_PER_WEIGHT_SCALE`.
+   - Add `Suit` enum, `CowboyKind`, and `OwnershipChangeReason` values.
 
 2. **Economic-simulator updates**
    - Replace the generic event reducer with the approved rules.
@@ -29,11 +30,11 @@ Implement in the following order so that each layer can be tested before the nex
    - Add property tests for every invariant.
 
 3. **On-chain account schema extensions**
-   - Extend `Position` with `rank_or_tier`, `suit`, `claimable_ansem_atomic`, `active_since`, `opened_at`, `last_cowboy_reward_index`, `last_bull_reward_per_weight`, `buck_power`, and `accrual_weight`.
-   - Extend `RewardState` with explicit ANSEM liability buckets (`total_ansem_liability_atomic`, `cowboy_unmaterialized_liability_atomic`, `position_claimable_liability_atomic`, `bull_pool_liability_atomic`, `bull_pool_unallocated_liability_atomic`, `suit_vault_liability_atomic`), `cowboy_reward_index`, `bull_reward_per_weight_scaled`, accumulator remainders, and `suit_vault_atomic`.
-   - Add `GlobalGameState` account with live counters.
-   - Add global `BullAccumulator` account.
-   - Add `BullRegistry` and `BullRegistryNode` accounts for sortition.
+   - Extend `Position` with `cowboy_kind`, `suit`, `claimable_ansem_atomic`, `active_since`, `unstake_eligible_at`, `opened_at`, `last_cowboy_reward_index`, `last_bull_reward_per_weight`, `buck_power`, and `accrual_weight`.
+   - Extend `RewardState` with explicit ANSEM liability buckets (`total_ansem_liability_atomic`, `cowboy_unmaterialized_liability_atomic`, `position_claimable_liability_atomic`, `bull_pool_liability_atomic`, `bull_pool_unallocated_liability_atomic`, `suit_vault_liability_atomic`), `recognized_reward_balance_atomic`, `unrecognized_reward_surplus_atomic`, `cowboy_reward_index`, and `suit_epoch`.
+   - Add `GlobalGameState` account with live counters and `accounted_principal_atomic`.
+   - Add global `BullAccumulator` account with `cowboy_reward_index` and `reward_per_weight_scaled`.
+   - Add `BullRegistry` and `BullRegistryNode` design-proposal accounts for sortition.
    - Add per-source-mint `PendingBatch` accounts (Phase 4).
 
 4. **BullRegistry design gate**
@@ -53,10 +54,11 @@ Implement in the following order so that each layer can be tested before the nex
    - Implement Bull reward pool claim using reward-per-buck-power.
 
 7. **Unstake instruction**
-   - Implement minimum stake period check.
-   - Implement `request_unstake` (commit), `cancel_unstake_request`, and `settle_unstake`.
-   - Implement 5% RODEO tax and burn, 95% return.
-   - Implement normal Cowboy 5% ANSEM theft to Bull pool (Desperado immune).
+   - Implement minimum stake period check using `Position.unstake_eligible_at`.
+   - Implement `request_unstake` (commit) and `settle_unstake`.
+   - Do not implement `cancel_unstake_request`; once committed, an unstake settles or timeout-recovers.
+   - Implement 5% RODEO tax and burn, 95% return; burn amount = principal - returned.
+   - Implement normal Cowboy unstake 100/0 outcome: 95% of the time pending ANSEM is paid to the owner, 5% of the time it is reclassified to the Bull pool. Desperado is immune.
    - Implement Bull reward settlement before account close.
 
 8. **Ownership transfer primitives**
@@ -64,10 +66,12 @@ Implement in the following order so that each layer can be tested before the nex
    - Add receipt asset check.
    - Keep marketplace listing/sale as a Phase 3/4 deliverable; Phase 2 only ensures the ownership-transfer primitive is correct.
 
-9. **Epoch closure instruction**
+9. **Epoch closure and reward recognition**
    - Implement permissionless `close_epochs(max_epochs)` with batched processing.
    - Compute free ANSEM, epoch emission, and Cowboy/suit split using per-epoch snapshots.
    - Update global `cowboy_reward_index` and `GlobalGameState` counters.
+   - Implement permissionless `recognize_rewards` after catch-up for ANSEM that arrived after elapsed boundaries.
+   - Track `unrecognized_reward_surplus_atomic` and ensure it never funds emissions before recognition.
 
 10. **SDK and integration tests**
     - Regenerate IDLs and SDK clients after each program change.
@@ -123,8 +127,7 @@ Implement in the following order so that each layer can be tested before the nex
 
 See individual sub-documents. The most urgent Phase 2 blockers are:
 
-- `BullRegistry` and `BullRegistryNode` account sizes, page capacity, and maximum supported Bull population.
+- Final `BullRegistry` design, account sizes, page capacity, Merkle-sum proof format, and maximum supported Bull population.
 - Exact `PendingBatch` schema per source mint.
-- RODEO and ANSEM token decimals.
-- `ACCRUAL_WEIGHT_SCALE` and `REWARD_PER_WEIGHT_SCALE` values (currently set; may be revised after token-decimal and supply analysis).
-- Wallet-level claim-cooldown account design.
+- Exact Metaplex Core plugin and receipt-authority PDA configuration.
+- Maximum balance/supply bounds for account sizing.

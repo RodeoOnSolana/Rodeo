@@ -27,7 +27,8 @@ If `close_epochs` is not called, the protocol state remains on the last closed e
 
 For each closed epoch, the protocol snapshots the following values at the epoch boundary:
 
-- `reward_vault_balance`
+- `actual_reward_vault_balance`
+- `recognized_reward_balance_atomic`
 - `total_ansem_liability_atomic`
 - `total_active_cowboy_weight`
 - `total_active_bull_power`
@@ -41,10 +42,12 @@ On-chain epoch boundaries use Solana cluster `Clock::unix_timestamp`. Off-chain 
 ## Free ANSEM
 
 ```text
-free_ansem = reward_vault_balance - ansem_liability_atomic
+free_ansem = min(actual_reward_vault_balance, recognized_reward_balance_atomic) - total_ansem_liability_atomic
 ```
 
-`free_ansem` is the portion of the reward vault that is not already promised as unclaimed liabilities. It must be recomputed immediately before every epoch close. Free ANSEM is never negative; if liabilities exceed balance, the protocol is insolvent and the epoch emission is `0` while the keeper routes more revenue.
+`free_ansem` is the portion of the reward vault that is recognized and not already promised as unclaimed liabilities. It must be recomputed immediately before every epoch close. Free ANSEM is never negative; if liabilities exceed the recognized balance, the epoch emission is `0` while the keeper routes more revenue.
+
+ANSEM arriving after an elapsed epoch boundary is not recognized until a permissionless recognition instruction runs after catch-up closes that boundary. Direct unsolicited transfers to the reward vault also remain unrecognized until recognized. The recognized balance can never exceed the actual vault balance.
 
 ## Epoch emission
 
@@ -68,21 +71,20 @@ The Cowboy production portion is distributed pro-rata by accrual weight among al
 ```text
 total_active_cowboy_weight = sum(accrual_weight(position.rank)) for all Active Cowboys
 cowboy_emission = floor(epoch_emission * 9_000 / 10_000)
-increment_per_weight = cowboy_emission * ACCRUAL_WEIGHT_SCALE / total_active_cowboy_weight   // floor
-position_share = increment_per_weight * position_weight / ACCRUAL_WEIGHT_SCALE   // floor
+index_increment = cowboy_emission * COWBOY_REWARD_INDEX_SCALE / total_active_cowboy_weight   // floor
+position_accrued = (cowboy_reward_index - last_cowboy_reward_index) * position_weight / COWBOY_REWARD_INDEX_SCALE   // floor
 ```
 
-Lazy accounting implementation (recommended):
+Lazy accounting implementation:
 
-- `RewardState` stores a global `cowboy_reward_index: u128` scaled by `ACCRUAL_WEIGHT_SCALE`.
+- `BullAccumulator`/`GlobalGameState` stores a global `cowboy_reward_index: u128` scaled by `COWBOY_REWARD_INDEX_SCALE`.
 - Each `Position` stores `last_cowboy_reward_index: u128` at the same scale.
 - On epoch close:
-  - `global_increment = cowboy_emission * SCALE / total_active_cowboy_weight` (floor).
+  - `global_increment = cowboy_emission * COWBOY_REWARD_INDEX_SCALE / total_active_cowboy_weight` (floor).
   - `cowboy_reward_index += global_increment`.
 - On claim or transfer:
-  - `accrued = (cowboy_reward_index - last_cowboy_reward_index) * position_weight / SCALE` (floor).
-  - `claimable_ansem_atomic += accrued`.
-  - `ansem_liability_atomic += accrued`.
+  - `accrued = (cowboy_reward_index - last_cowboy_reward_index) * position_weight / COWBOY_REWARD_INDEX_SCALE` (floor).
+  - Reclassify `accrued` from `cowboy_unmaterialized_liability_atomic` to `position_claimable_liability_atomic`; `total_ansem_liability_atomic` is unchanged.
   - `last_cowboy_reward_index = cowboy_reward_index`.
 
 If `total_active_cowboy_weight == 0`, the Cowboy production emission is not reserved as a liability. It remains free ANSEM in the reward vault and is available for future epochs. No Cowboy production emission is burned.
@@ -108,11 +110,14 @@ Lazy accounting:
 - `BullAccumulator` stores `reward_per_weight_scaled: u128`.
 - Each `Position` stores `last_bull_reward_per_weight: u128`.
 - On Bull pool contribution:
-  - `reward_per_weight_scaled += pool_contribution * SCALE / total_active_bull_power` (floor).
-- On Bull claim:
-  - `accrued = (reward_per_weight_scaled - last_bull_reward_per_weight) * buck_power / SCALE` (floor).
-  - Add to `claimable_ansem_atomic` and `ansem_liability_atomic`.
+  - `reward_per_weight_scaled += pool_contribution * REWARD_PER_WEIGHT_SCALE / total_active_bull_power` (floor).
+- On Bull synchronization (claim, unstake, or transfer):
+  - `accrued = (reward_per_weight_scaled - last_bull_reward_per_weight) * buck_power / REWARD_PER_WEIGHT_SCALE` (floor).
+  - Reclassify `accrued` from `bull_pool_liability_atomic` to `position_claimable_liability_atomic`; `total_ansem_liability_atomic` is unchanged.
   - Update `last_bull_reward_per_weight`.
+- On Bull claim payment:
+  - `position_claimable_liability_atomic -= claimable` and `total_ansem_liability_atomic -= claimable`; `bull_pool_liability_atomic` has already been reduced by the synchronization step.
+  - Transfer `claimable` ANSEM to the owner.
 
 If `total_active_bull_power == 0`, contributions are tracked as `bull_pool_unallocated_liability_atomic`. When the first eligible Bull set becomes active (or when a new contribution arrives while Bulls are active), the unallocated amount is distributed using the current `total_active_bull_power`, increasing `reward_per_weight_scaled` for all active Bulls from that point forward. Unallocated Bull-pool ANSEM is never burned.
 
@@ -125,7 +130,7 @@ Every epoch, `10%` of the epoch emission is moved to the suit-competition vault.
 | Portion | Share | Rule |
 | --- | --- | --- |
 | Equal split | 50% | Divided equally among eligible Active positions in the winning suit. |
-| Proportional split | 50% | Divided by verified contribution score. |
+| Proportional split | 50% | Divided by verified contribution score per X account, then split among that account's eligible positions. |
 
 Eligibility rules:
 
@@ -138,9 +143,12 @@ Individual allocation:
 
 ```text
 equal_amount_per_position = equal_half / eligible_position_count   // floor
-proportional_share = proportional_half * position_score / total_eligible_score   // floor
-position_suit_reward = equal_amount_per_position + proportional_share
+account_reward = proportional_half * account_score / total_account_score   // floor
+position_proportional_share = account_reward / account_eligible_position_count   // floor
+position_suit_reward = equal_amount_per_position + position_proportional_share
 ```
+
+The proportional half prevents one X account's score from being multiplied by its number of positions. The X account's reward is divided equally among its eligible positions.
 
 The remainder from floor divisions rolls into the next social epoch. A suit epoch with no eligible winner rolls the full suit vault into the next social epoch. No suit-competition ANSEM is burned.
 
@@ -149,8 +157,9 @@ The remainder from floor divisions rolls into the next social epoch. A suit epoc
 The protocol reports runway after every epoch close:
 
 ```text
-required_ansem = sum(emission_target[epoch_i]) for the next 40 epochs
-free_ansem = reward_vault_balance - total_ansem_liability_atomic
+free_ansem = min(actual_reward_vault_balance, recognized_reward_balance_atomic) - total_ansem_liability_atomic
+epoch_emission = free_ansem / RUNWAY_EPOCHS   // floor
+required_ansem = epoch_emission * RUNWAY_EPOCHS
 purchasable_ansem = sum over source mints(pending_batch_atomic * ansem_buy_rate)   // floor per mint
 available_ansem = free_ansem + purchasable_ansem
 covered = available_ansem >= required_ansem

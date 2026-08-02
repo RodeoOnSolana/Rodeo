@@ -7,15 +7,18 @@ These invariants must hold before and after every successful instruction, and no
 ### RODEO principal conservation
 
 ```text
-sum(Position.principal_amount for every live Position) = principal_vault_balance
+accounted_principal_atomic = sum(Position.principal_amount for every live Position)
+actual_principal_vault_balance >= accounted_principal_atomic
+principal_vault_surplus_atomic = actual_principal_vault_balance - accounted_principal_atomic
 ```
 
-Live positions include `RevealPending`, `Active`, and positions with a pending unstake action. The principal vault balance must exactly equal the sum of all live-position principals. No RODEO principal may be moved to a treasury, reward, or external account except through the approved unstake return/burn path.
+Live positions include `RevealPending`, `Active`, and positions with a pending unstake action. The principal vault balance must be at least the sum of all live-position principals. Any surplus is not player principal and cannot be withdrawn through normal unstake. No RODEO principal may be moved to a treasury, reward, or external account except through the approved unstake return/burn path.
 
 ### ANSEM liability cap
 
 ```text
-total_ansem_liability_atomic <= reward_vault_balance
+free_ansem = min(actual_reward_vault_balance, recognized_reward_balance_atomic) - total_ansem_liability_atomic
+total_ansem_liability_atomic <= recognized_reward_balance_atomic <= actual_reward_vault_balance
 ```
 
 Total unclaimed ANSEM liabilities must never exceed the reward vault balance. Explicit buckets:
@@ -43,7 +46,7 @@ No account or vault may hold a negative atomic quantity. All arithmetic is check
 
 ### Single owner per position
 
-A `Position` has exactly one `owner` pubkey at any time. The `MarketReceipt` owner must match `Position.owner` after every transfer.
+A `Position` has exactly one `owner` pubkey at any time. A position is validly owned only when `Position.owner` and the Metaplex Core receipt asset owner match. Neither record alone is sufficient proof of ownership.
 
 ### Ownership cannot change during pending randomness
 
@@ -61,7 +64,7 @@ A `Position` has exactly one `owner` pubkey at any time. The `MarketReceipt` own
 
 ### No selective cancellation
 
-Neither users nor admins may cancel a committed randomness action because the outcome is unfavorable. Cancellation is allowed only through timeout recovery rules.
+Neither users nor admins may cancel a committed randomness action because the outcome is unfavorable. Once an unstake is committed, it may only settle from valid randomness or timeout-recover after the 30-minute timeout when no valid oracle value exists. Timeout recovery fails if the oracle value is already available.
 
 ### Outcome binding
 
@@ -115,7 +118,7 @@ Before a sale or gift, the seller's pending ANSEM is force-claimed. The buyer's 
 
 ### Marketplace fee routing
 
-`5%` of the sale price is routed to protocol revenue. No larger or smaller fee is permitted, and no additional royalty may be charged in Protocol v1.
+`5%` of the sale price is routed to protocol revenue. No larger or smaller fee is permitted, and no additional royalty may be charged in Protocol v1. The receipt asset remains frozen with permanent transfer, freeze, and burn delegates controlled by Rodeo; the owner cannot move or burn it outside approved Rodeo flows.
 
 ### No stale settlement
 
@@ -139,7 +142,7 @@ Emergency Guardians may toggle `pause_new_stakes`, `pause_new_reveal_requests`, 
 
 ### Timeout recovery
 
-If a randomness request times out (after 30 minutes), a recovery path must exist that returns the position to a safe state without trapping principal. A reveal timeout before role assignment closes the position and returns the full principal. An unstake timeout cancels the unstake request and leaves the position staked and Active.
+If a randomness request times out (after 30 minutes), a recovery path must exist that returns the position to a safe state without trapping principal. A reveal timeout before role assignment closes the position and returns the full principal. An unstake timeout cancels the unstake request and leaves the position staked and Active. Timeout recovery fails if a valid oracle value is already available.
 
 ### Permissionless settlement
 

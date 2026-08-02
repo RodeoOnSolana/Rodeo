@@ -68,23 +68,21 @@ pub struct RewardState {
     pub position_claimable_liability_atomic: u64,      // owed to specific positions
     pub bull_pool_liability_atomic: u64,               // allocated to active Bulls
     pub bull_pool_unallocated_liability_atomic: u64,   // allocated to Bull pool while no eligible Bull set
-    pub suit_vault_liability_atomic: u64,             // reserved for suit competitions
+    pub suit_vault_liability_atomic: u64,             // reserved for suit competitions; authoritative suit reservation
+    // Vault accounting
+    pub recognized_reward_balance_atomic: u64,      // ANSEM in RewardVault recognized for liability accounting
+    pub unrecognized_reward_surplus_atomic: u64,    // ANSEM in RewardVault not yet recognized
     // ANSEM flows
     pub ansem_emitted_atomic: u64,
     pub ansem_claimed_atomic: u64,
     // Scaled global accumulators
-    pub cowboy_reward_index: u128,                    // scaled by ACCRUAL_WEIGHT_SCALE
-    pub bull_reward_per_weight_scaled: u128,           // scaled by REWARD_PER_WEIGHT_SCALE
-    pub suit_vault_atomic: u64,
+    pub cowboy_reward_index: u128,                    // scaled by COWBOY_REWARD_INDEX_SCALE
     pub suit_epoch: u64,
-    // Accumulator dust carried forward at scale 1
-    pub cowboy_index_remainder: u128,
-    pub bull_index_remainder: u128,
     pub bump: u8,
 }
 ```
 
-Every division that produces a scaled index stores its remainder so the same ANSEM cannot be emitted, reserved, or counted twice. Dust from the scaled accumulators remains reserved and cannot become free ANSEM.
+`bull_reward_per_weight_scaled` is kept in `BullAccumulator`, not duplicated in `RewardState`. Scaled-accumulator rounding remainders stay in the global index value and are not tracked as separate liabilities.
 
 ### `Position`
 
@@ -96,10 +94,11 @@ pub struct Position {
     pub principal_amount: u64,       // always STAKE_AMOUNT_ATOMIC while active; 0 only transiently before close
     pub role: Role,                  // Unassigned | Cowboy | Bull
     pub status: PositionStatus,      // RevealPending | Active
-    pub rank_or_tier: u8,            // 0 until revealed; Cowboy rank 4-10 or Bull tier 1-4
+    pub cowboy_kind: CowboyKind,     // Unassigned | Rank(u8) | Desperado
     pub suit: Suit,                  // 0 until revealed; Hearts | Diamonds | Clubs | Spades
     pub opened_at: i64,
     pub active_since: i64,           // reveal settlement timestamp; 0 until revealed
+    pub unstake_eligible_at: i64,   // active_since + 24 hours; reset on sale/gift/theft
     pub accrual_weight: u32,         // Cowboy rank weight (ACCRUAL_WEIGHT_SCALE base)
     pub buck_power: u8,              // Bull tier power
     pub last_cowboy_reward_index: u128,
@@ -119,7 +118,12 @@ pub struct Position {
 
 `state_version` increments every time ownership or fundamental state changes (sale, gift, mint theft, unstake closure). Listings store the `state_version` and `listing_nonce` observed at listing time; a settlement instruction verifies the stored values match the live `Position` to prevent stale-listing settlement.
 
-`receipt_asset` is empty until reveal settlement, when the Metaplex Core Asset is created directly for the final owner.
+`receipt_asset` is empty until reveal settlement, when the Metaplex Core Asset is created directly for the final owner. The receipt is created frozen with:
+- `PermanentTransferDelegate` controlled by the Rodeo receipt-authority PDA;
+- `PermanentFreezeDelegate` controlled by the same PDA and `frozen=true`;
+- `PermanentBurnDelegate` controlled by the same PDA.
+
+The receipt remains frozen for its entire lifetime. Rodeo transfers or burns it through the permanent delegates.
 
 Claim cooldown is enforced through the `WalletClaimCooldown` PDA, not by scanning positions.
 
@@ -149,6 +153,7 @@ pub struct GlobalGameState {
     pub active_bull_count: u64,
     pub total_active_cowboy_weight: u128, // sum of accrual_weight for active Cowboys
     pub total_active_bull_power: u64,     // sum of buck_power for active Bulls
+    pub accounted_principal_atomic: u64,  // sum of principal_amount for every live Position
     pub launch_timestamp: i64,
     pub current_epoch: u64,
     pub last_closed_epoch_timestamp: i64,
@@ -167,69 +172,68 @@ Counter update rules:
 | Unstake close Bull | -1 | — | -1 | — | -buck_power | — |
 | Transfer | — | — | — | — | — | — |
 
+- `live_position_count` increments on stake and decrements on unstake closure.
+- `total_completed_reveals` increments on every reveal settlement.
+- `active_cowboy_count` and `total_active_cowboy_weight` increment on Cowboy reveal and decrement on Cowboy unstake.
+- `active_bull_count` and `total_active_bull_power` increment on Bull reveal and decrement on Bull unstake.
+- Ownership transfers do not change counters, but they update `state_version`, reset reward checkpoints, and set `unstake_eligible_at = transfer_timestamp + 24 hours`.
+
 ### `BullAccumulator`
 
 ```rust
 pub struct BullAccumulator {
     pub version: u8,                     // ACCOUNT_VERSIONS.bullAccumulator
     pub global_config: Pubkey,
+    pub cowboy_reward_index: u128,       // scaled by COWBOY_REWARD_INDEX_SCALE
     pub reward_per_weight_scaled: u128,  // scaled by REWARD_PER_WEIGHT_SCALE
-    pub division_remainder: u128,        // carried forward at scale 1
     pub bump: u8,
 }
 ```
 
 `REWARD_PER_WEIGHT_SCALE` is `1_000_000_000_000_000_000` (`1e18`), chosen so that `u128` intermediates cannot overflow for the approved tokenomics. The accumulator is global, not per-epoch; epoch history belongs in events and the indexer.
 
-### `BullRegistry` — two-level weighted sortition tree
+### `BullRegistry` — design proposal
 
-Mint theft and any future Bull-weighted selection must not scan every Bull account. The protocol uses a persistent two-level sum tree:
+Mint theft and any future Bull-weighted selection must not scan every Bull account. The final registry design must be reviewed and verified before mint-theft reveal implementation proceeds. The account schemas below are a design proposal, not a finalized interface.
+
+A finalized design must include:
+
+- A Merkle-sum root hash and a monotonically increasing registry version.
+- Immutable root/version snapshot stored in `PendingRandomness` at the time the randomness is requested.
+- Exact unbiased victim-owner exclusion.
+- Historical proof availability after the live registry changes, so a reveal settlement can still verify a snapshot that was current when the randomness was committed.
+- Exact node/page format, account size, and page capacity.
+- Maximum supported live positions, Bulls, and owners.
+- Maximum transaction-size and compute-budget benchmarks.
+- Registry update and proof tests.
+
+The following schemas are placeholders for the design proposal:
 
 ```rust
 pub struct BullRegistry {
     pub version: u8,
     pub global_config: Pubkey,
-    pub root_owner_sum: u64,           // number of owner nodes
+    pub merkle_root: [u8; 32],          // Merkle-sum root of owner/position tree
+    pub registry_version: u64,          // monotonically increasing
     pub total_buck_power: u64,
-    pub tree_depth: u8,
     pub bump: u8,
 }
 
 pub struct BullRegistryNode {
     pub version: u8,
     pub registry: Pubkey,
-    pub node_id: u64,                  // stable, sequentially assigned
-    pub parent_node_id: u64,           // 0 for root owner nodes
-    pub owner: Pubkey,                 // set for owner-level nodes; zero for internal nodes
-    pub total_buck_power: u64,         // aggregate power of this subtree
-    pub left_child: u64,               // 0 if leaf Bull position node
+    pub node_id: u64,
+    // placeholder fields for a two-level weighted sortition tree
+    pub owner: Pubkey,
+    pub total_buck_power: u64,
+    pub left_child: u64,
     pub right_child: u64,
-    pub position_id: u64,              // set only for leaf Bull position nodes
-    pub is_owner_node: bool,
+    pub position_id: u64,
     pub bump: u8,
 }
 ```
 
-Tree layout:
-
-- **Level 1** — owner-sum nodes. Each node represents one owner and stores the owner's aggregate active `buck_power`. The root of Level 1 stores the sum over all owners and is used for O(log o) weighted owner selection.
-- **Level 2** — per-owner sum tree nodes. For the selected owner, a small balanced tree (or sorted list of pages) stores that owner's individual Bull positions and their `buck_power`, used for O(log p) weighted position selection.
-
-Operations:
-
-- **Activate a Bull** (`reveal` → Bull): insert the owner into Level 1 if absent, or increment the owner's power; insert the position into the owner's Level 2 tree.
-- **Deactivate a Bull** (`unstake`, `transfer` away, etc.): remove the position from Level 2 and decrement the owner's Level 1 power; if the owner's power reaches zero, remove the owner node.
-- **Weighted owner draw**: draw `r` in `[0, total_buck_power - victim_owner_buck_power)`. Traverse Level 1 by cumulative power, skipping the victim owner's node, to select a recipient owner in O(log o).
-- **Weighted position draw**: within the selected owner, draw `r` in `[0, owner_buck_power)` and traverse the owner's Level 2 tree in O(log p).
-- **Proof**: the settlement transaction supplies the two page paths (owner node + position node) plus sibling hashes. The program verifies the cumulative sums and that the victim owner is excluded.
-
-Page structure:
-
-- Each `BullRegistryNode` is a fixed-size account (recommended 256–512 bytes).
-- A page can hold multiple leaf entries or a small number of child pointers.
-- Maximum population is bounded by account size and compute budget; the design document must specify the maximum supported number of Bull positions and the worst-case compute cost before implementation.
-
-Reveal implementation for mint theft is **BLOCKED: OWNER DECISION REQUIRED** until this registry design is reviewed, account sizes and compute costs are modeled, and the exact proof format is finalized.
+Reveal implementation for mint theft is **BLOCKED: OWNER DECISION REQUIRED** until the final design satisfies every item in the checklist above and is reviewed for bounded account sizes, compute cost, and verifiable proof availability.
 
 ### `PendingRandomness`
 
@@ -239,12 +243,19 @@ pub struct PendingRandomness {
     pub position: Pubkey,
     pub action_type: ActionType,     // stable, append-only enum
     pub action_nonce: u64,
+    pub provider_program: Pubkey,    // e.g. Switchboard randomness program
+    pub provider_randomness_account: Pubkey, // randomness/request account stored at commit time
     pub commitment: [u8; 32],
-    pub committed_slot: u64,
+    pub committed_slot: u64,         // also verified at settlement
+    pub committed_protocol_epoch: u64,
+    pub timeout_timestamp: i64,
+    pub registry_root_snapshot: [u8; 32], // registry root/version for mint theft if applicable
     pub settled: bool,
     pub bump: u8,
 }
 ```
+
+The provider adapter must either return normalized randomness through CPI return data in the same transaction, or write a `VerifiedRandomness` PDA that is consumed exactly once by `rodeo_core`. `RandomnessVerified` is an observability event only and is not an on-chain data channel.
 
 ## Enums
 
@@ -253,6 +264,7 @@ pub enum Role { Unassigned, Cowboy, Bull }
 pub enum PositionStatus { RevealPending, Active }
 pub enum ActionType { Reveal = 0, Unstake = 1 } // append-only
 pub enum Suit { Unassigned = 0, Hearts = 1, Diamonds = 2, Clubs = 3, Spades = 4 }
+pub enum CowboyKind { Unassigned, Rank(u8), Desperado }
 ```
 
 ## Authority model
@@ -273,18 +285,19 @@ Current account versions (from `packages/protocol-definition/src/accounts.ts`):
 | Account | Version | Reason |
 | --- | --- | --- |
 | globalConfig | 1 | Initial definition. |
-| rewardState | 1 | Initial definition with explicit liability buckets. |
-| position | 3 | Added `accrual_weight`, `buck_power`, reward checkpoints, `receipt_asset`, `active_since`, `opened_at`; removed `last_claimed_at`. |
-| globalGameState | 1 | Initial definition. |
-| bullAccumulator | 1 | Global accumulator (was per-epoch; now singleton). |
-| bullRegistry | 1 | Initial definition for sortition tree. |
-| pendingRandomness | 2 | PDA moved to `[position, action_type, action_nonce]`; dropped owner field. |
+| rewardState | 2 | Added `recognized_reward_balance_atomic`, `unrecognized_reward_surplus_atomic`; removed `suit_vault_atomic`, `cowboy_index_remainder`, `bull_index_remainder`, and duplicated Bull accumulator fields. |
+| position | 4 | Added `cowboy_kind`, `unstake_eligible_at`; removed `rank_or_tier` sentinel. |
+| globalGameState | 2 | Added `accounted_principal_atomic`. |
+| bullAccumulator | 2 | Added `cowboy_reward_index`; removed `division_remainder`. |
+| bullRegistry | 1 | Design-proposal placeholder; version will bump when finalized. |
+| pendingRandomness | 3 | Added `provider_program`, `provider_randomness_account`, `committed_protocol_epoch`, `timeout_timestamp`, `registry_root_snapshot`. |
 | pendingBatch | 1 | Per-source-mint router pending account. |
 | walletClaimCooldown | 1 | Initial definition. |
 | socialResult | 1 | Initial definition. |
 
 ## Open questions (BLOCKED)
 
-- Exact `BullRegistryNode` account size, page capacity, and maximum supported Bull population: **BLOCKED: OWNER DECISION REQUIRED** (reveal implementation is blocked until reviewed).
+- Final `BullRegistry` design, account sizes, page capacity, Merkle-sum proof format, historical snapshot availability, and maximum supported Bull population: **BLOCKED: OWNER DECISION REQUIRED** (mint-theft reveal implementation is blocked until reviewed).
 - `PendingBatch` schema for each source mint (SOL, RODEO, etc.): **BLOCKED: OWNER DECISION REQUIRED**.
 - Maximum balance/supply bounds for account sizing: **BLOCKED: OWNER DECISION REQUIRED**.
+- Exact Metaplex Core plugin configuration and delegate authority program address: **BLOCKED: OWNER DECISION REQUIRED**.

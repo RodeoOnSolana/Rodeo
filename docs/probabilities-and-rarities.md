@@ -25,19 +25,19 @@ Denominator = 10_000_000
 
 ## Cowboy rank distribution
 
-The Cowboy total probability (`9_000_000`) is subdivided as follows. Desperado is included within the Cowboy total.
+The Cowboy conditional denominator is `9_000_000`. Each weight is the conditional probability of that Cowboy outcome given that the role is Cowboy. The total-probability share is `conditional * 0.9` because Cowboy occurs 90% of the time.
 
-| Rank | Weight | Probability of this rank | Share of all reveals |
+| Rank | Weight | Conditional probability | Total probability across all reveals |
 | --- | --- | --- | --- |
-| 4 | 4_047_750 | 40.4775% of Cowboy | 36.42975% |
-| 5 | 2_248_750 | 22.4875% of Cowboy | 20.23875% |
-| 6 | 1_169_350 | 11.6935% of Cowboy | 10.52415% |
-| 7 | 719_600 | 7.1960% of Cowboy | 6.47640% |
-| 8 | 449_750 | 4.4975% of Cowboy | 4.04775% |
-| 9 | 269_850 | 2.6985% of Cowboy | 2.42865% |
-| 10 | 89_950 | 0.8995% of Cowboy | 0.80955% |
-| Desperado | 5_000 | 0.0500% of Cowboy | 0.04500% |
-| **Cowboy total** | **9_000_000** | **100.0000%** | **90.00000%** |
+| 4 | 4_047_750 | 44.9750% | 40.4775% |
+| 5 | 2_248_750 | 24.9861% | 22.4875% |
+| 6 | 1_169_350 | 12.9928% | 11.6935% |
+| 7 | 719_600 | 7.9956% | 7.1960% |
+| 8 | 449_750 | 4.9972% | 4.4975% |
+| 9 | 269_850 | 2.9983% | 2.6985% |
+| 10 | 89_950 | 0.9994% | 0.8995% |
+| Desperado | 5_000 | 0.055556% | 0.0500% |
+| **Cowboy total** | **9_000_000** | **100.0000%** | **90.0000%** |
 
 Verification:
 
@@ -47,15 +47,15 @@ Verification:
 
 ## Bull tier distribution
 
-The Bull total probability (`1_000_000`) is subdivided as follows.
+The Bull conditional denominator is `1_000_000`. Each weight is the conditional probability of that Bull tier given that the role is Bull. The total-probability share is `conditional * 0.1` because Bull occurs 10% of the time.
 
-| Tier | Weight | Probability of this tier | Share of all reveals |
+| Tier | Weight | Conditional probability | Total probability across all reveals |
 | --- | --- | --- | --- |
-| 1 | 600_000 | 6.00% of Bull | 6.00000% |
-| 2 | 250_000 | 2.50% of Bull | 2.50000% |
-| 3 | 100_000 | 1.00% of Bull | 1.00000% |
-| 4 | 50_000 | 0.50% of Bull | 0.50000% |
-| **Bull total** | **1_000_000** | **100.0000%** | **10.00000%** |
+| 1 | 600_000 | 60% | 6% |
+| 2 | 250_000 | 25% | 2.5% |
+| 3 | 100_000 | 10% | 1% |
+| 4 | 50_000 | 5% | 0.5% |
+| **Bull total** | **1_000_000** | **100.0000%** | **10.0000%** |
 
 ## Suit assignment
 
@@ -85,13 +85,19 @@ Rank accrual weight determines a Cowboy position's share of the Cowboy productio
 
 To avoid floating-point math, accrual weights are stored as scaled integers. With a `ACCRUAL_WEIGHT_SCALE` of `10_000`, the weights become `10000`, `10500`, `11000`, `11800`, `12800`, `14000`, `15500`, and `10000`.
 
-A position's production share in an epoch is:
+Cowboy production rewards use a separate reward index with scale `COWBOY_REWARD_INDEX_SCALE = 1_000_000_000_000_000_000`. The index is updated each epoch as:
 
 ```text
-share = position_weight * epoch_cowboy_emission / total_active_cowboy_weight   // floor
+index_increment = cowboy_emission * COWBOY_REWARD_INDEX_SCALE / total_active_cowboy_weight   // floor
 ```
 
-Remainders from each epoch's division are carried in the reward accumulator and re-distributed in subsequent epochs. This is identical in spirit to the Bull reward-per-weight remainder policy.
+A position's accumulated production reward is:
+
+```text
+accrued = (current_index - last_index) * position_weight / COWBOY_REWARD_INDEX_SCALE   // floor
+```
+
+`ACCRUAL_WEIGHT_SCALE` is used only to represent the rank weights shown above.
 
 ## Buck power (Bull rewards and theft selection)
 

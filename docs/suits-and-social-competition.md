@@ -90,7 +90,7 @@ For the winning suit:
 | Portion | Share | Rule |
 | --- | --- | --- |
 | Equal | 50% | Divided equally among eligible Active positions in the winning suit. |
-| Proportional | 50% | Divided by verified contribution score of the linked X account. |
+| Proportional | 50% | Divided by verified contribution score per X account, then split among that account's eligible positions. |
 
 ```text
 equal_half = suit_vault * 5_000 / 10_000   // floor
@@ -98,16 +98,27 @@ proportional_half = suit_vault - equal_half   // remainder
 
 per_position_equal = equal_half / eligible_position_count   // floor; remainder carried
 account_score = verified contribution score of linked X account
-proportional_share = proportional_half * account_score / total_eligible_score   // floor; remainder carried
+account_reward = proportional_half * account_score / total_eligible_score   // floor; remainder carried
+per_position_proportional = account_reward / account_eligible_position_count   // floor; remainder carried
 
-position_reward = per_position_equal + proportional_share
+position_reward = per_position_equal + per_position_proportional
 ```
 
-If multiple positions share the same linked X account, each position receives its own `per_position_equal` plus a proportional share computed from the account's total score. Each eligible position in the winning suit is rewarded independently; the X account's score is applied to every position linked to it.
+The proportional half prevents one X account's score from being multiplied by its number of positions. The X account's total proportional allocation is divided equally among its eligible positions in the winning suit. Each eligible position in the winning suit is rewarded independently.
 
 ## Undistributed suit rewards
 
 If no positions are eligible, or total eligible score is zero, the entire suit vault rolls into the next social competition epoch. The suit-competition ANSEM is never burned. Floor-division remainder from the equal/proportional split also rolls into the next competition epoch.
+
+## Merkle claims
+
+Suit allocations are stored as Merkle leaves bound to `competition_epoch`, `position`, `owner_at_snapshot`, `amount`, and `leaf_nonce`. A position owner claims by submitting a valid Merkle proof for a leaf. The program verifies:
+- the leaf root matches the attested root;
+- `position` is Active and in the winning suit;
+- `owner_at_snapshot` matches the current `Position.owner`;
+- the leaf has not been claimed before (claim receipt/bitmap).
+
+Suit claims pay 100% of the leaf amount to the snapshot owner and are not subject to the Cowboy 80/20 claim tax.
 
 ## Oracle and attestation
 

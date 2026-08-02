@@ -22,9 +22,10 @@ The indexer ingests:
 | `position_id` | `Position.position_id` |
 | `owner` | current `Position.owner` |
 | `role` | `Position.role` |
-| `rank_or_tier` | `Position.rank_or_tier` |
+| `cowboy_kind` | `Position.cowboy_kind` |
 | `suit` | `Position.suit` |
 | `principal_atomic` | `Position.principal_amount` |
+| `unstake_eligible_at` | `Position.unstake_eligible_at` |
 | `claimable_ansem_atomic` | `Position.claimable_ansem_atomic` |
 | `status` | `Position.status` |
 | `opened_at` | `Position.opened_at` |
@@ -45,9 +46,10 @@ The indexer ingests:
 | `closed_at` | `EpochClosed.snapshot_timestamp` |
 | `cowboy_emission` | `EpochClosed.cowboy_emission` |
 | `suit_vault_contribution` | `EpochClosed.suit_vault_contribution` |
-| `free_ansem` | `EpochClosed.free_ansem` |
+| `free_ansem` | `min(reward_vault_balance, recognized_reward_balance) - total_ansem_liability` |
 | `total_cowboy_weight` | `EpochClosed.total_cowboy_weight` |
 | `total_bull_power` | `EpochClosed.total_bull_power` |
+| `recognized_reward_balance_atomic` | `RewardState.recognized_reward_balance_atomic` |
 
 ### `global_game_state`
 
@@ -69,6 +71,7 @@ The indexer ingests:
 | `competition_epoch` | `SuitCompetitionResultAttested.competition_epoch` |
 | `winning_suit` | `SuitCompetitionResultAttested.winning_suit` |
 | `merkle_root` | `SuitCompetitionResultAttested.merkle_root` |
+| `content_hash` | `SuitCompetitionResultAttested.content_hash` |
 | `total_reward_atomic` | `SuitRewardsDistributed.total_amount` |
 | `eligible_positions` | `SuitRewardsDistributed.eligible_positions` |
 
@@ -92,8 +95,12 @@ The indexer ingests:
 | `action_type` | `RandomnessRequested.action_type` |
 | `action_nonce` | `RandomnessRequested.action_nonce` |
 | `committed_slot` | `RandomnessRequested.committed_slot` |
+| `committed_protocol_epoch` | `RandomnessRequested.committed_protocol_epoch` |
+| `timeout_timestamp` | `RandomnessRequested.timeout_timestamp` |
+| `provider_program` | `RandomnessRequested.provider_program` |
+| `provider_randomness_account` | `RandomnessRequested.provider_randomness_account` |
+| `registry_root_snapshot` | `RandomnessRequested.registry_root_snapshot` |
 | `settled` | true after `RandomnessSettled` for the same `(position, action_type, action_nonce)` |
-| `provider_request_id` | `RandomnessRequested.provider_request_id` |
 
 ## Public dashboards
 
@@ -102,21 +109,25 @@ The following metrics must be publicly queryable or displayed:
 | Metric | Definition |
 | --- | --- |
 | Total RODEO staked | `principal_vault_balance` |
+| Accounted principal | `GlobalGameState.accounted_principal_atomic` |
+| Principal vault surplus | `principal_vault_balance - accounted_principal_atomic` |
 | Total live positions | `GlobalGameState.live_position_count` |
 | Total active positions | count of `positions` with `status == Active` |
 | Cowboy/Bull split | `GlobalGameState.active_cowboy_count` / `active_bull_count` |
 | Total ANSEM emitted | `RewardState.ansem_emitted_atomic` |
 | Total ANSEM claimed | `RewardState.ansem_claimed_atomic` |
 | Total unclaimed ANSEM liability | `RewardState.total_ansem_liability_atomic` |
-| Free ANSEM | `reward_vault_balance - total_ansem_liability_atomic` |
+| Recognized reward balance | `RewardState.recognized_reward_balance_atomic` |
+| Unrecognized reward surplus | `RewardState.unrecognized_reward_surplus_atomic` |
+| Free ANSEM | `min(reward_vault_balance, recognized_reward_balance) - total_ansem_liability_atomic` |
 | Runway (epochs) | `covered_epochs` from runway formula in [emissions-and-rewards.md](./emissions-and-rewards.md) |
-| Suit vault balance | suit-competition token account balance or derived from events |
+| Suit vault balance | `RewardState.suit_vault_liability_atomic` |
 | Bull reward pool balance | `RewardState.bull_pool_liability_atomic + bull_pool_unallocated_liability_atomic` |
 | Marketplace volume | sum of `PositionSold` sale prices |
 | RODEO burned (unstake tax + buybacks) | `rodeoBurnedAtomic` from router and unstake events |
 | Active mint-theft eligibility | `completed_reveals >= 50 && eligible_bulls >= 3` |
 | Latest epoch | `RewardState.current_epoch` |
-| Social competition leaderboard | off-chain scoring result file, indexed by `SuitCompetitionResultAttested.merkle_root` |
+| Social competition leaderboard | off-chain scoring result file, indexed by `SuitCompetitionResultAttested.merkle_root` and `content_hash` |
 
 ## Keeper responsibilities
 

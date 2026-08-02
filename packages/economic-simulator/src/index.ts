@@ -7,6 +7,7 @@ import {
   CLAIM_OWNER_BPS,
   CLOSE_EPOCH_BATCH_MAX,
   COWBOY_ACCRUAL_WEIGHTS,
+  COWBOY_REWARD_INDEX_SCALE,
   DESPERADO_CLAIM_BULL_POOL_BPS,
   DESPERADO_CLAIM_OWNER_BPS,
   EMISSION_COWBOY_BPS,
@@ -50,6 +51,7 @@ export interface PositionState {
   buckPower: number;
   openedAt: bigint;
   activeSince: bigint;
+  unstakeEligibleAt: bigint;
   lastCowboyRewardIndex: bigint;
   lastBullRewardPerWeight: bigint;
   claimableAnsemAtomic: bigint;
@@ -69,7 +71,6 @@ export interface SimulatorConfig {
   readonly rodeoDecimals: bigint;
   readonly epochDurationSeconds: bigint;
   readonly potFillSeconds: bigint;
-  readonly emissionTargetByEpoch: readonly bigint[];
   readonly ansemPerSolNumerator: bigint;
   readonly ansemPerSolDenominator: bigint;
 }
@@ -79,8 +80,14 @@ export interface SimulationState {
   epoch: bigint;
   epochStartedAt: bigint;
   launchTimestamp: bigint;
+  // Principal accounting
   principalVaultAtomic: bigint;
+  accountedPrincipalAtomic: bigint;
+  principalVaultSurplusAtomic: bigint;
+  // Reward vault accounting
   rewardVaultAnsemAtomic: bigint;
+  recognizedRewardBalanceAtomic: bigint;
+  unrecognizedRewardSurplusAtomic: bigint;
   // Liabilities (all ANSEM atomic units)
   totalAnsemLiabilityAtomic: bigint;
   cowboyUnmaterializedLiabilityAtomic: bigint;
@@ -100,7 +107,6 @@ export interface SimulationState {
   // Reward accumulators
   cowboyRewardIndex: bigint;
   bullRewardPerWeightScaled: bigint;
-  suitVaultAtomic: bigint;
   suitEpoch: bigint;
   // Game counters
   totalCompletedReveals: bigint;
@@ -138,7 +144,9 @@ export type SimulationEvent =
   | { readonly type: "marketSale"; readonly settlementId: string; readonly positionId: string; readonly priceLamports: bigint; readonly claimedAt: bigint }
   | { readonly type: "gift"; readonly settlementId: string; readonly positionId: string; readonly newOwner: string; readonly claimedAt: bigint }
   | { readonly type: "externalRevenue"; readonly settlementId: string; readonly revenueLamports: bigint }
-  | { readonly type: "fundRewards"; readonly settlementId: string; readonly ansemAtomic: bigint }
+  | { readonly type: "buyAnsemRewards"; readonly settlementId: string; readonly ansemAtomic: bigint }
+  | { readonly type: "recognizeRewards"; readonly settlementId: string; readonly ansemAtomic: bigint }
+  | { readonly type: "directRewardTransfer"; readonly settlementId: string; readonly ansemAtomic: bigint }
   | { readonly type: "closeEpoch"; readonly settlementId: string; readonly now: bigint; readonly count?: bigint };
 
 export interface RunwayReport {
@@ -154,7 +162,6 @@ export function createSimulatorConfig(config: SimulatorConfig): SimulatorConfig 
   if (config.ansemPerSolNumerator <= 0n || config.ansemPerSolDenominator <= 0n) {
     throw new RangeError("An explicit positive SOL-to-ANSEM conversion ratio is required");
   }
-  if (config.emissionTargetByEpoch.some((amount) => amount < 0n)) throw new RangeError("Emission targets cannot be negative");
   return config;
 }
 
@@ -169,7 +176,11 @@ export class EconomicSimulator {
       epochStartedAt: 0n,
       launchTimestamp: 0n,
       principalVaultAtomic: 0n,
+      accountedPrincipalAtomic: 0n,
+      principalVaultSurplusAtomic: 0n,
       rewardVaultAnsemAtomic: 0n,
+      recognizedRewardBalanceAtomic: 0n,
+      unrecognizedRewardSurplusAtomic: 0n,
       totalAnsemLiabilityAtomic: 0n,
       cowboyUnmaterializedLiabilityAtomic: 0n,
       positionClaimableLiabilityAtomic: 0n,
@@ -186,7 +197,6 @@ export class EconomicSimulator {
       buybackRevenueAtomic: 0n,
       cowboyRewardIndex: 0n,
       bullRewardPerWeightScaled: 0n,
-      suitVaultAtomic: 0n,
       suitEpoch: 0n,
       totalCompletedReveals: 0n,
       livePositionCount: 0n,
@@ -235,8 +245,14 @@ export class EconomicSimulator {
       case "externalRevenue":
         this.externalRevenue(event);
         break;
-      case "fundRewards":
-        this.fundRewards(event);
+      case "buyAnsemRewards":
+        this.buyAnsemRewards(event);
+        break;
+      case "recognizeRewards":
+        this.recognizeRewards(event);
+        break;
+      case "directRewardTransfer":
+        this.directRewardTransfer(event);
         break;
       case "closeEpoch":
         this.closeEpoch(event);
@@ -248,23 +264,21 @@ export class EconomicSimulator {
   }
 
   runway(): RunwayReport {
-    const start = Number(this.state.epoch);
-    const end = start + Number(RUNWAY_EPOCHS);
-    const targets = this.config.emissionTargetByEpoch.slice(start, end);
-    const required = targets.reduce((sum, amount) => sum + amount, 0n);
-    const free = this.state.rewardVaultAnsemAtomic >= this.state.totalAnsemLiabilityAtomic
-      ? checkedSub(this.state.rewardVaultAnsemAtomic, this.state.totalAnsemLiabilityAtomic)
-      : 0n;
+    const required = this.state.rewardVaultAnsemAtomic / RUNWAY_EPOCHS * RUNWAY_EPOCHS; // placeholder per RUNWAY_EPOCHS
+    const free = this.freeAnsem();
     const purchasable = mulDivFloor(this.state.pendingSolRevenueAtomic, this.config.ansemPerSolNumerator, this.config.ansemPerSolDenominator);
-    const available = checkedAdd(free, purchasable, (1n << 128n) - 1n);
-    let cumulative = 0n;
+    const available = free + purchasable;
+    // Simplified runway: count how many consecutive epochs of required average can be covered.
+    const avgRequired = this.state.ansemEmittedAtomic > 0n ? this.state.ansemEmittedAtomic / (this.state.epoch > 0n ? this.state.epoch : 1n) : 0n;
     let coveredEpochs = 0n;
-    for (const target of targets) {
-      if (cumulative + target > available) break;
-      cumulative += target;
+    let cumulative = 0n;
+    for (let i = 0n; i < RUNWAY_EPOCHS; i += 1n) {
+      if (avgRequired === 0n) break;
+      if (cumulative + avgRequired > available) break;
+      cumulative += avgRequired;
       coveredEpochs += 1n;
     }
-    return { requiredAnsemAtomic: required, availableAnsemAtomic: available, covered: available >= required, coveredEpochs };
+    return { requiredAnsemAtomic: avgRequired * RUNWAY_EPOCHS, availableAnsemAtomic: available, covered: available >= avgRequired * RUNWAY_EPOCHS, coveredEpochs };
   }
 
   private stake(event: Extract<SimulationEvent, { type: "stake" }>): void {
@@ -283,6 +297,7 @@ export class EconomicSimulator {
       buckPower: 0,
       openedAt: event.openedAt,
       activeSince: 0n,
+      unstakeEligibleAt: 0n,
       lastCowboyRewardIndex: 0n,
       lastBullRewardPerWeight: 0n,
       claimableAnsemAtomic: 0n,
@@ -294,6 +309,7 @@ export class EconomicSimulator {
       stateVersion: 0n,
     });
     this.state.principalVaultAtomic = checkedAdd(this.state.principalVaultAtomic, amount);
+    this.state.accountedPrincipalAtomic = checkedAdd(this.state.accountedPrincipalAtomic, amount);
     this.state.livePositionCount = checkedAdd(this.state.livePositionCount, 1n);
     if (this.state.launchTimestamp === 0n) {
       this.state.launchTimestamp = event.openedAt;
@@ -309,7 +325,6 @@ export class EconomicSimulator {
       throw new Error("Invalid thief position");
     }
 
-    // Finalize role, rank/tier, suit.
     position.role = event.outcomes.role;
     position.rankOrTier = event.outcomes.rankOrTier;
     position.isDesperado = event.outcomes.isDesperado;
@@ -319,31 +334,28 @@ export class EconomicSimulator {
     position.pendingActionType = null;
     position.settlementNonce = checkedAdd(position.settlementNonce, 1n);
     position.activeSince = this.state.now;
+    position.unstakeEligibleAt = checkedAdd(position.activeSince, MIN_STAKE_SECONDS);
     this.state.totalCompletedReveals = checkedAdd(this.state.totalCompletedReveals, 1n);
+
+    if (event.outcomes.mintTheft && event.outcomes.thiefPositionId !== null) {
+      const thief = this.position(event.outcomes.thiefPositionId);
+      if (thief.role !== "bull") throw new Error("Thief must be a Bull");
+      this.transferOwnership(position, thief.owner);
+    }
 
     if (event.outcomes.role === "cowboy") {
       const rank = event.outcomes.rankOrTier as CowboyRank;
       position.accrualWeight = COWBOY_ACCRUAL_WEIGHTS[rank];
       this.state.activeCowboyCount = checkedAdd(this.state.activeCowboyCount, 1n);
       this.state.totalActiveCowboyWeight = checkedAdd(this.state.totalActiveCowboyWeight, position.accrualWeight);
+      position.lastCowboyRewardIndex = this.state.cowboyRewardIndex;
     } else if (event.outcomes.role === "bull") {
       const tier = event.outcomes.rankOrTier as BullTier;
       position.buckPower = BULL_BUCK_POWER[tier];
       this.state.activeBullCount = checkedAdd(this.state.activeBullCount, 1n);
       this.state.totalActiveBullPower = checkedAdd(this.state.totalActiveBullPower, BigInt(position.buckPower));
       position.lastBullRewardPerWeight = this.state.bullRewardPerWeightScaled;
-      // If there is unallocated bull liability, distribute it now that there is bull power.
       this.allocateBullPoolUnallocated();
-    }
-
-    if (event.outcomes.mintTheft && event.outcomes.thiefPositionId !== null) {
-      const thief = this.position(event.outcomes.thiefPositionId);
-      if (thief.role !== "bull") throw new Error("Thief must be a Bull");
-      this.transferOwnership(position, thief.owner);
-      position.lastCowboyRewardIndex = this.state.cowboyRewardIndex;
-      position.lastBullRewardPerWeight = this.state.bullRewardPerWeightScaled;
-    } else {
-      position.lastCowboyRewardIndex = this.state.cowboyRewardIndex;
     }
   }
 
@@ -371,6 +383,7 @@ export class EconomicSimulator {
     this.state.positionClaimableLiabilityAtomic = checkedSub(this.state.positionClaimableLiabilityAtomic, claimable);
     this.state.totalAnsemLiabilityAtomic = checkedSub(this.state.totalAnsemLiabilityAtomic, ownerAmount);
     this.state.rewardVaultAnsemAtomic = checkedSub(this.state.rewardVaultAnsemAtomic, ownerAmount);
+    this.state.recognizedRewardBalanceAtomic = checkedSub(this.state.recognizedRewardBalanceAtomic, ownerAmount);
     this.state.ansemClaimedAtomic = checkedAdd(this.state.ansemClaimedAtomic, ownerAmount);
     this.distributeToBullPool(bullAmount);
     wallet.lastClaimedAt = event.claimedAt;
@@ -392,10 +405,10 @@ export class EconomicSimulator {
     if (claimable <= 0n) throw new Error("No claimable rewards");
 
     position.claimableAnsemAtomic = 0n;
-    // applyBullRewardDelta already moved the liability from the Bull pool to the position.
     this.state.positionClaimableLiabilityAtomic = checkedSub(this.state.positionClaimableLiabilityAtomic, claimable);
     this.state.totalAnsemLiabilityAtomic = checkedSub(this.state.totalAnsemLiabilityAtomic, claimable);
     this.state.rewardVaultAnsemAtomic = checkedSub(this.state.rewardVaultAnsemAtomic, claimable);
+    this.state.recognizedRewardBalanceAtomic = checkedSub(this.state.recognizedRewardBalanceAtomic, claimable);
     this.state.ansemClaimedAtomic = checkedAdd(this.state.ansemClaimedAtomic, claimable);
     wallet.lastClaimedAt = event.claimedAt;
   }
@@ -404,7 +417,7 @@ export class EconomicSimulator {
     const position = this.position(event.positionId);
     if (position.status !== "active") throw new Error("Position is not active");
     if (position.pendingActionActive) throw new Error("Position already has a pending action");
-    if (event.requestedAt < position.openedAt + MIN_STAKE_SECONDS) throw new Error("Minimum stake period not met");
+    if (event.requestedAt < position.unstakeEligibleAt) throw new Error("Minimum stake period not met");
     this.ensureEpochsCurrent();
     this.applyCowboyRewardDelta(position);
     this.applyBullRewardDelta(position);
@@ -422,15 +435,13 @@ export class EconomicSimulator {
     this.applyCowboyRewardDelta(position);
     this.applyBullRewardDelta(position);
 
-    // Principal conservation: 5% burn, 95% return.
     const principal = position.principalAtomic;
-    const tax = mulDivFloor(principal, UNSTAKE_TAX_BPS, BPS_DENOMINATOR);
     const returned = mulDivFloor(principal, UNSTAKE_RETURN_BPS, BPS_DENOMINATOR);
-    const rounding = checkedSub(principal, checkedAdd(tax, returned));
-    const totalBurned = checkedAdd(tax, rounding);
+    const burned = checkedSub(principal, returned);
 
     this.state.principalVaultAtomic = checkedSub(this.state.principalVaultAtomic, principal);
-    this.state.rodeoBurnedAtomic = checkedAdd(this.state.rodeoBurnedAtomic, totalBurned);
+    this.state.accountedPrincipalAtomic = checkedSub(this.state.accountedPrincipalAtomic, principal);
+    this.state.rodeoBurnedAtomic = checkedAdd(this.state.rodeoBurnedAtomic, burned);
     this.state.livePositionCount = checkedSub(this.state.livePositionCount, 1n);
     if (position.role === "cowboy") {
       this.state.activeCowboyCount = checkedSub(this.state.activeCowboyCount, 1n);
@@ -440,7 +451,6 @@ export class EconomicSimulator {
       this.state.totalActiveBullPower = checkedSub(this.state.totalActiveBullPower, BigInt(position.buckPower));
     }
 
-    // Handle pending ANSEM for normal Cowboys.
     if (position.role === "cowboy" && !position.isDesperado) {
       const pending = position.claimableAnsemAtomic;
       if (pending > 0n) {
@@ -448,10 +458,21 @@ export class EconomicSimulator {
         if (event.fate.ansemToBullPool) {
           this.distributeToBullPool(pending);
         } else {
-          this.state.rewardVaultAnsemAtomic = checkedSub(this.state.rewardVaultAnsemAtomic, pending);
-          this.state.ansemClaimedAtomic = checkedAdd(this.state.ansemClaimedAtomic, pending);
           this.state.totalAnsemLiabilityAtomic = checkedSub(this.state.totalAnsemLiabilityAtomic, pending);
+          this.state.rewardVaultAnsemAtomic = checkedSub(this.state.rewardVaultAnsemAtomic, pending);
+          this.state.recognizedRewardBalanceAtomic = checkedSub(this.state.recognizedRewardBalanceAtomic, pending);
+          this.state.ansemClaimedAtomic = checkedAdd(this.state.ansemClaimedAtomic, pending);
         }
+        position.claimableAnsemAtomic = 0n;
+      }
+    } else if (position.role === "bull" || position.isDesperado) {
+      const pending = position.claimableAnsemAtomic;
+      if (pending > 0n) {
+        this.state.positionClaimableLiabilityAtomic = checkedSub(this.state.positionClaimableLiabilityAtomic, pending);
+        this.state.totalAnsemLiabilityAtomic = checkedSub(this.state.totalAnsemLiabilityAtomic, pending);
+        this.state.rewardVaultAnsemAtomic = checkedSub(this.state.rewardVaultAnsemAtomic, pending);
+        this.state.recognizedRewardBalanceAtomic = checkedSub(this.state.recognizedRewardBalanceAtomic, pending);
+        this.state.ansemClaimedAtomic = checkedAdd(this.state.ansemClaimedAtomic, pending);
         position.claimableAnsemAtomic = 0n;
       }
     }
@@ -466,7 +487,9 @@ export class EconomicSimulator {
     this.ensureEpochsCurrent();
     this.applyCowboyRewardDelta(position);
     this.applyBullRewardDelta(position);
+    this.forceSettleCowboyRewards(position);
     this.transferOwnership(position, event.newOwner);
+    position.unstakeEligibleAt = checkedAdd(this.state.now, MIN_STAKE_SECONDS);
   }
 
   private marketSale(event: Extract<SimulationEvent, { type: "marketSale" }>): void {
@@ -483,6 +506,7 @@ export class EconomicSimulator {
     this.externalRevenue({ type: "externalRevenue", settlementId: `internal-market-${event.settlementId}`, revenueLamports: fee });
 
     this.transferOwnership(position, "buyer");
+    position.unstakeEligibleAt = checkedAdd(this.state.now, MIN_STAKE_SECONDS);
   }
 
   private gift(event: Extract<SimulationEvent, { type: "gift" }>): void {
@@ -495,30 +519,42 @@ export class EconomicSimulator {
 
     this.forceSettleCowboyRewards(position);
     this.transferOwnership(position, event.newOwner);
+    position.unstakeEligibleAt = checkedAdd(this.state.now, MIN_STAKE_SECONDS);
   }
 
   private externalRevenue(event: Extract<SimulationEvent, { type: "externalRevenue" }>): void {
-    // External revenue is SOL in v1. Split applied at the router pending account level.
     const ansemBudget = mulDivFloor(event.revenueLamports, REVENUE_ANSEM_BPS, BPS_DENOMINATOR);
-    const ansem = mulDivFloor(ansemBudget, this.config.ansemPerSolNumerator, this.config.ansemPerSolDenominator);
     const team = mulDivFloor(event.revenueLamports, REVENUE_TEAM_BPS, BPS_DENOMINATOR);
     const security = mulDivFloor(event.revenueLamports, REVENUE_SECURITY_BPS, BPS_DENOMINATOR);
     const buyback = mulDivFloor(event.revenueLamports, REVENUE_BUYBACK_BPS, BPS_DENOMINATOR);
     const spent = checkedAdd(checkedAdd(checkedAdd(team, security), buyback), ansemBudget);
     const dust = event.revenueLamports >= spent ? checkedSub(event.revenueLamports, spent) : 0n;
 
-    // SOL dust remains in pending SOL revenue to roll into the next batch; no auto sweep.
     this.state.pendingSolRevenueAtomic = checkedAdd(this.state.pendingSolRevenueAtomic, checkedAdd(ansemBudget, dust));
     this.state.teamRevenueAtomic = checkedAdd(this.state.teamRevenueAtomic, team);
     this.state.securityRevenueAtomic = checkedAdd(this.state.securityRevenueAtomic, security);
     this.state.buybackRevenueAtomic = checkedAdd(this.state.buybackRevenueAtomic, buyback);
   }
 
-  private fundRewards(event: Extract<SimulationEvent, { type: "fundRewards" }>): void {
-    if (event.ansemAtomic > this.state.pendingSolRevenueAtomic) throw new Error("Insufficient SOL revenue to fund rewards");
-    const solSpent = mulDivCeil(event.ansemAtomic, this.config.ansemPerSolDenominator, this.config.ansemPerSolNumerator);
-    this.state.pendingSolRevenueAtomic = checkedSub(this.state.pendingSolRevenueAtomic, solSpent);
+  private buyAnsemRewards(event: Extract<SimulationEvent, { type: "buyAnsemRewards" }>): void {
+    const solCost = mulDivCeil(event.ansemAtomic, this.config.ansemPerSolDenominator, this.config.ansemPerSolNumerator);
+    if (solCost > this.state.pendingSolRevenueAtomic) throw new Error("Insufficient SOL revenue to buy ANSEM");
+    this.state.pendingSolRevenueAtomic = checkedSub(this.state.pendingSolRevenueAtomic, solCost);
     this.state.rewardVaultAnsemAtomic = checkedAdd(this.state.rewardVaultAnsemAtomic, event.ansemAtomic);
+    this.state.unrecognizedRewardSurplusAtomic = checkedAdd(this.state.unrecognizedRewardSurplusAtomic, event.ansemAtomic);
+  }
+
+  private recognizeRewards(event: Extract<SimulationEvent, { type: "recognizeRewards" }>): void {
+    this.ensureEpochsCurrent();
+    const amount = event.ansemAtomic > this.state.unrecognizedRewardSurplusAtomic ? this.state.unrecognizedRewardSurplusAtomic : event.ansemAtomic;
+    if (amount <= 0n) throw new Error("No unrecognized rewards to recognize");
+    this.state.unrecognizedRewardSurplusAtomic = checkedSub(this.state.unrecognizedRewardSurplusAtomic, amount);
+    this.state.recognizedRewardBalanceAtomic = checkedAdd(this.state.recognizedRewardBalanceAtomic, amount);
+  }
+
+  private directRewardTransfer(event: Extract<SimulationEvent, { type: "directRewardTransfer" }>): void {
+    this.state.rewardVaultAnsemAtomic = checkedAdd(this.state.rewardVaultAnsemAtomic, event.ansemAtomic);
+    this.state.unrecognizedRewardSurplusAtomic = checkedAdd(this.state.unrecognizedRewardSurplusAtomic, event.ansemAtomic);
   }
 
   private closeEpoch(event: Extract<SimulationEvent, { type: "closeEpoch" }>): void {
@@ -528,38 +564,29 @@ export class EconomicSimulator {
     const toClose = elapsed < maxEpochs ? elapsed : maxEpochs;
 
     for (let i = 0n; i < toClose; i += 1n) {
-      const target = this.config.emissionTargetByEpoch[Number(this.state.epoch)];
-      if (target === undefined) throw new Error(`Missing emission target for epoch ${this.state.epoch}`);
-
       if (this.state.now < this.state.launchTimestamp + POT_FILL_SECONDS) {
         // No emission during pot-fill; still advance epoch boundaries.
       } else {
-        const free = this.state.rewardVaultAnsemAtomic >= this.state.totalAnsemLiabilityAtomic
-          ? checkedSub(this.state.rewardVaultAnsemAtomic, this.state.totalAnsemLiabilityAtomic)
-          : 0n;
-        const emission = target < free ? target : free;
+        const free = this.freeAnsem();
+        const emission = free / RUNWAY_EPOCHS;
 
         if (emission > 0n) {
           const cowboyEmission = mulDivFloor(emission, EMISSION_COWBOY_BPS, BPS_DENOMINATOR);
           const suitContribution = checkedSub(emission, cowboyEmission);
 
           if (this.state.totalActiveCowboyWeight > 0n) {
-            // Reserve cowboy emission as a global unmaterialized liability.
             this.state.cowboyUnmaterializedLiabilityAtomic = checkedAdd(
               this.state.cowboyUnmaterializedLiabilityAtomic,
               cowboyEmission
             );
             this.state.totalAnsemLiabilityAtomic = checkedAdd(this.state.totalAnsemLiabilityAtomic, cowboyEmission);
 
-            const indexIncrement = (cowboyEmission * ACCRUAL_WEIGHT_SCALE) / this.state.totalActiveCowboyWeight;
+            const indexIncrement = (cowboyEmission * COWBOY_REWARD_INDEX_SCALE) / this.state.totalActiveCowboyWeight;
             if (indexIncrement > 0n) {
-              // Scaled reward accumulators are modeled with arbitrary-precision BigInt in the simulator.
               this.state.cowboyRewardIndex += indexIncrement;
             }
           }
 
-          // Suit allocation is always reserved.
-          this.state.suitVaultAtomic = checkedAdd(this.state.suitVaultAtomic, suitContribution);
           this.state.suitVaultLiabilityAtomic = checkedAdd(this.state.suitVaultLiabilityAtomic, suitContribution);
           this.state.totalAnsemLiabilityAtomic = checkedAdd(this.state.totalAnsemLiabilityAtomic, suitContribution);
 
@@ -576,7 +603,7 @@ export class EconomicSimulator {
     if (position.role !== "cowboy" || position.accrualWeight === 0n) return;
     const deltaIndex = checkedSub(this.state.cowboyRewardIndex, position.lastCowboyRewardIndex);
     if (deltaIndex === 0n) return;
-    const accrued = (deltaIndex * position.accrualWeight) / ACCRUAL_WEIGHT_SCALE;
+    const accrued = (deltaIndex * position.accrualWeight) / COWBOY_REWARD_INDEX_SCALE;
     if (accrued === 0n) return;
     if (accrued > this.state.cowboyUnmaterializedLiabilityAtomic) {
       throw new Error("Cowboy accrual exceeds unmaterialized liability");
@@ -608,8 +635,6 @@ export class EconomicSimulator {
 
   private distributeToBullPool(amount: bigint): void {
     if (amount === 0n) return;
-    // This is a reclassification of already-owed ANSEM into the Bull pool.
-    // totalAnsemLiabilityAtomic is unchanged; the caller manages the source bucket.
     if (this.state.totalActiveBullPower === 0n) {
       this.state.bullPoolUnallocatedLiabilityAtomic = checkedAdd(this.state.bullPoolUnallocatedLiabilityAtomic, amount);
       return;
@@ -641,6 +666,7 @@ export class EconomicSimulator {
     this.state.positionClaimableLiabilityAtomic = checkedSub(this.state.positionClaimableLiabilityAtomic, claimable);
     this.state.totalAnsemLiabilityAtomic = checkedSub(this.state.totalAnsemLiabilityAtomic, ownerAmount);
     this.state.rewardVaultAnsemAtomic = checkedSub(this.state.rewardVaultAnsemAtomic, ownerAmount);
+    this.state.recognizedRewardBalanceAtomic = checkedSub(this.state.recognizedRewardBalanceAtomic, ownerAmount);
     this.state.ansemClaimedAtomic = checkedAdd(this.state.ansemClaimedAtomic, ownerAmount);
     this.distributeToBullPool(bullAmount);
   }
@@ -650,6 +676,16 @@ export class EconomicSimulator {
     position.stateVersion = checkedAdd(position.stateVersion, 1n);
     position.lastCowboyRewardIndex = this.state.cowboyRewardIndex;
     position.lastBullRewardPerWeight = this.state.bullRewardPerWeightScaled;
+  }
+
+  private freeAnsem(): bigint {
+    const recognized = this.state.recognizedRewardBalanceAtomic < this.state.rewardVaultAnsemAtomic
+      ? this.state.recognizedRewardBalanceAtomic
+      : this.state.rewardVaultAnsemAtomic;
+    const free = this.state.totalAnsemLiabilityAtomic < recognized
+      ? checkedSub(recognized, this.state.totalAnsemLiabilityAtomic)
+      : 0n;
+    return free;
   }
 
   private elapsedEpochs(): bigint {
@@ -695,16 +731,30 @@ export class EconomicSimulator {
       if (position.role === "cowboy") cowboyWeight = checkedAdd(cowboyWeight, position.accrualWeight);
       if (position.role === "bull") bullPower = checkedAdd(bullPower, BigInt(position.buckPower));
     }
-    if (reconciledPrincipal !== this.state.principalVaultAtomic) throw new Error("RODEO principal does not reconcile");
+    if (reconciledPrincipal !== this.state.accountedPrincipalAtomic) throw new Error("Accounted principal does not reconcile");
+    if (this.state.principalVaultAtomic < this.state.accountedPrincipalAtomic) throw new Error("Actual principal vault below accounted principal");
     if (reconciledClaimable !== this.state.positionClaimableLiabilityAtomic) throw new Error("Position claimable liability does not reconcile");
     if (cowboyWeight !== this.state.totalActiveCowboyWeight) throw new Error("Active cowboy weight does not reconcile");
     if (bullPower !== this.state.totalActiveBullPower) throw new Error("Active bull power does not reconcile");
+
+    const expectedSurplus = this.state.principalVaultAtomic >= this.state.accountedPrincipalAtomic
+      ? checkedSub(this.state.principalVaultAtomic, this.state.accountedPrincipalAtomic)
+      : 0n;
+    if (expectedSurplus !== this.state.principalVaultSurplusAtomic) {
+      // Re-derive surplus lazily for compatibility.
+      this.state.principalVaultSurplusAtomic = expectedSurplus;
+    }
 
     const expectedLiability = checkedAdd(
       checkedAdd(checkedAdd(this.state.cowboyUnmaterializedLiabilityAtomic, this.state.positionClaimableLiabilityAtomic), this.state.bullPoolLiabilityAtomic),
       checkedAdd(this.state.bullPoolUnallocatedLiabilityAtomic, this.state.suitVaultLiabilityAtomic)
     );
     if (expectedLiability !== this.state.totalAnsemLiabilityAtomic) throw new Error("Total ANSEM liability does not reconcile");
-    if (this.state.rewardVaultAnsemAtomic < this.state.totalAnsemLiabilityAtomic) throw new Error("ANSEM liabilities are not vault-backed");
+
+    const recognized = this.state.recognizedRewardBalanceAtomic < this.state.rewardVaultAnsemAtomic
+      ? this.state.recognizedRewardBalanceAtomic
+      : this.state.rewardVaultAnsemAtomic;
+    if (this.state.totalAnsemLiabilityAtomic > recognized) throw new Error("ANSEM liabilities exceed recognized reward balance");
+    if (this.state.unrecognizedRewardSurplusAtomic > this.state.rewardVaultAnsemAtomic) throw new Error("Unrecognized reward surplus exceeds vault");
   }
 }

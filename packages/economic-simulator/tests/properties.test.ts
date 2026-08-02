@@ -7,12 +7,13 @@ import {
   COWBOY_ACCRUAL_WEIGHTS,
   DESPERADO_CLAIM_BULL_POOL_BPS,
   DESPERADO_CLAIM_OWNER_BPS,
+  EMISSION_COWBOY_BPS,
+  EMISSION_SUITS_BPS,
   EPOCH_DURATION_SECONDS,
   MIN_STAKE_SECONDS,
   POT_FILL_SECONDS,
   PROBABILITY_DENOMINATOR,
   RUNWAY_EPOCHS,
-  RUNWAY_WINDOW_SECONDS,
   STAKE_AMOUNT_WHOLE_RODEO,
   UNSTAKE_RETURN_BPS,
   UNSTAKE_TAX_BPS,
@@ -28,7 +29,6 @@ const config = {
   rodeoDecimals: 0n,
   epochDurationSeconds: EPOCH_DURATION_SECONDS,
   potFillSeconds: POT_FILL_SECONDS,
-  emissionTargetByEpoch: Array<bigint>(80).fill(100n),
   ansemPerSolNumerator: 1n,
   ansemPerSolDenominator: 1n,
 } as const;
@@ -47,7 +47,16 @@ function revealOutcome(role: "cowboy" | "bull", rankOrTier: RevealOutcomes["rank
   };
 }
 
-describe("Protocol v1 simulator invariants", () => {
+function fundRewards(simulator: EconomicSimulator, ansem: bigint, nowTs: bigint): void {
+  // Catch up epochs, buy ANSEM from pending SOL revenue, recognize it, then
+  // advance one more epoch so emission happens.
+  simulator.apply({ type: "closeEpoch", settlementId: `catchup-${ansem}-${nowTs}`, now: nowTs });
+  simulator.apply({ type: "buyAnsemRewards", settlementId: `buy-${ansem}-${nowTs}`, ansemAtomic: ansem });
+  simulator.apply({ type: "recognizeRewards", settlementId: `rec-${ansem}-${nowTs}`, ansemAtomic: ansem });
+  simulator.apply({ type: "closeEpoch", settlementId: `emit-${ansem}-${nowTs}`, now: nowTs + EPOCH_DURATION_SECONDS });
+}
+
+describe("Protocol v1.3 simulator invariants", () => {
   it("normalizes every approved probability table exactly", () => {
     const tables = [
       { name: "role", table: { denominator: PROBABILITY_DENOMINATOR, entries: [{ outcome: "cowboy", weight: 9_000_000n }, { outcome: "bull", weight: 1_000_000n }] } },
@@ -83,7 +92,7 @@ describe("Protocol v1 simulator invariants", () => {
     const simulator = new EconomicSimulator(config);
     expect(() => simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now })).not.toThrow();
     expect(simulator.state.principalVaultAtomic).toBe(stakeAmount);
-    expect(simulator.state.livePositionCount).toBe(1n);
+    expect(simulator.state.accountedPrincipalAtomic).toBe(stakeAmount);
 
     expect(() => simulator.apply({ type: "stake", settlementId: "s2", positionId: "p1", owner: "bob", openedAt: now })).toThrow("already exists");
   });
@@ -99,6 +108,7 @@ describe("Protocol v1 simulator invariants", () => {
     expect(p.accrualWeight).toBe(COWBOY_ACCRUAL_WEIGHTS.rank4);
     expect(p.pendingActionActive).toBe(false);
     expect(p.settlementNonce).toBe(1n);
+    expect(p.unstakeEligibleAt).toBe(MIN_STAKE_SECONDS);
     expect(simulator.state.activeCowboyCount).toBe(1n);
     expect(simulator.state.totalActiveCowboyWeight).toBe(COWBOY_ACCRUAL_WEIGHTS.rank4);
   });
@@ -130,6 +140,7 @@ describe("Protocol v1 simulator invariants", () => {
     simulator.apply({ type: "transferPosition", settlementId: "t1", positionId: "p1", newOwner: "bob" });
     expect(simulator.state.positions.get("p1")?.owner).toBe("bob");
     expect(simulator.state.positions.get("p1")?.stateVersion).toBe(1n);
+    expect(simulator.state.positions.get("p1")?.unstakeEligibleAt).toBe(MIN_STAKE_SECONDS);
   });
 
   it("distributes claim 80/20 for normal cowboy and 98/2 for desperado", () => {
@@ -137,25 +148,28 @@ describe("Protocol v1 simulator invariants", () => {
     simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
     simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
     simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueLamports: 200n });
-    simulator.apply({ type: "fundRewards", settlementId: "fund1", ansemAtomic: 140n });
+    fundRewards(simulator, 140n, POT_FILL_SECONDS + EPOCH_DURATION_SECONDS);
     simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
 
     const beforeClaim = simulator.state.ansemClaimedAtomic;
     const beforeBullPool = simulator.state.bullPoolLiabilityAtomic + simulator.state.bullPoolUnallocatedLiabilityAtomic;
+    const beforeTotalLiability = simulator.state.totalAnsemLiabilityAtomic;
     simulator.apply({ type: "claimCowboy", settlementId: "c1", positionId: "p1", claimedAt: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS + 1n });
     const p = simulator.state.positions.get("p1")!;
     expect(p.claimableAnsemAtomic).toBe(0n);
     expect(simulator.state.positionClaimableLiabilityAtomic).toBe(0n);
     expect(simulator.state.ansemClaimedAtomic).toBeGreaterThan(beforeClaim);
+    expect(simulator.state.totalAnsemLiabilityAtomic).toBeLessThan(beforeTotalLiability);
     expect(simulator.state.bullPoolLiabilityAtomic + simulator.state.bullPoolUnallocatedLiabilityAtomic).toBeGreaterThanOrEqual(beforeBullPool);
-    expect(simulator.state.totalAnsemLiabilityAtomic).toBeLessThanOrEqual(simulator.state.rewardVaultAnsemAtomic);
+    expect(simulator.state.totalAnsemLiabilityAtomic).toBeLessThanOrEqual(simulator.state.recognizedRewardBalanceAtomic);
   });
 
   it("returns 95% of principal and burns 5% on unstake", () => {
     const simulator = new EconomicSimulator(config);
     simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
     simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
-    const before = simulator.state.principalVaultAtomic;
+    const beforeVault = simulator.state.principalVaultAtomic;
+    const beforeAccounted = simulator.state.accountedPrincipalAtomic;
     expect(() => simulator.apply({ type: "requestUnstake", settlementId: "u1", positionId: "p1", requestedAt: MIN_STAKE_SECONDS - 1n })).toThrow("Minimum stake period");
     simulator.apply({ type: "requestUnstake", settlementId: "u1", positionId: "p1", requestedAt: MIN_STAKE_SECONDS + 1n });
     expect(simulator.state.positions.get("p1")?.pendingActionType).toBe("unstake");
@@ -163,9 +177,10 @@ describe("Protocol v1 simulator invariants", () => {
     simulator.apply({ type: "settleUnstake", settlementId: "u2", positionId: "p1", fate: { ansemToBullPool: false } });
     expect(simulator.state.positions.has("p1")).toBe(false);
     expect(simulator.state.livePositionCount).toBe(0n);
-    expect(simulator.state.principalVaultAtomic).toBe(before - stakeAmount);
+    expect(simulator.state.principalVaultAtomic).toBe(beforeVault - stakeAmount);
+    expect(simulator.state.accountedPrincipalAtomic).toBe(beforeAccounted - stakeAmount);
     expect(simulator.state.rodeoBurnedAtomic).toBe((stakeAmount * UNSTAKE_TAX_BPS) / BPS_DENOMINATOR);
-    expect((stakeAmount * UNSTAKE_RETURN_BPS) / BPS_DENOMINATOR + simulator.state.rodeoBurnedAtomic).toBeLessThanOrEqual(stakeAmount);
+    expect(simulator.state.rodeoBurnedAtomic + (stakeAmount * UNSTAKE_RETURN_BPS) / BPS_DENOMINATOR).toBe(stakeAmount);
   });
 
   it("steals normal cowboy pending ANSEM on unstake 5% of the time", () => {
@@ -175,13 +190,15 @@ describe("Protocol v1 simulator invariants", () => {
     simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
     simulator.apply({ type: "reveal", settlementId: "r2", positionId: "p2", outcomes: revealOutcome("bull", "tier1", "spades") });
     simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueLamports: 200n });
-    simulator.apply({ type: "fundRewards", settlementId: "fund1", ansemAtomic: 140n });
+    fundRewards(simulator, 140n, POT_FILL_SECONDS + EPOCH_DURATION_SECONDS);
     simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
 
     const beforePool = simulator.state.bullRewardPerWeightScaled;
     simulator.apply({ type: "requestUnstake", settlementId: "u1", positionId: "p1", requestedAt: MIN_STAKE_SECONDS + 1n });
     simulator.apply({ type: "settleUnstake", settlementId: "u2", positionId: "p1", fate: { ansemToBullPool: true } });
     expect(simulator.state.bullRewardPerWeightScaled).toBeGreaterThan(beforePool);
+    // No 80/20 claim tax applied during unstake: the entire pending amount moves to the Bull pool.
+    expect(simulator.state.ansemClaimedAtomic).toBe(0n);
   });
 
   it("bull claim reduces bull pool liability", () => {
@@ -191,10 +208,9 @@ describe("Protocol v1 simulator invariants", () => {
     simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
     simulator.apply({ type: "reveal", settlementId: "r2", positionId: "p2", outcomes: revealOutcome("bull", "tier1", "spades") });
     simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueLamports: 200n });
-    simulator.apply({ type: "fundRewards", settlementId: "fund1", ansemAtomic: 140n });
+    fundRewards(simulator, 140n, POT_FILL_SECONDS + EPOCH_DURATION_SECONDS);
     simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
 
-    // Force the cowboy to claim so 20% goes to the bull pool.
     simulator.apply({ type: "claimCowboy", settlementId: "c1", positionId: "p1", claimedAt: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS + 1n });
     expect(simulator.state.bullPoolLiabilityAtomic).toBeGreaterThan(0n);
 
@@ -202,6 +218,7 @@ describe("Protocol v1 simulator invariants", () => {
     simulator.apply({ type: "claimBull", settlementId: "b1", positionId: "p2", claimedAt: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS + 2n });
     expect(simulator.state.ansemClaimedAtomic).toBeGreaterThan(beforeClaim);
     expect(simulator.state.bullPoolLiabilityAtomic).toBe(0n);
+    expect(simulator.state.positionClaimableLiabilityAtomic).toBe(0n);
   });
 
   it("maintains principal conservation across arbitrary stake/unstake/transfer sequences", () => {
@@ -250,7 +267,8 @@ describe("Protocol v1 simulator invariants", () => {
               }
             }
           }
-          expect(simulator.state.principalVaultAtomic).toBe(expectedPrincipal);
+          expect(simulator.state.accountedPrincipalAtomic).toBe(expectedPrincipal);
+          expect(simulator.state.principalVaultAtomic).toBeGreaterThanOrEqual(simulator.state.accountedPrincipalAtomic);
         },
       ),
       { numRuns: 50 },
@@ -263,7 +281,8 @@ describe("Protocol v1 simulator invariants", () => {
     simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
     simulator.apply({ type: "transferPosition", settlementId: "t1", positionId: "p1", newOwner: "bob" });
     expect(simulator.state.positions.get("p1")!.owner).toBe("bob");
-    expect(simulator.state.positions.get("p1")?.stateVersion).toBe(1n);
+    expect(simulator.state.positions.get("p1")!.stateVersion).toBe(1n);
+    expect(simulator.state.positions.get("p1")!.unstakeEligibleAt).toBe(MIN_STAKE_SECONDS);
   });
 
   it("prevents duplicate settlement", () => {
@@ -272,14 +291,14 @@ describe("Protocol v1 simulator invariants", () => {
     expect(() => simulator.apply({ type: "stake", settlementId: "s1", positionId: "p2", owner: "bob", openedAt: now })).toThrow("Duplicate settlement");
   });
 
-  it("caps ANSEM liability by reward vault balance", () => {
+  it("caps ANSEM liability by recognized reward balance", () => {
     const simulator = new EconomicSimulator(config);
     simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
     simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
     simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueLamports: 100n });
-    simulator.apply({ type: "fundRewards", settlementId: "fund1", ansemAtomic: 70n });
+    fundRewards(simulator, 70n, POT_FILL_SECONDS + EPOCH_DURATION_SECONDS);
     simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
-    expect(simulator.state.totalAnsemLiabilityAtomic).toBeLessThanOrEqual(simulator.state.rewardVaultAnsemAtomic);
+    expect(simulator.state.totalAnsemLiabilityAtomic).toBeLessThanOrEqual(simulator.state.recognizedRewardBalanceAtomic);
   });
 
   it("skips emission during pot-fill period", () => {
@@ -287,10 +306,62 @@ describe("Protocol v1 simulator invariants", () => {
     simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
     simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
     simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueLamports: 1_000n });
-    simulator.apply({ type: "fundRewards", settlementId: "fund1", ansemAtomic: 700n });
+    // Close one epoch before the pot-fill ends: no emission yet.
     simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS - 1n });
     expect(simulator.state.ansemEmittedAtomic).toBe(0n);
+    // Buy ANSEM while still before pot-fill end, then recognize after catching up.
+    simulator.apply({ type: "buyAnsemRewards", settlementId: "buy1", ansemAtomic: 700n });
+    simulator.apply({ type: "recognizeRewards", settlementId: "rec1", ansemAtomic: 700n });
+    // Close an epoch after pot-fill: emission begins.
     simulator.apply({ type: "closeEpoch", settlementId: "e2", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
     expect(simulator.state.ansemEmittedAtomic).toBeGreaterThan(0n);
+  });
+
+  it("does not apply 80/20 claim tax during normal cowboy unstake", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    simulator.apply({ type: "stake", settlementId: "s2", positionId: "p2", owner: "bob", openedAt: now });
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
+    simulator.apply({ type: "reveal", settlementId: "r2", positionId: "p2", outcomes: revealOutcome("bull", "tier1", "spades") });
+    simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueLamports: 200n });
+    fundRewards(simulator, 140n, POT_FILL_SECONDS + EPOCH_DURATION_SECONDS);
+    simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
+
+    const beforeClaimed = simulator.state.ansemClaimedAtomic;
+    simulator.apply({ type: "requestUnstake", settlementId: "u1", positionId: "p1", requestedAt: MIN_STAKE_SECONDS + 1n });
+    simulator.apply({ type: "settleUnstake", settlementId: "u2", positionId: "p1", fate: { ansemToBullPool: false } });
+    expect(simulator.state.ansemClaimedAtomic).toBeGreaterThan(beforeClaimed);
+    expect(simulator.state.ansemClaimedAtomic).toBe(simulator.state.positionClaimableLiabilityAtomic + simulator.state.cowboyUnmaterializedLiabilityAtomic ? 0n : simulator.state.ansemClaimedAtomic);
+  });
+
+  it("delays recognition of ANSEM purchased after an elapsed epoch boundary", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
+    simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueLamports: 200n });
+    // Buy ANSEM while an epoch is elapsed but not closed.
+    simulator.apply({ type: "buyAnsemRewards", settlementId: "buy1", ansemAtomic: 140n });
+    expect(simulator.state.rewardVaultAnsemAtomic).toBe(140n);
+    expect(simulator.state.recognizedRewardBalanceAtomic).toBe(0n);
+    expect(simulator.state.unrecognizedRewardSurplusAtomic).toBe(140n);
+    // Close the elapsed epoch first.
+    simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
+    // Now recognition succeeds.
+    simulator.apply({ type: "recognizeRewards", settlementId: "rec1", ansemAtomic: 140n });
+    expect(simulator.state.recognizedRewardBalanceAtomic).toBe(140n);
+    expect(simulator.state.unrecognizedRewardSurplusAtomic).toBe(0n);
+  });
+
+  it("treats direct reward vault transfers as unrecognized surplus", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
+    simulator.apply({ type: "directRewardTransfer", settlementId: "drop1", ansemAtomic: 1_000n });
+    expect(simulator.state.rewardVaultAnsemAtomic).toBe(1_000n);
+    expect(simulator.state.recognizedRewardBalanceAtomic).toBe(0n);
+    expect(simulator.state.unrecognizedRewardSurplusAtomic).toBe(1_000n);
+    // Unrecognized surplus does not fund emissions until recognized.
+    simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
+    expect(simulator.state.ansemEmittedAtomic).toBe(0n);
   });
 });

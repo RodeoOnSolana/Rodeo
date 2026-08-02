@@ -83,18 +83,18 @@ Treasury Council may not:
 
 A separate **2-of-3** emergency guardian multisig may toggle action-specific pause flags. Pause is **immediate** upon threshold signature. Unpause requires a **12-hour delay** after threshold signature, giving users a window to exit.
 
-Pause flags stored in `GlobalConfig`:
+Pause flags stored in `GlobalConfig` (typed as the `PauseFlag` enum):
 
-- `pause_new_stakes`
-- `pause_new_reveal_requests`
-- `pause_new_marketplace_listings`
-- `pause_router_swaps`
+- `NewStakes`
+- `NewRevealRequests`
+- `NewMarketplaceListings`
+- `RouterSwaps`
 
 The following remain available whenever technically safe:
 
 - claims;
 - randomness settlements;
-- unstake requests (unless `pause_new_reveal_requests` is repurposed for unstake requests by a future decision);
+- unstake requests;
 - unstake settlements;
 - timeout recovery.
 

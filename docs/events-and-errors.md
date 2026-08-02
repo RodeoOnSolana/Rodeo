@@ -104,18 +104,6 @@ pub struct UnstakeRequested {
 
 Emitted when an owner commits an unstake randomness action.
 
-### `UnstakeCancelled`
-
-```rust
-pub struct UnstakeCancelled {
-    pub position: Pubkey,
-    pub owner: Pubkey,
-    pub action_nonce: u64,
-}
-```
-
-Emitted when an owner cancels an unstake request before settlement.
-
 ### `BullPoolContribution`
 
 ```rust
@@ -183,6 +171,7 @@ pub struct SuitCompetitionResultAttested {
     pub competition_epoch: u64,
     pub winning_suit: Suit,
     pub merkle_root: [u8; 32],
+    pub content_hash: [u8; 32],    // hash of the off-chain result file
     pub oracle_threshold: u8,
     pub signers: Vec<Pubkey>,
 }
@@ -255,7 +244,7 @@ pub struct RandomnessVerified {
 }
 ```
 
-Emitted by the provider adapter after verifying an oracle proof. The core program consumes this output to map outcomes.
+Emitted by the provider adapter after verifying an oracle proof. This event is for observability only; the core program receives randomness through CPI return data or a consumed `VerifiedRandomness` PDA, not through this event.
 
 ### `BullRegistryUpdated`
 
@@ -276,9 +265,16 @@ Emitted when the sortition tree changes (Bull activated, deactivated, or transfe
 ```rust
 pub struct PauseToggled {
     pub guardian: Pubkey,
-    pub pause_flag: String,     // "new_stakes", "new_reveal_requests", "new_marketplace_listings", "router_swaps"
+    pub pause_flag: PauseFlag,
     pub paused: bool,           // true = paused, false = unpaused
     pub effective_at: i64,
+}
+
+pub enum PauseFlag {
+    NewStakes,
+    NewRevealRequests,
+    NewMarketplaceListings,
+    RouterSwaps,
 }
 ```
 
@@ -326,8 +322,6 @@ Emitted on timeout recovery.
 | `NoClaimableRewards` | Position has no claimable ANSEM | claim with `claimable_ansem_atomic == 0` |
 | `EpochsNotClosed` | All elapsed epochs must be closed before this operation | state change crossing an epoch boundary |
 | `InvalidProbabilityOutcome` | Randomness outcome does not map to a valid role/rank/tier/suit | provider bug or malformed proof |
-| `TheftEligibilityNotMet` | Mint theft requires 50 reveals and 3 eligible Bulls | reveal with theft flag true but criteria not met |
-| `NoEligibleTheftRecipient` | No eligible external Bull exists for mint theft | all eligible Bulls owned by victim |
 | `PendingActionBlocksTransfer` | Cannot transfer while a randomness action is pending | marketplace/gift/transfer checks |
 | `PendingActionBlocksClaim` | Cannot claim while a randomness action is pending | claim while unstake/reveal pending |
 | `ListingExpired` | Marketplace listing has expired | settlement of expired listing |
@@ -335,7 +329,7 @@ Emitted on timeout recovery.
 | `InvalidMarketReceipt` | Receipt asset does not match the position | marketplace or gift validation |
 | `InvalidSocialAttestation` | Social oracle attestation signatures are invalid | suit-competition distribution |
 | `SuitCompetitionNotEnded` | Social competition epoch has not ended | premature distribution |
-| `RunwayInsufficient` | Insufficient free ANSEM for requested emission | defensive check, should be handled by formula |
+| `UnrecognizedRewardFunding` | ANSEM in the vault is not yet recognized for liability accounting | operation that requires recognized balance before catch-up |
 | `UnauthorizedSwapVenue` | Swap venue is not in the approved list | treasury router |
 | `SlippageExceeded` | Swap output below minimum | treasury router |
 | `PausedNewStakes` | New stakes are paused | Emergency Guardian pause |

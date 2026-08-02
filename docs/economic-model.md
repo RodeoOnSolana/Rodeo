@@ -39,7 +39,8 @@ All on-chain quantities are unsigned atomic integers. Token decimals are read fr
 | `EMISSION_SUITS_BPS` | `1_000` | 10% of epoch emission to suit competition. |
 | `SUIT_EQUAL_SPLIT_BPS` | `5_000` | 50% of suit vault distributed equally. |
 | `SUIT_PROPORTIONAL_SPLIT_BPS` | `5_000` | 50% of suit vault distributed by score. |
-| `ACCRUAL_WEIGHT_SCALE` | `10_000` | Scale for Cowboy accrual weights. |
+| `ACCRUAL_WEIGHT_SCALE` | `10_000` | Scale for Cowboy rank accrual weights. |
+| `COWBOY_REWARD_INDEX_SCALE` | `1_000_000_000_000_000_000` | Scale for Cowboy production reward index. |
 | `REWARD_PER_WEIGHT_SCALE` | `1_000_000_000_000_000_000` | Scale for Bull reward-per-buck-power accumulator. |
 
 These values are code-enforced. A program upgrade can change code-enforced constants, but only through the governance-protected upgrade process (3-of-5 Upgrade Council, 72-hour timelock). They are not technically immutable.
@@ -89,9 +90,9 @@ The sum of floor allocations may leave source-token dust in the corresponding `P
 
 1. Compute tax: `principal * UNSTAKE_TAX_BPS / 10_000`. Round down.
 2. Compute return: `principal * UNSTAKE_RETURN_BPS / 10_000`. Round down.
-3. The tax amount is burned.
+3. The tax amount is burned: `burned = principal - returned`.
 4. The return amount is transferred to the owner's RODEO account.
-5. Any rounding remainder (`principal - tax - return`) stays in the principal vault and is treated as a tiny burn. This guarantees `tax + return <= principal` and avoids creating RODEO.
+5. `UNSTAKE_TAX_BPS + UNSTAKE_RETURN_BPS == 10_000`, so there is no rounding remainder and the burned amount is exactly the tax.
 
 ## Reward flows
 
@@ -105,7 +106,7 @@ The sum of floor allocations may leave source-token dust in the corresponding `P
 ### Free ANSEM
 
 ```text
-free_ansem = reward_vault_balance - ansem_liability_atomic
+free_ansem = min(actual_reward_vault_balance, recognized_reward_balance_atomic) - total_ansem_liability_atomic
 ```
 
 If `free_ansem <= 0`, the epoch emission is `0`.
@@ -116,31 +117,67 @@ If `free_ansem <= 0`, the epoch emission is `0`.
 epoch_emission = free_ansem / RUNWAY_EPOCHS   // floor division
 ```
 
-`90%` of `epoch_emission` is allocated to Cowboy production.
-`10%` of `epoch_emission` is transferred to the suit-competition vault.
+`90%` of `epoch_emission` is reserved as Cowboy production liability.
+`10%` of `epoch_emission` is reserved as suit-competition liability.
 
-Cowboy production emission is distributed pro-rata by accrual weight among active Cowboy positions during the epoch. Distribution is lazy: a global reward index is updated each epoch, and positions record their last-claimed index.
+If `total_active_cowboy_weight == 0`, the Cowboy portion remains free ANSEM in the reward vault; no Cowboy liability is created. The suit portion is always reserved.
+
+Cowboy production emission is distributed pro-rata by accrual weight among active Cowboy positions during the epoch. Distribution is lazy: a global reward index is updated each epoch, and positions record their last-claimed index. The Cowboy index uses `COWBOY_REWARD_INDEX_SCALE`.
+
+### Reward synchronization (before any claim or unstake)
+
+Cowboy synchronization:
+- `accrued = (current_cowboy_index - last_index) * position_weight / COWBOY_REWARD_INDEX_SCALE` (floor).
+- `cowboy_unmaterialized_liability_atomic -= accrued`.
+- `position_claimable_liability_atomic += accrued`.
+- `total_ansem_liability_atomic` unchanged.
+
+Bull synchronization:
+- `accrued = (current_bull_reward_per_weight - last_value) * buck_power / REWARD_PER_WEIGHT_SCALE` (floor).
+- `bull_pool_liability_atomic -= accrued`.
+- `position_claimable_liability_atomic += accrued`.
+- `total_ansem_liability_atomic` unchanged.
 
 ### Claims
 
 Normal Cowboy:
+- Synchronize the position first.
 - Owner receives `claimable * CLAIM_OWNER_BPS / 10_000` (floor).
-- Bull reward pool receives `claimable - owner_amount` (the remainder, capturing any rounding dust).
+- The remainder `claimable - owner_amount` is reclassified from `position_claimable_liability_atomic` to `bull_pool_liability_atomic`.
+- `total_ansem_liability_atomic` decreases by `owner_amount`.
 
 Desperado:
 - Owner receives `claimable * DESPERADO_CLAIM_OWNER_BPS / 10_000` (floor).
-- Bull reward pool receives `claimable - owner_amount`.
+- The remainder goes to the Bull pool.
 
-Bulls claim from the Bull reward pool using reward-per-buck-power accounting, not from Cowboy production.
+Bull:
+- Synchronize the position first.
+- Claim the full synchronized `claimable` amount.
+- `position_claimable_liability_atomic -= claimable`.
+- `total_ansem_liability_atomic -= claimable`.
+- `bull_pool_liability_atomic` was already reduced during synchronization; it is not reduced again.
+
+Normal Cowboy unstake:
+- Synchronize pending production rewards before settlement.
+- `95%` outcome: 100% of synchronized pending ANSEM is paid to the owner.
+- `5%` outcome: 100% of synchronized pending ANSEM is reclassified to the Bull pool.
+- The normal 80/20 claim tax does **not** apply during unstake.
+
+Desperado and Bull unstake: 100% of synchronized claimable ANSEM is paid to the owner safely.
 
 ### Suit competition reward
 
 At the end of a seven-day social epoch:
-1. 50% of the suit vault is divided equally among eligible active positions in the winning suit.
-2. 50% is divided proportionally to verified contribution score.
-3. Individual allocation is added as claimable ANSEM on each position.
+1. 50% of the suit vault is divided equally among eligible active positions in the winning suit (the "equal half").
+2. 50% is divided proportionally to verified contribution score (the "proportional half").
+3. The proportional half is computed per linked X account:
+   `account_reward = proportional_half * account_score / total_account_score` (floor).
+4. Each X account's reward is then divided equally among that account's eligible positions.
+5. Individual allocations are stored as Merkle leaves bound to `competition_epoch`, `position`, `owner_at_snapshot`, `amount`, and `leaf_nonce`.
+6. Suit claims pay 100% to the snapshot owner and are not subject to the Cowboy 80/20 claim tax.
+7. A claim receipt/bitmap prevents replay of the same leaf.
 
-If there are no eligible positions or no scores, the vault remains for the next competition or is burned per a future owner decision.
+If there are no eligible positions or no scores, the vault rolls into the next social epoch. It is never burned.
 
 ## Bull reward pool
 
@@ -156,7 +193,7 @@ Each Bull position records the accumulator value at its last update. A Bull's cl
 (current_accumulator - last_accumulator) * buck_power / SCALE   // floor
 ```
 
-Remainders from the scaled accumulator divisions are carried in `RewardState.cowboy_index_remainder` and `RewardState.bull_index_remainder`. They stay reserved and are re-injected into the next distribution, preventing reward-per-weight drift and ensuring the same ANSEM is never counted twice.
+Remainders from scaled accumulator divisions remain in the global accumulator value; they are not tracked as separate liabilities. They carry forward into future distributions.
 
 ## Marketplace accounting
 
@@ -169,12 +206,16 @@ Remainders from the scaled accumulator divisions are carried in `RewardState.cow
 
 ## Invariants
 
-- `sum(Position.principal_amount for every live Position) == principal_vault_balance`.
-  - Live positions include: `RevealPending`, `Active`, and positions with a pending unstake action.
+- `accounted_principal_atomic == sum(Position.principal_amount for every live Position)`.
+- `actual_principal_vault_balance >= accounted_principal_atomic`.
+- `principal_vault_surplus_atomic = actual_principal_vault_balance - accounted_principal_atomic`. Surplus is never treated as player principal and cannot be withdrawn through normal unstake.
+- Live positions include: `RevealPending`, `Active`, and positions with a pending unstake action.
 - `total_ansem_liability_atomic == cowboy_unmaterialized_liability_atomic + position_claimable_liability_atomic + bull_pool_liability_atomic + bull_pool_unallocated_liability_atomic + suit_vault_liability_atomic`.
 - `position_claimable_liability_atomic == sum(Position.claimable_ansem_atomic for every live Position)`.
-- `ansem_liability_atomic <= reward_vault_balance`.
-- `total_allocated_ansem <= ansem_emitted_atomic + external_revenue_ansem`.
+- `free_ansem = min(actual_reward_vault_balance, recognized_reward_balance_atomic) - total_ansem_liability_atomic`.
+- `total_ansem_liability_atomic <= recognized_reward_balance_atomic <= actual_reward_vault_balance`.
+- `unrecognized_reward_surplus_atomic` tracks ANSEM in the reward vault that has not been recognized for liability accounting. Direct unsolicited transfers and ANSEM purchased before catch-up are held here.
+- `total_allocated_ansem <= ansem_emitted_atomic + recognized_external_ansem`.
 - The same ANSEM is never emitted, reserved, or counted twice.
 - No negative quantities anywhere.
 

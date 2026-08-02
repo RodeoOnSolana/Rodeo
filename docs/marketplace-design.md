@@ -2,13 +2,25 @@
 
 ## Position representation
 
-A position is represented by a Metaplex Core Asset (`PositionReceipt`) under the Rodeo program's authority. The asset is the sole valid proof of ownership and is atomically linked to the `Position` PDA.
+A position is represented by a Metaplex Core Asset (`PositionReceipt`) under the Rodeo program's authority. It is atomically linked to the `Position` PDA.
 
 ```
 PositionReceipt PDA: [b"receipt", position.key().as_ref()]
 ```
 
-Rodeo holds the permanent transfer delegate and freeze delegate on every Core Asset. The asset can only be transferred through approved Rodeo instructions (sale, gift, mint theft). The asset's owner must always match `Position.owner`; instructions update both atomically.
+Rodeo holds the following permanent delegates on every Core Asset:
+
+- `PermanentTransferDelegate` controlled by the Rodeo receipt-authority PDA.
+- `PermanentFreezeDelegate` controlled by the same PDA and `frozen=true`.
+- `PermanentBurnDelegate` controlled by the same PDA.
+
+The receipt remains frozen for its entire lifetime. It can only be transferred or burned through approved Rodeo instructions (sale, gift, mint theft, unstake burn). The owner cannot transfer or burn it directly via MPL Core.
+
+Ownership is valid only when both of the following match:
+- `Position.owner` equals the intended owner;
+- the Core Asset owner equals `Position.owner`.
+
+Neither record alone is sufficient proof of ownership.
 
 The `PositionReceipt` is created at reveal settlement directly for the final owner. A successful mint theft does not mint the asset to the victim and then transfer it; the selected Bull owner receives the asset directly.
 
@@ -19,7 +31,9 @@ The `PositionReceipt` is created at reveal settlement directly for the final own
 - Generic `transfer_position` requires the current owner's signature.
 - Marketplace sale, gift, and mint theft each call the same underlying ownership-transfer primitive after applying their own preconditions.
 - A transfer is rejected while `Position.pending_action_active == true`.
-- A transfer outside approved Rodeo flows is rejected.
+- A transfer outside approved Rodeo flows is rejected (the permanent transfer delegate ensures the owner cannot move the receipt directly).
+- After a marketplace sale or gift, `Position.unstake_eligible_at = transfer_timestamp + 24 hours`.
+- After mint theft at reveal, `Position.unstake_eligible_at = active_since + 24 hours`.
 
 ## Marketplace sale
 
@@ -48,11 +62,12 @@ A buyer settles by providing the sale price. The transaction must:
 2. Synchronize the seller's Cowboy and Bull reward indices.
 3. Verify the listing is still valid (not expired, not cancelled, position still owned by seller, `state_version` matches).
 4. Force-settle the seller's pending ANSEM through the normal claim split (80/20 normal, 98/2 Desperado) or Bull claim.
-5. Atomically transfer the receipt asset from seller to buyer and update `Position.owner` to buyer.
-6. Deduct the marketplace fee (`5%` of sale price, floor) from the seller's proceeds.
-7. Route the fee into the external revenue split.
-8. Credit the remainder to the seller.
-9. Emit `PositionSold`.
+5. Atomically transfer the receipt asset from seller to buyer via the Rodeo-controlled permanent transfer delegate and update `Position.owner` to buyer.
+6. Set `Position.unstake_eligible_at = transfer_timestamp + 24 hours`.
+7. Deduct the marketplace fee (`5%` of sale price, floor) from the seller's proceeds.
+8. Route the fee into the external revenue split.
+9. Credit the remainder to the seller.
+10. Emit `PositionSold`.
 
 If any step fails, the entire transaction aborts and no ownership changes.
 
@@ -67,9 +82,10 @@ A gift is a zero-price transfer initiated by the owner.
 1. Ensure all elapsed epochs are closed or invoke the permissionless `close_epochs` catch-up path.
 2. Synchronize the owner's Cowboy and Bull reward indices.
 3. Force-settle pending ANSEM through the normal claim split or Bull claim.
-4. Atomically transfer the receipt asset and update `Position.owner`.
-5. No marketplace fee is charged.
-6. Emit `PositionGifted`.
+4. Atomically transfer the receipt asset via the Rodeo-controlled permanent transfer delegate and update `Position.owner`.
+5. Set `Position.unstake_eligible_at = transfer_timestamp + 24 hours`.
+6. No marketplace fee is charged.
+7. Emit `PositionGifted`.
 
 Gifts must also be rejected while a randomness action is pending.
 
@@ -104,6 +120,7 @@ A `Listing` is stale and must not settle when any of the following is true:
 - `Position.state_version` differs from `Listing.state_version_at_listing`;
 - `Position.pending_action_active` is `true`;
 - `Listing` has been explicitly cancelled;
+- the `PositionReceipt` Core Asset owner does not equal `Position.owner`;
 - the `PositionReceipt` is no longer under Rodeo's authority.
 
 Stale listings can be closed by anyone to reclaim rent.
