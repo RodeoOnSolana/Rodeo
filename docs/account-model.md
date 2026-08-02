@@ -10,11 +10,13 @@ All program addresses are deterministic PDAs. Seed arrays use raw byte literals 
 | `PrincipalVault` (token account) | `[b"principal-vault"]` | Holds all staked RODEO principal. Authority is `GlobalConfig`. |
 | `RewardVault` (token account) | `[b"reward-vault"]` | Holds ANSEM rewards. Authority is `GlobalConfig`. |
 | `Position` | `[b"position", global_config.key().as_ref(), &position_id.to_le_bytes()]` | Identity does not depend on owner. |
+| `PositionReceipt` (Metaplex Core Asset) | `[b"receipt", position.key().as_ref()]` | One per position; delegates controlled by Rodeo. |
+| `Listing` | `[b"listing", position.key().as_ref(), &listing_nonce.to_le_bytes()]` | Non-custodial listing PDA. Invalidated by `state_version`/`listing_nonce`. |
+| `WalletClaimCooldown` | `[b"claim_cooldown", global_config.key().as_ref(), wallet.key().as_ref()]` | Tracks last claim timestamp per wallet. |
 | `RewardState` | `[b"reward-state", global_config.key().as_ref()]` | Tracks epoch, emissions, and liabilities. |
 | `RoleStatistics` (per epoch) | `[b"role-stats", global_config.key().as_ref(), &epoch.to_le_bytes()]` | Population and principal aggregates. |
 | `BullAccumulator` (per epoch) | `[b"bull-accumulator", global_config.key().as_ref(), &epoch.to_le_bytes()]` | Reward-per-buck-power accounting state. |
 | `PendingRandomness` | `[b"randomness", position.key().as_ref(), &[action_type as u8], &action_nonce.to_le_bytes()]` | One per outstanding randomness action. |
-| `MarketReceipt` | **BLOCKED: OWNER DECISION REQUIRED** — exact seed scheme depends on whether the receipt is a Metaplex NFT, a Rodeo-specific token mint, or a program-only position record. | Must be program-controlled and atomically linked to `Position`. |
 
 ## Account schemas
 
@@ -25,6 +27,8 @@ pub struct GlobalConfig {
     pub version: u8,                 // ACCOUNT_VERSIONS.globalConfig
     pub rodeo_mint: Pubkey,
     pub ansem_mint: Pubkey,
+    pub rodeo_decimals: u8,          // read from mint at init; immutable
+    pub ansem_decimals: u8,          // read from mint at init; immutable
     pub principal_vault: Pubkey,
     pub reward_vault: Pubkey,
     pub bump: u8,
@@ -33,7 +37,7 @@ pub struct GlobalConfig {
 }
 ```
 
-No admin pubkey, no mutable fee parameters, no pause flag. Economic constants are immutable code, not state.
+No admin pubkey, no mutable fee parameters, no pause flag. Token mint addresses and decimals are supplied at production initialization and become immutable. Economic constants are immutable code, not state.
 
 ### `RewardState`
 
@@ -65,8 +69,9 @@ pub struct Position {
     pub suit: Suit,                  // 0 until revealed; Hearts | Diamonds | Clubs | Spades
     pub opened_epoch: u64,
     pub settlement_nonce: u64,       // increments on every settled randomness action
+    pub state_version: u64,          // increments on every ownership-changing event; invalidates stale listings
+    pub listing_nonce: u64,          // current listing epoch/counter
     pub claimable_ansem_atomic: u64, // accrued but unclaimed ANSEM
-    pub last_claimed_at: i64,        // wallet-level claim cooldown anchor
     pub pending_action_active: bool,
     pub pending_action_type: ActionType,
     pub pending_action_nonce: u64,
@@ -75,7 +80,23 @@ pub struct Position {
 }
 ```
 
-`Position` does not contain `last_wallet_claim_at`; claim cooldown is enforced by inspecting all positions owned by the wallet or by a separate wallet-level account. The exact mechanism is a `BLOCKED: OWNER DECISION REQUIRED` implementation detail.
+`state_version` increments every time ownership or fundamental state changes (sale, gift, mint theft, unstake closure). Listings store the `state_version` and `listing_nonce` observed at listing time; a settlement instruction verifies the stored values match the live `Position` to prevent stale-listing settlement.
+
+Claim cooldown is enforced through the `WalletClaimCooldown` PDA, not by scanning positions.
+
+### `WalletClaimCooldown`
+
+```rust
+pub struct WalletClaimCooldown {
+    pub version: u8,              // ACCOUNT_VERSIONS.walletClaimCooldown
+    pub global_config: Pubkey,
+    pub wallet: Pubkey,
+    pub last_claimed_at: i64,     // unix timestamp of last successful claim by this wallet
+    pub bump: u8,
+}
+```
+
+Created lazily on first claim. The one-hour cooldown is enforced against `last_claimed_at`.
 
 ### `RoleStatistics`
 
@@ -106,7 +127,7 @@ pub struct BullAccumulator {
 }
 ```
 
-`REWARD_PER_WEIGHT_SCALE` is chosen so that `u128` intermediates cannot overflow for the approved tokenomics. The exact scale is `BLOCKED: OWNER DECISION REQUIRED` pending token-decimal and max-supply analysis, but must be at least `1_000_000` and must be immutable.
+`REWARD_PER_WEIGHT_SCALE` is `1_000_000_000_000_000_000` (`1e18`), chosen so that `u128` intermediates cannot overflow for the approved tokenomics. It is immutable.
 
 ### `PendingRandomness`
 
@@ -158,6 +179,4 @@ Current account versions (from `packages/protocol-definition/src/accounts.ts`):
 
 ## Open questions (BLOCKED)
 
-- `MarketReceipt` asset type and PDA seeds: **BLOCKED: OWNER DECISION REQUIRED**.
-- Wallet-level claim-cooldown account design: **BLOCKED: OWNER DECISION REQUIRED**.
-- `REWARD_PER_WEIGHT_SCALE` exact value: **BLOCKED: OWNER DECISION REQUIRED** pending token decimal and max-epoch reward analysis.
+None for this document. The owner decisions have resolved the account type, PDA seeds, claim-cooldown design, and reward scale.

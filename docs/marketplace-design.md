@@ -2,15 +2,13 @@
 
 ## Position representation
 
-A position must be represented by a program-controlled, transferable receipt asset. The receipt is the only valid proof of ownership and must be atomically linked to the `Position` PDA.
+A position is represented by a Metaplex Core Asset (`PositionReceipt`) under the Rodeo program's authority. The asset is the sole valid proof of ownership and is atomically linked to the `Position` PDA.
 
-The exact receipt type is **BLOCKED: OWNER DECISION REQUIRED**. Candidates:
+```
+PositionReceipt PDA: [b"receipt", position.key().as_ref()]
+```
 
-1. A Metaplex NFT mint where the position PDA is the mint authority or freeze authority.
-2. A Rodeo-specific program token mint managed entirely by `rodeo_core`.
-3. A program-only ownership record with no separate token.
-
-Until the decision is made, the protocol references a generic `MarketReceipt` account. Implementations must enforce that `MarketReceipt` transfers only through approved Rodeo flows and that `Position.owner` updates atomically with receipt movement.
+Rodeo holds the permanent transfer delegate and freeze delegate on every Core Asset. The asset can only be transferred through approved Rodeo instructions (sale, gift, mint theft). The asset's owner must always match `Position.owner`; instructions update both atomically.
 
 ## Ownership transfer rules
 
@@ -25,12 +23,20 @@ Until the decision is made, the protocol references a generic `MarketReceipt` ac
 
 ### Listing
 
-A seller creates a listing that references a `Position` and a sale price. The exact listing mechanism (escrow, direct listing, order book) is **BLOCKED: OWNER DECISION REQUIRED**. Minimum requirements:
+A seller creates a non-custodial `Listing` PDA that references a `Position` and a sale price in SOL.
+
+```
+Listing PDA: [b"listing", position.key().as_ref(), &listing_nonce.to_le_bytes()]
+```
+
+Listing requirements:
 
 - Only the `Position` owner may list.
 - The position must be `Active` and have no pending randomness action.
-- The receipt asset must remain under program control while listed (escrowed or locked).
-- The listing records: `position`, `seller`, `price_atomic`, `denomination`, `created_at`, optional expiration.
+- The `PositionReceipt` Core Asset remains under Rodeo's freeze authority while listed.
+- The `Listing` records: `position`, `seller`, `price_lamports`, `created_at`, `state_version_at_listing`, `listing_nonce`.
+
+`state_version_at_listing` is the `Position.state_version` at listing time. A settlement instruction rejects the sale if `Position.state_version` has changed since listing, which invalidates listings after any ownership-changing event, unstake, or explicit cancellation.
 
 ### Atomic settlement
 
@@ -48,7 +54,7 @@ If any step fails, the entire transaction aborts and no ownership changes.
 
 ### Denomination
 
-The asset in which the sale price and marketplace fee are denominated is **BLOCKED: OWNER DECISION REQUIRED**. Candidates include SOL, USDC, or RODEO. The choice affects escrow design and revenue accounting.
+Marketplace v1 sales are denominated in **SOL only**. The sale price, marketplace fee, and seller proceeds are all in SOL lamports. The marketplace fee enters the external revenue split in SOL.
 
 ## Direct gift
 
@@ -86,19 +92,18 @@ No listing fee, no royalty on secondary sales, and no cancellation fee are defin
 
 ## Stale listing prevention
 
-Listings must be invalidated on:
+A `Listing` is stale and must not settle when any of the following is true:
 
-- position transfer;
-- position unstake (position closed);
-- position entering `RandomnessPending` status;
-- listing cancellation by seller.
+- `Position.owner` no longer equals `Listing.seller`;
+- `Position.state_version` differs from `Listing.state_version_at_listing`;
+- `Position.pending_action_active` is `true`;
+- `Listing` has been explicitly cancelled;
+- the `PositionReceipt` is no longer under Rodeo's authority.
 
-The exact validation mechanism (oracle check, listing nonce tied to position settlement_nonce, explicit cancellation instruction) is **BLOCKED: OWNER DECISION REQUIRED**.
+Stale listings can be closed by anyone to reclaim rent.
 
 ## Open questions (BLOCKED)
 
-- `MarketReceipt` asset type and PDA seeds: **BLOCKED: OWNER DECISION REQUIRED**.
-- Marketplace price/fee denomination: **BLOCKED: OWNER DECISION REQUIRED**.
-- Listing/escrow architecture: **BLOCKED: OWNER DECISION REQUIRED**.
-- Secondary royalties, listing fees, cancellation fees: **BLOCKED: OWNER DECISION REQUIRED**.
-- Stale-listing invalidation mechanism: **BLOCKED: OWNER DECISION REQUIRED**.
+- Secondary royalties, listing fees, and cancellation fees: **BLOCKED: OWNER DECISION REQUIRED** (Protocol v1 has no royalty, listing fee, or cancellation fee).
+- Listing expiration policy (e.g., fixed TTL, epoch-based, or none): **BLOCKED: OWNER DECISION REQUIRED**.
+- Whether bids, auctions, or private offers are supported in future versions: **BLOCKED: OWNER DECISION REQUIRED**.

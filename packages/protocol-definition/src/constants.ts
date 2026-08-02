@@ -36,10 +36,7 @@ export const REVENUE_SECURITY_BPS = 500n;
 export const CLAIM_COOLDOWN_SECONDS = 60n * 60n;
 export const MAX_POSTS_PER_X_ACCOUNT_PER_SUIT_EPOCH = 3n;
 
-// Scaling factors for integer reward accounting. Exact final values are
-// BLOCKED: OWNER DECISION REQUIRED pending token-decimal and max-supply analysis.
-// The protocol uses these placeholders until the owner freezes them.
 export const ACCRUAL_WEIGHT_SCALE = 10_000n;
-export const REWARD_PER_WEIGHT_SCALE = 1_000_000n;
+export const REWARD_PER_WEIGHT_SCALE = 1_000_000_000_000_000_000n;
 
 export const PROBABILITY_DENOMINATOR = 10_000_000n;

@@ -143,14 +143,13 @@ The protocol requires the following data to be publicly available:
 
 - Complete event history via RPC/block explorer.
 - Probability tables and economic constants in this repository.
-- Social-competition result files (IPFS/Arweea/public repository).
-- Merkle root and attestation signatures on-chain.
+- Social-competition result files via immutable storage (IPFS or Arweave) plus a public canonical reference.
+- Merkle root and content hash published on-chain.
 - Source code and build verification (reproducible builds where possible).
 
-The exact storage backend for off-chain result files is **BLOCKED: OWNER DECISION REQUIRED**.
+The recommended v1 stack is Helius for RPC/webhooks, PostgreSQL for indexed data, TypeScript for indexer/keeper, and IPFS/Arweave for immutable result files.
 
 ## Open questions (BLOCKED)
 
-- Indexer database and web framework: **BLOCKED: OWNER DECISION REQUIRED**.
-- Off-chain storage for social result files: **BLOCKED: OWNER DECISION REQUIRED**.
 - Public API rate limits and caching strategy: **BLOCKED: OWNER DECISION REQUIRED**.
+- Reproducible-build tooling and attestation service: **BLOCKED: OWNER DECISION REQUIRED**.

@@ -39,7 +39,25 @@ Posts are evaluated off-chain and attested on-chain by a multisignature oracle. 
 - A maximum of three scored posts per linked X account per competition epoch are counted.
 - Off-topic, spam, bot, or manipulated posts are excluded by the oracle scoring process.
 
-The exact scoring algorithm (keyword weights, engagement formula, anti-gaming) is **BLOCKED: OWNER DECISION REQUIRED**.
+### Logarithmic scoring model
+
+For each eligible post, a logarithmic engagement score is computed:
+
+```text
+post_score = log10(1 + engagement_count)
+```
+
+where `engagement_count` is the verified public engagement metric (e.g., likes + retweets + replies, excluding the author's own interactions). The logarithm caps the advantage of raw engagement volume and rewards authentic, viral content over bought amplification.
+
+An X account's total contribution score for the epoch is the sum of the top three eligible `post_score` values for that account:
+
+```text
+account_score = sum(top_3_post_scores)
+```
+
+A suit's total score is the sum of `account_score` for every linked X account that posted at least one eligible post in that suit during the epoch.
+
+The winning suit is the suit with the highest total score. Ties are broken by the earliest timestamp of the last qualifying post among tied suits; if still tied, the tie remains and rewards are split equally among the tied suits.
 
 ## Funding
 
@@ -56,13 +74,14 @@ The vault accumulates for 28 epochs. At the end of the competition epoch, the en
 The winning suit is determined by the off-chain scoring system and attested on-chain. The attestation includes:
 
 - competition epoch number;
-- winning suit;
+- winning suit (highest total score, with tie-breaker documented above);
 - total eligible score per suit;
 - list of eligible X accounts and their verified contribution scores;
 - Merkle root of the result file;
+- content hash of the result file;
 - multisignature oracle signatures.
 
-The exact winning criterion (highest total score, highest average score, highest number of eligible posts, or a hybrid) is **BLOCKED: OWNER DECISION REQUIRED**. The default is highest total verified contribution score among eligible posts.
+The winning suit is the suit with the highest total `account_score`.
 
 ## Reward split
 
@@ -84,7 +103,7 @@ proportional_share = proportional_half * account_score / total_eligible_score   
 position_reward = per_position_equal + proportional_share
 ```
 
-If multiple positions share the same linked X account, each position receives its own `per_position_equal` plus a proportional share computed from the account's total score. The exact handling of multiple positions per wallet is **BLOCKED: OWNER DECISION REQUIRED** (default: same account score applied to each eligible position).
+If multiple positions share the same linked X account, each position receives its own `per_position_equal` plus a proportional share computed from the account's total score. Each eligible position in the winning suit is rewarded independently; the X account's score is applied to every position linked to it.
 
 ## Undistributed suit rewards
 
@@ -94,26 +113,28 @@ If no positions are eligible, or total eligible score is zero, the suit vault re
 
 The social oracle is a multisignature authority that attests competition results. It must:
 
-- publish a complete result file off-chain (e.g., IPFS/Arweave or a public repository);
-- include a Merkle root of the result file in the on-chain attestation;
+- publish a complete result file off-chain;
+- include the Merkle root and content hash of the result file in the on-chain attestation;
 - require a threshold of signer signatures;
 - emit a `SocialResultAttested` event.
 
 The oracle does not custody tokens. It only authorizes the on-chain distribution of the already-allocated suit vault.
 
-## Indexer responsibilities
+## Off-chain stack
 
-The off-chain indexer:
+The recommended v1 off-chain infrastructure is:
 
-- records every X account link per epoch;
-- exposes a public API for scoring inputs;
-- verifies the result file against the on-chain Merkle root;
-- publishes eligible-post leaderboards.
+- **RPC / webhooks:** Helius
+- **Database:** PostgreSQL
+- **Indexer and keeper:** TypeScript services consuming on-chain events
+- **Immutable result-file storage:** IPFS or Arweave copy, with a public canonical reference
+- **On-chain attestation:** Merkle root and content hash published on-chain
+
+The indexer records every X account link per epoch, exposes a public API for scoring inputs, verifies result files against on-chain Merkle roots, and publishes eligible-post leaderboards.
 
 ## Open questions (BLOCKED)
 
-- Exact social scoring algorithm and anti-gaming rules: **BLOCKED: OWNER DECISION REQUIRED**.
-- Winning-suit criterion: **BLOCKED: OWNER DECISION REQUIRED**.
 - Oracle signer set, threshold, and attestation format: **BLOCKED: OWNER DECISION REQUIRED**.
-- Handling of multiple positions linked to the same X account: **BLOCKED: OWNER DECISION REQUIRED**.
 - Policy for undistributed suit rewards: **BLOCKED: OWNER DECISION REQUIRED**.
+- Exact X API integration and post-verification pipeline: **BLOCKED: OWNER DECISION REQUIRED**.
+- Tie-breaker rule if timestamp-based resolution is infeasible: **BLOCKED: OWNER DECISION REQUIRED**.

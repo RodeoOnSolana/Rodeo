@@ -35,54 +35,65 @@ Floor allocation may leave dust in the router pending account. The dust sweep ru
 
 ## Swap safety rules
 
-- Only approved swap venues may be used. The approved list is **BLOCKED: OWNER DECISION REQUIRED**.
-- Each swap must enforce a minimum output amount (slippage protection).
+Protocol v1 routes swaps through **Jupiter** as the approved swap aggregator. The Treasury Council may trigger swaps only when the following safety conditions are met:
+
+| Parameter | Value |
+| --- | --- |
+| Minimum batch | $100-equivalent in SOL (computed off-chain from a reliable oracle/price source) |
+| Maximum slippage | 1% |
+| Maximum estimated price impact | 0.5% |
+| Dust handling | Dust remains in the router pending account; there is no arbitrary dust-sweep recipient. |
+
 - Failed or unsafe swaps leave funds in the router pending state rather than forcing execution.
 - The router must not hold player principal or accrued ANSEM.
-- No admin may redirect the 70/15/10/5 split.
+- No admin may redirect the 70/15/10/5 split or sweep dust to an unapproved address.
 
 ## Treasury router account model
 
 The router is expected to be implemented in `programs/rodeo_router`. Recommended accounts:
 
-- `RouterConfig`: approved venues, minimum output parameters, destination addresses.
+- `RouterConfig`: approved swap aggregator (Jupiter v1), destination addresses, safety parameters, timelock config.
 - `PendingBatch`: accumulated revenue awaiting execution, source token balance, epoch marker.
 
 The exact account schema is Phase 2 implementation work and is not designed here.
 
 ## Governance model
 
-### Upgrade authority
+### Upgrade Council
 
-Program upgrade authority is controlled by a multisig plus timelock. The timelock duration is **BLOCKED: OWNER DECISION REQUIRED** (recommended minimum 48 hours for material upgrades).
+Program upgrade authority is controlled by a **3-of-5 Squads multisig**. All upgrades pass through a **72-hour timelock** before execution. The Council may propose upgrades to `rodeo_core`, `rodeo_market`, `rodeo_router`, and the randomness provider adapter.
 
-### Treasury authority
+### Treasury Council
 
-Treasury authority is separate from program upgrade authority. Treasury authority may:
+Treasury authority is controlled by a separate **3-of-5 Squads multisig**. Treasury actions pass through a **48-hour timelock**. The Treasury Council may:
 
-- trigger approved swaps;
-- claim dust or leftover router funds into the ANSEM reward vault (if the dust-sweep rule so specifies);
-- update the approved swap venue list if and only if such updates are allowed by a governance decision.
+- trigger approved Jupiter swaps;
+- claim router dust or leftover funds into the ANSEM reward vault (only if the dust policy permits);
+- update approved Jupiter route parameters (slippage, price-impact ceiling, minimum batch) within fixed bounds set at deployment;
+- update the destination addresses for team, security, and burn operations through a Treasury Council action.
 
-Treasury authority may not:
+Treasury Council may not:
 
 - move player principal from the principal vault;
 - reduce, cancel, or redirect accrued ANSEM liabilities;
 - change the 70/15/10/5 revenue split;
-- change core economic parameters listed below.
+- change core economic parameters listed below;
+- add arbitrary dust-sweep recipients.
 
-### Emergency guardians
+### Emergency Guardians
 
-A separate emergency guardian multisig may pause specific risky actions. Emergency controls may pause:
+A separate **2-of-3** emergency guardian multisig may pause specific risky actions. Pause is **immediate** upon threshold signature. Unpause requires a **12-hour delay** after threshold signature, giving users a window to exit.
+
+Emergency controls may pause:
 
 - new stakes;
 - new marketplace listings;
-- new randomness commitments.
+- new randomness commitments and unstake requests.
 
 Emergency controls should preserve safe claims and exits whenever possible. They must not:
 
 - withdraw player principal;
-- block completed claims or unstakes that require no new randomness;
+- block completed claims or unstakes that require no new randomness commitment;
 - modify economic constants.
 
 ### Immutable core economic parameters
@@ -115,8 +126,6 @@ The 5% security and operations allocation funds audits, bug bounties, infrastruc
 
 ## Open questions (BLOCKED)
 
-- Approved swap venues and routing parameters: **BLOCKED: OWNER DECISION REQUIRED**.
-- Multisig members, thresholds, and timelock duration: **BLOCKED: OWNER DECISION REQUIRED**.
-- Emergency guardian members and pause scope: **BLOCKED: OWNER DECISION REQUIRED**.
-- Exact dust-sweep rule for router remainders: **BLOCKED: OWNER DECISION REQUIRED**.
-- Whether treasury authority may update the approved venue list: **BLOCKED: OWNER DECISION REQUIRED**.
+- Exact Squads program addresses, member pubkeys, and timelock program instances: **BLOCKED: OWNER DECISION REQUIRED**.
+- Off-chain price oracle used to compute the $100-equivalent minimum batch: **BLOCKED: OWNER DECISION REQUIRED**.
+- Whether Jupiter v6 API, on-chain Jupiter program, or a custom keeper integration is used: **BLOCKED: OWNER DECISION REQUIRED**.

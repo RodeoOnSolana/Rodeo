@@ -2,7 +2,7 @@
 
 ## Token units
 
-All on-chain quantities are unsigned atomic integers. Token decimals are treated as a display concern and are intentionally left out of protocol arithmetic. The protocol operates in the smallest indivisible unit reported by each mint.
+All on-chain quantities are unsigned atomic integers. Token decimals are read from the mint accounts at initialization and stored in `GlobalConfig`; they are used only for display and input parsing, never for protocol arithmetic. The protocol operates in the smallest indivisible unit reported by each mint.
 
 | Symbol | Unit | Notes |
 | --- | --- | --- |
@@ -37,10 +37,12 @@ All on-chain quantities are unsigned atomic integers. Token decimals are treated
 | `EMISSION_SUITS_BPS` | `1_000` | 10% of epoch emission to suit competition. |
 | `SUIT_EQUAL_SPLIT_BPS` | `5_000` | 50% of suit vault distributed equally. |
 | `SUIT_PROPORTIONAL_SPLIT_BPS` | `5_000` | 50% of suit vault distributed by score. |
+| `ACCRUAL_WEIGHT_SCALE` | `10_000` | Scale for Cowboy accrual weights. |
+| `REWARD_PER_WEIGHT_SCALE` | `1_000_000_000_000_000_000` | Scale for Bull reward-per-buck-power accumulator. |
 
 ## External revenue split
 
-External revenue is realized fee receipts denominated in whatever token the marketplace/router receives. The split is applied after conversion to the destination token where applicable.
+External revenue is realized fee receipts denominated in SOL (Protocol v1). Marketplace fees are collected in SOL and routed through Jupiter. The split is applied after conversion to the destination token where applicable.
 
 | Destination | Share | Rounding |
 | --- | --- | --- |
@@ -158,8 +160,5 @@ Remainders are carried in `division_remainder_atomic` and re-injected into the p
 
 ## Open questions (BLOCKED)
 
-- Exact RODEO and ANSEM token decimals: **BLOCKED: OWNER DECISION REQUIRED**.
 - Maximum balance/supply bounds for account sizing: **BLOCKED: OWNER DECISION REQUIRED**.
-- `REWARD_PER_WEIGHT_SCALE` exact value and overflow analysis: **BLOCKED: OWNER DECISION REQUIRED**.
-- Dust sweep rule for external revenue router: **BLOCKED: OWNER DECISION REQUIRED** (the 70% floor rule is approved; exact sweep trigger is not).
 - Whether leftover suit vaults rollover or burn: **BLOCKED: OWNER DECISION REQUIRED**.

@@ -2,7 +2,7 @@
 
 ## Status
 
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **State:** authoritative source of truth for contract, frontend, indexer, keeper, marketplace, and treasury implementation.  
 **Replaces:** any prior `rodeo-game-spec.md` drafts and the Phase 0 economic placeholders.  
 **Scope:** Phase 1 protocol design only. No production Anchor instructions are implemented in this branch.
@@ -214,17 +214,37 @@ Phase 0 delivered:
 
 Phase 1 fills in all economic and game rules while leaving production instruction implementations for Phase 2. No Phase 0 behavior is overturned; probability tables, constants, and emission formulas are added where Phase 0 intentionally left placeholders.
 
+## Owner decisions applied in v1.1.0
+
+The following decisions have been applied across the v1 sub-documents:
+
+- Token mint addresses and decimals are supplied at production initialization and become immutable; decimals are read from the mint accounts and stored in `GlobalConfig`.
+- `ACCRUAL_WEIGHT_SCALE = 10,000` and `REWARD_PER_WEIGHT_SCALE = 1,000,000,000,000,000,000`.
+- Position receipt is a Metaplex Core Asset with Rodeo-controlled permanent transfer and freeze delegates.
+- Marketplace sales are denominated in SOL only.
+- Non-custodial `Listing` PDAs derive from `[b"listing", position, listing_nonce]`; stale listings are prevented by `Position.state_version` and `listing_nonce`.
+- Wallet claim cooldown uses a `[b"claim_cooldown", global_config, wallet]` PDA.
+- Randomness uses a provider-adapter architecture with Switchboard as the proposed v1 provider; 30-minute timeout; permissionless settlement; reveal principal recovery before assignment; unstake-request cancellation leaves the position staked.
+- Governance: 3-of-5 Squads Upgrade Council (72-hour timelock), 3-of-5 Squads Treasury Council (48-hour timelock), 2-of-3 Emergency Guardians (immediate pause, 12-hour unpause delay).
+- Jupiter is the approved v1 swap aggregator with $100-equivalent minimum batch, 1% max slippage, 0.5% max price impact, no arbitrary dust-sweep recipient.
+- Logarithmic social scoring model with maximum three eligible posts per linked X account per epoch.
+- Recommended off-chain stack: Helius RPC/webhooks, PostgreSQL, TypeScript indexer/keeper, IPFS/Arweave immutable result files, on-chain Merkle root and content hash.
+
 ## Intentionally unresolved for Protocol Specification v1
 
-The following are explicitly not designed or implemented in this version. They are marked `BLOCKED: OWNER DECISION REQUIRED` in the relevant sub-documents:
+The following remain `BLOCKED: OWNER DECISION REQUIRED` in the relevant sub-documents:
 
-- transfer permissions and NFT control (who besides the owner can initiate a transfer, and whether the receipt asset is an NFT or a Rodeo-specific program asset);
 - pending-action transfer behavior (whether any future action type may be transferred with the pending action following the new owner);
 - production unstake instruction implementation (the economic rules are specified; the on-chain instruction remains Phase 2 work);
-- production randomness provider selection and exact oracle integration;
-- fine-grained economic formulas and constants beyond those approved above (e.g., display-decimal policy, minimum swap output thresholds);
-- marketplace settlement engine implementation (listing, escrow, bid/ask matching, cancellation);
-- revenue routing contract implementation (swap venue integration, keeper execution bot);
-- governance and emergency controls implementation (multisig members, timelock duration, pause scope).
+- production randomness provider exact Switchboard integration (queue, task format, CPI vs. callback, proof serialization) and whether commit/reveal hashing is retained as defense-in-depth;
+- marketplace listing expiration policy, and future support for bids/auctions/private offers;
+- marketplace secondary royalties, listing fees, and cancellation fees (v1 has none);
+- exact Squads program addresses, member pubkeys, and timelock program instances;
+- off-chain price oracle for the $100-equivalent minimum batch and Jupiter integration mode (v6 API vs. on-chain program vs. custom keeper);
+- incentive/reward for permissionless randomness settler bot;
+- policy for undistributed suit-competition rewards;
+- exact X API integration and post-verification pipeline;
+- tie-breaker rule if timestamp-based winning-suit resolution is infeasible;
+- public API rate limits, caching strategy, and reproducible-build tooling.
 
 No implementation in any branch may silently resolve these questions. Each requires an explicit owner decision and a follow-up spec amendment.
