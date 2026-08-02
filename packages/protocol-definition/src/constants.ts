@@ -1,3 +1,20 @@
+export const RODEO_DECIMALS_MAX = 9; // reject configurations that would overflow u64 intermediates
+
+export const RODEO_TOTAL_SUPPLY_WHOLE = 1_000_000_000n;
+export const STAKE_AMOUNT_WHOLE_RODEO = 100_000n;
+
+export function rodeoTotalSupplyAtomic(decimals: bigint | number): bigint {
+  const d = BigInt(decimals);
+  if (d > BigInt(RODEO_DECIMALS_MAX)) throw new RangeError("RODEO decimals too large");
+  return RODEO_TOTAL_SUPPLY_WHOLE * 10n ** d;
+}
+
+export function stakeAmountAtomic(decimals: bigint | number): bigint {
+  const d = BigInt(decimals);
+  if (d > BigInt(RODEO_DECIMALS_MAX)) throw new RangeError("RODEO decimals too large");
+  return STAKE_AMOUNT_WHOLE_RODEO * 10n ** d;
+}
+
 export const EPOCH_DURATION_SECONDS = 6n * 60n * 60n;
 export const RUNWAY_WINDOW_SECONDS = 10n * 24n * 60n * 60n;
 export const RUNWAY_EPOCHS = RUNWAY_WINDOW_SECONDS / EPOCH_DURATION_SECONDS;
@@ -5,8 +22,6 @@ export const POT_FILL_SECONDS = 12n * 60n * 60n;
 export const SUIT_EPOCH_DAYS = 7n;
 export const SUIT_EPOCHS = SUIT_EPOCH_DAYS * 24n * 60n * 60n / EPOCH_DURATION_SECONDS;
 
-export const TOTAL_RODEO_SUPPLY_ATOMIC = 1_000_000_000n;
-export const STAKE_AMOUNT_ATOMIC = 100_000n;
 export const MIN_STAKE_SECONDS = 24n * 60n * 60n;
 
 export const BPS_DENOMINATOR = 10_000n;
@@ -35,6 +50,8 @@ export const REVENUE_SECURITY_BPS = 500n;
 
 export const CLAIM_COOLDOWN_SECONDS = 60n * 60n;
 export const MAX_POSTS_PER_X_ACCOUNT_PER_SUIT_EPOCH = 3n;
+export const RANDOMNESS_TIMEOUT_SECONDS = 30n * 60n;
+export const CLOSE_EPOCH_BATCH_MAX = 8n;
 
 export const ACCRUAL_WEIGHT_SCALE = 10_000n;
 export const REWARD_PER_WEIGHT_SCALE = 1_000_000_000_000_000_000n;

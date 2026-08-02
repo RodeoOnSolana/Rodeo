@@ -7,18 +7,29 @@ These invariants must hold before and after every successful instruction, and no
 ### RODEO principal conservation
 
 ```text
-sum(Position.principal_amount for Active positions) + principal_vault_deficit = principal_vault_balance
+sum(Position.principal_amount for every live Position) = principal_vault_balance
 ```
 
-The principal vault balance must equal the sum of all active-position principals plus any rounding remainder attributable to accepted protocol rounding. No RODEO principal may be moved to a treasury, reward, or external account except through the approved unstake return/burn path.
+Live positions include `RevealPending`, `Active`, and positions with a pending unstake action. The principal vault balance must exactly equal the sum of all live-position principals. No RODEO principal may be moved to a treasury, reward, or external account except through the approved unstake return/burn path.
 
 ### ANSEM liability cap
 
 ```text
-ansem_liability_atomic <= reward_vault_balance
+total_ansem_liability_atomic <= reward_vault_balance
 ```
 
-Total unclaimed ANSEM liabilities (position claimable balances, Bull pool allocations, suit vault allocations) must never exceed the reward vault balance.
+Total unclaimed ANSEM liabilities must never exceed the reward vault balance. Explicit buckets:
+
+```text
+total_ansem_liability_atomic ==
+  cowboy_unmaterialized_liability_atomic
+  + position_claimable_liability_atomic
+  + bull_pool_liability_atomic
+  + bull_pool_unallocated_liability_atomic
+  + suit_vault_liability_atomic
+```
+
+The same ANSEM must never be emitted, reserved, or counted twice.
 
 ### No double spend
 
@@ -62,12 +73,12 @@ A `PendingRandomness` with `settled == true` cannot be settled again. Attempting
 
 ## Economic invariants
 
-### Immutable constants
+### Governance-protected constants
 
-After launch, no instruction or authority may modify:
+Because the program is upgradeable, constants are governance-protected through the Upgrade Council and 72-hour timelock, not technically immutable. No instruction or authority may modify the following without a published upgrade proposal:
 
 - role odds, rank/tier/suit probabilities;
-- stake amount (`STAKE_AMOUNT_ATOMIC`);
+- stake amount (`STAKE_AMOUNT_ATOMIC`) and expected total supply;
 - unstake tax (`UNSTAKE_TAX_BPS`);
 - claim splits (`CLAIM_OWNER_BPS`, `CLAIM_BULL_POOL_BPS`, `DESPERADO_CLAIM_OWNER_BPS`, `DESPERADO_CLAIM_BULL_POOL_BPS`);
 - mint theft percentage (`MINT_THEFT_BPS`) and eligibility thresholds (`MIN_REVEALS_FOR_THEFT`, `MIN_BULLS_FOR_THEFT`);
@@ -77,6 +88,8 @@ After launch, no instruction or authority may modify:
 - runway length and epoch duration;
 - emission allocation (90/10);
 - marketplace fee (`MARKETPLACE_FEE_BPS`).
+
+All upgrade proposals must publish source diff, reproducible build, program-data hash, and activation time before the timelock begins.
 
 ### No guaranteed yield
 
@@ -116,17 +129,17 @@ Program upgrade authority is distinct from treasury authority and from emergency
 
 ### Timelock
 
-Material program upgrades must pass a timelock before deployment. The timelock duration is **BLOCKED: OWNER DECISION REQUIRED** but must be long enough to allow user exit.
+Material program upgrades must pass a **72-hour timelock** before deployment. Treasury routing changes must pass a **48-hour timelock**. The proposal must publish source diff, reproducible build, program-data hash, and activation time before the timelock begins.
 
-### Emergency pause limits
+### Action-specific emergency pause limits
 
-Emergency pause may block new risky actions but must not block safe claims and exits. Pausing must not withdraw principal or accrued liabilities.
+Emergency Guardians may toggle `pause_new_stakes`, `pause_new_reveal_requests`, `pause_new_marketplace_listings`, and `pause_router_swaps`. Pause is immediate; unpause requires a 12-hour delay. The following remain available whenever technically safe: claims, randomness settlements, unstake requests, unstake settlements, and timeout recovery. Pausing must not withdraw principal or accrued liabilities.
 
 ## Liveness invariants
 
 ### Timeout recovery
 
-If a randomness request times out, a recovery path must exist that returns the position to a safe state without trapping principal. The exact recovery semantics are **BLOCKED: OWNER DECISION REQUIRED**, but any implementation must satisfy this invariant.
+If a randomness request times out (after 30 minutes), a recovery path must exist that returns the position to a safe state without trapping principal. A reveal timeout before role assignment closes the position and returns the full principal. An unstake timeout cancels the unstake request and leaves the position staked and Active.
 
 ### Permissionless settlement
 

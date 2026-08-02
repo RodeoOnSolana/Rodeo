@@ -107,7 +107,7 @@ If multiple positions share the same linked X account, each position receives it
 
 ## Undistributed suit rewards
 
-If no positions are eligible, or total eligible score is zero, the suit vault remains undistributed. The policy for leftover vaults (rollover to next competition, burn, or redistribute to reward vault) is **BLOCKED: OWNER DECISION REQUIRED**.
+If no positions are eligible, or total eligible score is zero, the entire suit vault rolls into the next social competition epoch. The suit-competition ANSEM is never burned. Floor-division remainder from the equal/proportional split also rolls into the next competition epoch.
 
 ## Oracle and attestation
 
@@ -135,6 +135,5 @@ The indexer records every X account link per epoch, exposes a public API for sco
 ## Open questions (BLOCKED)
 
 - Oracle signer set, threshold, and attestation format: **BLOCKED: OWNER DECISION REQUIRED**.
-- Policy for undistributed suit rewards: **BLOCKED: OWNER DECISION REQUIRED**.
 - Exact X API integration and post-verification pipeline: **BLOCKED: OWNER DECISION REQUIRED**.
 - Tie-breaker rule if timestamp-based resolution is infeasible: **BLOCKED: OWNER DECISION REQUIRED**.

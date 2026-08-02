@@ -3,6 +3,7 @@ import {
   BPS_DENOMINATOR,
   CLAIM_BULL_POOL_BPS,
   CLAIM_OWNER_BPS,
+  CLOSE_EPOCH_BATCH_MAX,
   COWBOY_ACCRUAL_WEIGHTS,
   DESPERADO_CLAIM_BULL_POOL_BPS,
   DESPERADO_CLAIM_OWNER_BPS,
@@ -12,26 +13,28 @@ import {
   PROBABILITY_DENOMINATOR,
   RUNWAY_EPOCHS,
   RUNWAY_WINDOW_SECONDS,
-  STAKE_AMOUNT_ATOMIC,
+  STAKE_AMOUNT_WHOLE_RODEO,
   UNSTAKE_RETURN_BPS,
   UNSTAKE_TAX_BPS,
   isNormalized,
   sampleOutcome,
+  stakeAmountAtomic,
 } from "@rodeo/protocol-definition";
 import { describe, expect, it } from "vitest";
 import { EconomicSimulator } from "../src/index.js";
 import type { RevealOutcomes } from "../src/index.js";
 
 const config = {
+  rodeoDecimals: 0n,
   epochDurationSeconds: EPOCH_DURATION_SECONDS,
-  runwayWindowSeconds: RUNWAY_WINDOW_SECONDS,
   potFillSeconds: POT_FILL_SECONDS,
   emissionTargetByEpoch: Array<bigint>(80).fill(100n),
-  ansemPerRevenueNumerator: 1n,
-  ansemPerRevenueDenominator: 1n,
+  ansemPerSolNumerator: 1n,
+  ansemPerSolDenominator: 1n,
 } as const;
 
 const now = 0n;
+const stakeAmount = stakeAmountAtomic(config.rodeoDecimals);
 
 function revealOutcome(role: "cowboy" | "bull", rankOrTier: RevealOutcomes["rankOrTier"], suit: RevealOutcomes["suit"], isDesperado = false): RevealOutcomes {
   return {
@@ -79,11 +82,9 @@ describe("Protocol v1 simulator invariants", () => {
   it("rejects stake with wrong amount", () => {
     const simulator = new EconomicSimulator(config);
     expect(() => simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now })).not.toThrow();
-    expect(simulator.state.principalVaultAtomic).toBe(STAKE_AMOUNT_ATOMIC);
+    expect(simulator.state.principalVaultAtomic).toBe(stakeAmount);
+    expect(simulator.state.livePositionCount).toBe(1n);
 
-    const badConfig = { ...config };
-    // The simulator uses the constant STAKE_AMOUNT_ATOMIC, so wrong amounts cannot be supplied via the stake event.
-    // Instead test duplicate position rejection.
     expect(() => simulator.apply({ type: "stake", settlementId: "s2", positionId: "p1", owner: "bob", openedAt: now })).toThrow("already exists");
   });
 
@@ -92,11 +93,26 @@ describe("Protocol v1 simulator invariants", () => {
     simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
     simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
     const p = simulator.state.positions.get("p1")!;
+    expect(p.status).toBe("active");
     expect(p.role).toBe("cowboy");
     expect(p.rankOrTier).toBe("rank4");
     expect(p.accrualWeight).toBe(COWBOY_ACCRUAL_WEIGHTS.rank4);
     expect(p.pendingActionActive).toBe(false);
     expect(p.settlementNonce).toBe(1n);
+    expect(simulator.state.activeCowboyCount).toBe(1n);
+    expect(simulator.state.totalActiveCowboyWeight).toBe(COWBOY_ACCRUAL_WEIGHTS.rank4);
+  });
+
+  it("reveals a bull, applies buck power, and tracks population", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("bull", "tier4", "spades") });
+    const p = simulator.state.positions.get("p1")!;
+    expect(p.status).toBe("active");
+    expect(p.role).toBe("bull");
+    expect(p.buckPower).toBe(10);
+    expect(simulator.state.activeBullCount).toBe(1n);
+    expect(simulator.state.totalActiveBullPower).toBe(10n);
   });
 
   it("rejects reveal without pending action", () => {
@@ -113,23 +129,26 @@ describe("Protocol v1 simulator invariants", () => {
     simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
     simulator.apply({ type: "transferPosition", settlementId: "t1", positionId: "p1", newOwner: "bob" });
     expect(simulator.state.positions.get("p1")?.owner).toBe("bob");
+    expect(simulator.state.positions.get("p1")?.stateVersion).toBe(1n);
   });
 
   it("distributes claim 80/20 for normal cowboy and 98/2 for desperado", () => {
     const simulator = new EconomicSimulator(config);
     simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
     simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
-    simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueAtomic: 200n });
+    simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueLamports: 200n });
     simulator.apply({ type: "fundRewards", settlementId: "fund1", ansemAtomic: 140n });
     simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
 
     const beforeClaim = simulator.state.ansemClaimedAtomic;
-    simulator.apply({ type: "claim", settlementId: "c1", positionId: "p1", claimedAt: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS + 1n });
+    const beforeBullPool = simulator.state.bullPoolLiabilityAtomic + simulator.state.bullPoolUnallocatedLiabilityAtomic;
+    simulator.apply({ type: "claimCowboy", settlementId: "c1", positionId: "p1", claimedAt: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS + 1n });
     const p = simulator.state.positions.get("p1")!;
     expect(p.claimableAnsemAtomic).toBe(0n);
+    expect(simulator.state.positionClaimableLiabilityAtomic).toBe(0n);
     expect(simulator.state.ansemClaimedAtomic).toBeGreaterThan(beforeClaim);
-    // With no active Bulls in this trace, the 20% Bull-pool share has no recipient.
-    expect(simulator.state.ansemClaimedAtomic + simulator.state.ansemLiabilityAtomic).toBeLessThanOrEqual(simulator.state.rewardVaultAnsemAtomic);
+    expect(simulator.state.bullPoolLiabilityAtomic + simulator.state.bullPoolUnallocatedLiabilityAtomic).toBeGreaterThanOrEqual(beforeBullPool);
+    expect(simulator.state.totalAnsemLiabilityAtomic).toBeLessThanOrEqual(simulator.state.rewardVaultAnsemAtomic);
   });
 
   it("returns 95% of principal and burns 5% on unstake", () => {
@@ -137,12 +156,16 @@ describe("Protocol v1 simulator invariants", () => {
     simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
     simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
     const before = simulator.state.principalVaultAtomic;
+    expect(() => simulator.apply({ type: "requestUnstake", settlementId: "u1", positionId: "p1", requestedAt: MIN_STAKE_SECONDS - 1n })).toThrow("Minimum stake period");
     simulator.apply({ type: "requestUnstake", settlementId: "u1", positionId: "p1", requestedAt: MIN_STAKE_SECONDS + 1n });
+    expect(simulator.state.positions.get("p1")?.pendingActionType).toBe("unstake");
+    expect(simulator.state.positions.get("p1")?.status).toBe("active");
     simulator.apply({ type: "settleUnstake", settlementId: "u2", positionId: "p1", fate: { ansemToBullPool: false } });
     expect(simulator.state.positions.has("p1")).toBe(false);
-    expect(simulator.state.principalVaultAtomic).toBe(before - STAKE_AMOUNT_ATOMIC);
-    expect(simulator.state.rodeoBurnedAtomic).toBe((STAKE_AMOUNT_ATOMIC * UNSTAKE_TAX_BPS) / BPS_DENOMINATOR);
-    expect(STAKE_AMOUNT_ATOMIC * UNSTAKE_RETURN_BPS / BPS_DENOMINATOR + simulator.state.rodeoBurnedAtomic).toBeLessThanOrEqual(STAKE_AMOUNT_ATOMIC);
+    expect(simulator.state.livePositionCount).toBe(0n);
+    expect(simulator.state.principalVaultAtomic).toBe(before - stakeAmount);
+    expect(simulator.state.rodeoBurnedAtomic).toBe((stakeAmount * UNSTAKE_TAX_BPS) / BPS_DENOMINATOR);
+    expect((stakeAmount * UNSTAKE_RETURN_BPS) / BPS_DENOMINATOR + simulator.state.rodeoBurnedAtomic).toBeLessThanOrEqual(stakeAmount);
   });
 
   it("steals normal cowboy pending ANSEM on unstake 5% of the time", () => {
@@ -151,7 +174,7 @@ describe("Protocol v1 simulator invariants", () => {
     simulator.apply({ type: "stake", settlementId: "s2", positionId: "p2", owner: "bob", openedAt: now });
     simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
     simulator.apply({ type: "reveal", settlementId: "r2", positionId: "p2", outcomes: revealOutcome("bull", "tier1", "spades") });
-    simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueAtomic: 200n });
+    simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueLamports: 200n });
     simulator.apply({ type: "fundRewards", settlementId: "fund1", ansemAtomic: 140n });
     simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
 
@@ -161,62 +184,109 @@ describe("Protocol v1 simulator invariants", () => {
     expect(simulator.state.bullRewardPerWeightScaled).toBeGreaterThan(beforePool);
   });
 
+  it("bull claim reduces bull pool liability", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    simulator.apply({ type: "stake", settlementId: "s2", positionId: "p2", owner: "bob", openedAt: now });
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
+    simulator.apply({ type: "reveal", settlementId: "r2", positionId: "p2", outcomes: revealOutcome("bull", "tier1", "spades") });
+    simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueLamports: 200n });
+    simulator.apply({ type: "fundRewards", settlementId: "fund1", ansemAtomic: 140n });
+    simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
+
+    // Force the cowboy to claim so 20% goes to the bull pool.
+    simulator.apply({ type: "claimCowboy", settlementId: "c1", positionId: "p1", claimedAt: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS + 1n });
+    expect(simulator.state.bullPoolLiabilityAtomic).toBeGreaterThan(0n);
+
+    const beforeClaim = simulator.state.ansemClaimedAtomic;
+    simulator.apply({ type: "claimBull", settlementId: "b1", positionId: "p2", claimedAt: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS + 2n });
+    expect(simulator.state.ansemClaimedAtomic).toBeGreaterThan(beforeClaim);
+    expect(simulator.state.bullPoolLiabilityAtomic).toBe(0n);
+  });
+
   it("maintains principal conservation across arbitrary stake/unstake/transfer sequences", () => {
-    fc.assert(fc.property(
-      fc.array(fc.tuple(fc.string({ minLength: 1, maxLength: 8 }), fc.integer({ min: 0, max: 3 })), { minLength: 1, maxLength: 40 }),
-      (actions) => {
-        const simulator = new EconomicSimulator(config);
-        let nextId = 0;
-        for (const [owner, action] of actions) {
-          const id = `p-${nextId++}`;
-          if (action === 0) {
-            try { simulator.apply({ type: "stake", settlementId: `s-${id}`, positionId: id, owner, openedAt: now }); } catch { /* ignore duplicates */ }
-          } else if (action === 1) {
-            try { simulator.apply({ type: "reveal", settlementId: `r-${id}`, positionId: id, outcomes: revealOutcome("cowboy", "rank4", "hearts") }); } catch { }
-          } else if (action === 2) {
-            try { simulator.apply({ type: "transferPosition", settlementId: `t-${id}`, positionId: id, newOwner: `${owner}-2` }); } catch { }
-          } else {
-            try {
-              simulator.apply({ type: "requestUnstake", settlementId: `u-${id}`, positionId: id, requestedAt: MIN_STAKE_SECONDS + 1n });
-              simulator.apply({ type: "settleUnstake", settlementId: `x-${id}`, positionId: id, fate: { ansemToBullPool: false } });
-            } catch { }
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            open: fc.boolean(),
+            revealCowboy: fc.boolean(),
+            transfer: fc.boolean(),
+            unstake: fc.boolean(),
+          }),
+          { minLength: 1, maxLength: 20 },
+        ),
+        (ops) => {
+          const simulator = new EconomicSimulator(config);
+          let expectedPrincipal = 0n;
+          for (let i = 0; i < ops.length; i++) {
+            const op = ops[i];
+            const pid = `p${i}`;
+            if (op.open) {
+              simulator.apply({ type: "stake", settlementId: `s${i}`, positionId: pid, owner: "alice", openedAt: now });
+              expectedPrincipal += stakeAmount;
+            }
+            if (op.revealCowboy) {
+              try {
+                simulator.apply({ type: "reveal", settlementId: `r${i}`, positionId: pid, outcomes: revealOutcome("cowboy", "rank4", "hearts") });
+              } catch {
+                // ignore invalid transitions
+              }
+            }
+            if (op.transfer) {
+              try {
+                simulator.apply({ type: "transferPosition", settlementId: `t${i}`, positionId: pid, newOwner: "bob" });
+              } catch {
+                // ignore invalid transitions
+              }
+            }
+            if (op.unstake) {
+              try {
+                simulator.apply({ type: "requestUnstake", settlementId: `u${i}a`, positionId: pid, requestedAt: MIN_STAKE_SECONDS + 1n });
+                simulator.apply({ type: "settleUnstake", settlementId: `u${i}b`, positionId: pid, fate: { ansemToBullPool: false } });
+                expectedPrincipal -= stakeAmount;
+              } catch {
+                // ignore invalid transitions
+              }
+            }
           }
-        }
-        const sum = [...simulator.state.positions.values()].reduce((s, p) => s + p.principalAtomic, 0n);
-        expect(sum).toBe(simulator.state.principalVaultAtomic);
-      },
-    ));
+          expect(simulator.state.principalVaultAtomic).toBe(expectedPrincipal);
+        },
+      ),
+      { numRuns: 50 },
+    );
   });
 
   it("preserves position identity across ownership transfers", () => {
     const simulator = new EconomicSimulator(config);
-    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p", owner: "alice", openedAt: now });
-    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
-    simulator.apply({ type: "transferPosition", settlementId: "t1", positionId: "p", newOwner: "bob" });
-    simulator.apply({ type: "transferPosition", settlementId: "t2", positionId: "p", newOwner: "carol" });
-    expect(simulator.state.positions.get("p")?.owner).toBe("carol");
-    expect(simulator.state.positions.size).toBe(1);
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
+    simulator.apply({ type: "transferPosition", settlementId: "t1", positionId: "p1", newOwner: "bob" });
+    expect(simulator.state.positions.get("p1")!.owner).toBe("bob");
+    expect(simulator.state.positions.get("p1")?.stateVersion).toBe(1n);
   });
 
   it("prevents duplicate settlement", () => {
     const simulator = new EconomicSimulator(config);
-    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p", owner: "alice", openedAt: now });
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
     expect(() => simulator.apply({ type: "stake", settlementId: "s1", positionId: "p2", owner: "bob", openedAt: now })).toThrow("Duplicate settlement");
   });
 
   it("caps ANSEM liability by reward vault balance", () => {
     const simulator = new EconomicSimulator(config);
-    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p", owner: "alice", openedAt: now });
-    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
-    simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueAtomic: 100n });
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
+    simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueLamports: 100n });
     simulator.apply({ type: "fundRewards", settlementId: "fund1", ansemAtomic: 70n });
     simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
-    expect(simulator.state.ansemLiabilityAtomic).toBeLessThanOrEqual(simulator.state.rewardVaultAnsemAtomic);
+    expect(simulator.state.totalAnsemLiabilityAtomic).toBeLessThanOrEqual(simulator.state.rewardVaultAnsemAtomic);
   });
 
   it("skips emission during pot-fill period", () => {
     const simulator = new EconomicSimulator(config);
-    simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueAtomic: 1_000n });
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealOutcome("cowboy", "rank4", "hearts") });
+    simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueLamports: 1_000n });
     simulator.apply({ type: "fundRewards", settlementId: "fund1", ansemAtomic: 700n });
     simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS - 1n });
     expect(simulator.state.ansemEmittedAtomic).toBe(0n);

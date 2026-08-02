@@ -2,7 +2,7 @@
 
 ## Status
 
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **State:** authoritative source of truth for contract, frontend, indexer, keeper, marketplace, and treasury implementation.  
 **Replaces:** any prior `rodeo-game-spec.md` drafts and the Phase 0 economic placeholders.  
 **Scope:** Phase 1 protocol design only. No production Anchor instructions are implemented in this branch.
@@ -18,8 +18,9 @@ Every rule stated here is either an approved protocol decision (carried forward 
 ### Launch and token facts
 
 - RODEO launches through pump.fun.
-- Total RODEO supply: `1,000,000,000`.
-- Stake requirement per position: `100,000` RODEO.
+- Total RODEO supply: `1,000,000,000` whole RODEO.
+- Stake requirement per position: `100,000` whole RODEO.
+- `GlobalConfig` stores `stake_amount_atomic` and `expected_total_supply_atomic` computed as `whole_amount * 10^rodeo_decimals`.
 - Minimum active stake period: `24 hours`.
 - No wallet-level position cap.
 - One position has exactly one owner at a time.
@@ -70,15 +71,15 @@ Every rule stated here is either an approved protocol decision (carried forward 
 
 ### Unstaking
 
-- All roles pay a `5%` tax on staked RODEO.
-- The taxed RODEO is burned.
-- `95%` of principal is returned to the owner.
+- All roles pay a `5%` tax on staked RODEO; `95%` is returned.
+- Any rounding remainder between tax, return, and principal is treated as a tiny burn so `tax + return <= principal` and no RODEO is created.
+- An unstake request commits randomness but keeps the position `Active` while pending.
+- The owner may cancel an unstake request before settlement.
 - For normal Cowboys:
   - `5%` chance that `100%` of pending ANSEM is sent to the Bull pool.
   - `95%` chance that `100%` of pending ANSEM is sent to the owner.
 - Desperado is immune to ANSEM unstake theft.
 - Bulls settle accumulated rewards safely when unstaking.
-- Unstake randomness must be committed before the result is known.
 - Unstake closes the position asset and account state.
 
 ### Mint theft
@@ -101,9 +102,11 @@ Every rule stated here is either an approved protocol decision (carried forward 
 - Pot-fill period: `12 hours` after launch.
 - No ANSEM liability accrues during the pot-fill period.
 - Production uses six-hour epochs.
+- Epochs are advanced by permissionless `close_epochs(max_epochs)`, processing up to `8` epochs per transaction and using per-epoch snapshots.
+- Missing emission targets for future epochs cause the transaction to revert.
 - Rolling runway: `10 days`, equal to `40 epochs`.
 - Free ANSEM = vault balance minus all accrued and unclaimed liabilities.
-- Epoch emission = free ANSEM divided by `40`.
+- Epoch emission is the minimum of the approved target for that epoch and free ANSEM.
 - `90%` of each epoch emission goes to Cowboy production.
 - `10%` goes to the current suit competition vault.
 - No fixed APY or guaranteed payout.
@@ -111,12 +114,14 @@ Every rule stated here is either an approved protocol decision (carried forward 
 
 ### External revenue
 
+- Sources: RODEO pump.fun creator fees, Rodeo marketplace fees, approved protocol-controlled sponsorships.
 - `70%` used to buy ANSEM for the reward vault.
 - `15%` sent to team and marketing.
 - `10%` used to buy and permanently burn RODEO.
 - `5%` sent to security and operations.
 - Use actual realized fee receipts, not a hardcoded pump.fun fee rate.
 - Player claim taxes and theft distributions are not protocol revenue.
+- Source-token dust from split rounding rolls into the next routing batch; no automatic sweep redirects dust.
 
 ### Treasury router
 
@@ -173,13 +178,13 @@ Every rule stated here is either an approved protocol decision (carried forward 
 
 ### Governance
 
-- Upgrade authority controlled by a multisig and timelock.
-- Treasury authority separated from program upgrade authority.
-- Emergency guardians may pause risky new actions.
-- Emergency controls cannot withdraw player principal.
-- Safe claims and exits should remain available whenever possible.
-- Core economic parameters become immutable after launch.
-- No admin may modify: role odds, taxes, theft percentages, stake amount, buck power, revenue percentages, runway length, emission allocation, marketplace fee.
+- Upgrade authority controlled by a 3-of-5 Upgrade Council Squads multisig and a 72-hour timelock.
+- Treasury authority separated from program upgrade authority (3-of-5 Treasury Council, 48-hour timelock).
+- Emergency Guardians (2-of-3) may toggle action-specific pause flags: `pause_new_stakes`, `pause_new_reveal_requests`, `pause_new_marketplace_listings`, `pause_router_swaps`.
+- Emergency controls cannot withdraw player principal or accrued liabilities.
+- Safe claims and exits remain available whenever technically possible.
+- Core economic parameters are governance-protected (timelocked, published upgrade), not technically immutable, because the program remains upgradeable.
+- No single authority may modify: role odds, taxes, theft percentages, stake amount, buck power, revenue percentages, runway length, emission allocation, marketplace fee without a published upgrade.
 
 ## Document map
 
@@ -214,35 +219,40 @@ Phase 0 delivered:
 
 Phase 1 fills in all economic and game rules while leaving production instruction implementations for Phase 2. No Phase 0 behavior is overturned; probability tables, constants, and emission formulas are added where Phase 0 intentionally left placeholders.
 
-## Owner decisions applied in v1.1.0
+## Owner decisions applied in v1.2.0
 
 The following decisions have been applied across the v1 sub-documents:
 
-- Token mint addresses and decimals are supplied at production initialization and become immutable; decimals are read from the mint accounts and stored in `GlobalConfig`.
+- Token mint addresses and decimals are supplied at production initialization and stored in `GlobalConfig`; `stake_amount_atomic` and `expected_total_supply_atomic` are computed as `whole_amount * 10^rodeo_decimals`.
 - `ACCRUAL_WEIGHT_SCALE = 10,000` and `REWARD_PER_WEIGHT_SCALE = 1,000,000,000,000,000,000`.
-- Position receipt is a Metaplex Core Asset with Rodeo-controlled permanent transfer and freeze delegates.
+- Whole-token values: total RODEO supply = `1,000,000,000`, stake amount = `100,000` whole RODEO.
+- Position receipt is a Metaplex Core Asset with Rodeo-controlled permanent transfer and freeze delegates; created at reveal settlement directly for the final owner.
 - Marketplace sales are denominated in SOL only.
 - Non-custodial `Listing` PDAs derive from `[b"listing", position, listing_nonce]`; stale listings are prevented by `Position.state_version` and `listing_nonce`.
 - Wallet claim cooldown uses a `[b"claim_cooldown", global_config, wallet]` PDA.
 - Randomness uses a provider-adapter architecture with Switchboard as the proposed v1 provider; 30-minute timeout; permissionless settlement; reveal principal recovery before assignment; unstake-request cancellation leaves the position staked.
 - Governance: 3-of-5 Squads Upgrade Council (72-hour timelock), 3-of-5 Squads Treasury Council (48-hour timelock), 2-of-3 Emergency Guardians (immediate pause, 12-hour unpause delay).
-- Jupiter is the approved v1 swap aggregator with $100-equivalent minimum batch, 1% max slippage, 0.5% max price impact, no arbitrary dust-sweep recipient.
-- Logarithmic social scoring model with maximum three eligible posts per linked X account per epoch.
+- Governance rules are governance-protected and timelocked, not technically immutable; upgrade proposals must publish source diff, reproducible build, program-data hash, and activation time.
+- Jupiter is the approved v1 swap aggregator with $100-equivalent minimum batch, 1% max slippage, 0.5% max price impact; source-token dust rolls into the next routing batch.
+- Logarithmic social scoring model with maximum three eligible posts per linked X account per epoch; undistributed suit vault rolls over.
 - Recommended off-chain stack: Helius RPC/webhooks, PostgreSQL, TypeScript indexer/keeper, IPFS/Arweave immutable result files, on-chain Merkle root and content hash.
+- ANSEM liabilities are explicitly bucketed (`total_ansem_liability_atomic`, `cowboy_unmaterialized_liability_atomic`, `position_claimable_liability_atomic`, `bull_pool_liability_atomic`, `bull_pool_unallocated_liability_atomic`, `suit_vault_liability_atomic`) and must be vault-backed.
+- Bull rewards use a single global `BullAccumulator`; mint-theft selection requires a persistent `BullRegistry` sortition tree (two-level weighted sum tree) to avoid scanning every Bull.
+- Epoch closure is permissionless `close_epochs(max_epochs)` with a maximum of `8` epochs per transaction and per-epoch snapshots; state-changing instructions require elapsed epochs to be closed.
+- A "reroll" is performed by unstaking and staking again with a new `position_id`, not as an in-place instruction.
 
 ## Intentionally unresolved for Protocol Specification v1
 
 The following remain `BLOCKED: OWNER DECISION REQUIRED` in the relevant sub-documents:
 
-- pending-action transfer behavior (whether any future action type may be transferred with the pending action following the new owner);
-- production unstake instruction implementation (the economic rules are specified; the on-chain instruction remains Phase 2 work);
+- `BullRegistry` and `BullRegistryNode` account sizes, page capacity, maximum supported Bull population, and proof serialization (reveal implementation is blocked until reviewed);
+- exact per-source-mint `PendingBatch` account schema;
 - production randomness provider exact Switchboard integration (queue, task format, CPI vs. callback, proof serialization) and whether commit/reveal hashing is retained as defense-in-depth;
 - marketplace listing expiration policy, and future support for bids/auctions/private offers;
 - marketplace secondary royalties, listing fees, and cancellation fees (v1 has none);
 - exact Squads program addresses, member pubkeys, and timelock program instances;
 - off-chain price oracle for the $100-equivalent minimum batch and Jupiter integration mode (v6 API vs. on-chain program vs. custom keeper);
 - incentive/reward for permissionless randomness settler bot;
-- policy for undistributed suit-competition rewards;
 - exact X API integration and post-verification pipeline;
 - tie-breaker rule if timestamp-based winning-suit resolution is infeasible;
 - public API rate limits, caching strategy, and reproducible-build tooling.

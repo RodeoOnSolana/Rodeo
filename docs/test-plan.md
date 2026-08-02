@@ -42,11 +42,15 @@ Every state transition, economic rule, rounding direction, and security invarian
 
 ### Principal conservation
 
-- [ ] For any sequence of stakes, claims, unstakes, transfers, and thefts, `sum(active_position.principal) + burned_rounding_remainder == principal_vault_balance`.
+- [ ] For any sequence of stakes, claims, unstakes, transfers, and thefts, `sum(live_position.principal) == principal_vault_balance`.
 
 ### ANSEM liability cap
 
-- [ ] For any sequence of funding, claims, unstake thefts, and suit distributions, `ansem_liability <= reward_vault_balance`.
+- [ ] For any sequence of funding, claims, unstake thefts, and suit distributions, `total_ansem_liability <= reward_vault_balance`.
+
+### ANSEM liability reconciliation
+
+- [ ] For any sequence of events, `total_ansem_liability` equals the sum of the explicit liability buckets.
 
 ### No duplicate settlement
 
@@ -80,6 +84,8 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] Reveal assigns role, rank/tier, and suit.
 - [ ] Reveal increments settlement nonce.
 - [ ] Reveal cannot settle twice.
+- [ ] Reveal creates Metaplex Core receipt for final owner.
+- [ ] Reveal updates `GlobalGameState` population and power counters.
 
 ### Claim
 
@@ -91,12 +97,13 @@ Every state transition, economic rule, rounding direction, and security invarian
 
 ### Unstake
 
-- [ ] Unstake returns 95% of principal and burns 5%.
+- [ ] Unstake returns 95% of principal and burns 5% (rounding dust included in burn).
 - [ ] Normal Cowboy loses pending ANSEM to Bull pool 5% of the time.
 - [ ] Normal Cowboy receives pending ANSEM 95% of the time.
 - [ ] Desperado keeps pending ANSEM.
 - [ ] Bull receives Bull-pool rewards before principal return.
 - [ ] Minimum stake period is enforced.
+- [ ] Unstake request can be cancelled before settlement.
 - [ ] Unstake closes the position and burns the receipt.
 
 ### Mint theft
@@ -126,8 +133,12 @@ Every state transition, economic rule, rounding direction, and security invarian
 ### Epoch closure
 
 - [ ] No emission during pot-fill period.
-- [ ] Epoch emission equals `free_ansem / 40` (floor).
+- [ ] `close_epochs` processes up to `CLOSE_EPOCH_BATCH_MAX` epochs per transaction.
+- [ ] State-changing instructions require elapsed epochs to be closed.
+- [ ] Epoch emission is capped by free ANSEM and uses the approved per-epoch target table.
 - [ ] 90/10 split between Cowboy production and suit vault.
+- [ ] Cowboy production emission uses the snapshot of `total_active_cowboy_weight` at the epoch boundary.
+- [ ] Missing epoch targets fail closed (transaction reverts).
 - [ ] Runway report reflects covered epochs.
 - [ ] Emission is zero when `free_ansem` is zero.
 
@@ -149,13 +160,13 @@ Every state transition, economic rule, rounding direction, and security invarian
 
 ### Required for Phase 2
 
-- [ ] `initialize_config` creates `GlobalConfig`, `RewardState`, `PrincipalVault`, `RewardVault`.
+- [ ] `initialize_config` creates `GlobalConfig`, `GlobalGameState`, `RewardState`, `PrincipalVault`, `RewardVault`, `BullAccumulator`.
 - [ ] `stake_and_commit` rejects non-standard stake amounts.
-- [ ] `settle_reveal` assigns role/rank/tier/suit and emits `PositionRevealed`.
-- [ ] `claim` respects role-specific splits and wallet cooldown.
-- [ ] `request_unstake` + `settle_unstake` burn tax, return principal, and close position.
+- [ ] `settle_reveal` assigns role/rank/tier/suit, creates receipt, and emits `PositionRevealed`.
+- [ ] `claim_cowboy` and `claim_bull` respect role-specific splits and wallet cooldown.
+- [ ] `request_unstake` + `cancel_unstake_request` + `settle_unstake` burn tax, return principal, and close position.
 - [ ] `transfer_position` is blocked while pending action is active and succeeds when cleared.
-- [ ] `close_epoch` updates global reward index and suit vault.
+- [ ] `close_epochs` updates global reward index and suit vault using snapshot values.
 - [ ] Bull reward pool distribution matches reward-per-buck-power accounting.
 
 ### Negative-path integration tests
@@ -172,17 +183,21 @@ Every state transition, economic rule, rounding direction, and security invarian
 
 Every integration test must assert at least one of:
 
-- `sum(position.principal) == principal_vault_balance`
-- `ansem_liability <= reward_vault_balance`
+- `sum(live_position.principal) == principal_vault_balance`
+- `total_ansem_liability <= reward_vault_balance`
+- `total_ansem_liability` equals sum of explicit liability buckets
+- `position_claimable_liability == sum(position.claimable_ansem_atomic)`
 - `settlement_nonce` strictly increases on randomness settlement
 - `pending_action_active` cleared after settlement
-- `Position.owner` equals `MarketReceipt.owner`
+- `Position.owner` equals `PositionReceipt` owner
 
 ## Fuzz targets
 
-- [ ] Random sequences of stake/reveal/claim/unstake/transfer with small principal ranges to trigger rounding edge cases.
+- [ ] Random sequences of stake/reveal/claim/unstake/transfer with small reward ranges to trigger rounding edge cases.
 - [ ] Concurrent randomness actions targeting the same position.
 - [ ] Epoch closure under extremely low or high reward-vault balance.
+- [ ] Delayed `close_epochs` calls that batch many epochs.
+- [ ] Bull-pool distribution with zero, one, and many active Bulls.
 - [ ] Marketplace sale with randomized prices and fees.
 
 ## Test deliverables

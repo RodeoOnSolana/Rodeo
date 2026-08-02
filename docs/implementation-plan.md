@@ -16,7 +16,7 @@
 Implement in the following order so that each layer can be tested before the next is added.
 
 1. **Protocol-definition constants and probability tables**
-   - Add `STAKE_AMOUNT_ATOMIC`, `MIN_STAKE_SECONDS`, tax BPS constants, and runway constants.
+   - Add `STAKE_AMOUNT_WHOLE_RODEO`, `EXPECTED_TOTAL_SUPPLY_WHOLE_RODEO`, `STAKE_AMOUNT_ATOMIC`, `EXPECTED_TOTAL_SUPPLY_ATOMIC`, `MIN_STAKE_SECONDS`, tax BPS constants, and runway constants.
    - Add approved integer probability tables.
    - Add accrual weights, buck power, and role/rank/tier/suit outcome mapping.
    - Add `Suit` enum and `OwnershipChangeReason` values.
@@ -29,45 +29,52 @@ Implement in the following order so that each layer can be tested before the nex
    - Add property tests for every invariant.
 
 3. **On-chain account schema extensions**
-   - Extend `Position` with `rank_or_tier`, `suit`, `claimable_ansem_atomic`, `last_claimed_at`, `last_cowboy_reward_index`, `last_bull_reward_per_weight`, `buck_power` (if Bull), and `accrual_weight` (if Cowboy).
-   - Extend `RewardState` with `cowboy_reward_index` and `suit_vault_atomic`.
-   - Initialize `BullAccumulator` and `RoleStatistics` accounts.
+   - Extend `Position` with `rank_or_tier`, `suit`, `claimable_ansem_atomic`, `active_since`, `opened_at`, `last_cowboy_reward_index`, `last_bull_reward_per_weight`, `buck_power`, and `accrual_weight`.
+   - Extend `RewardState` with explicit ANSEM liability buckets (`total_ansem_liability_atomic`, `cowboy_unmaterialized_liability_atomic`, `position_claimable_liability_atomic`, `bull_pool_liability_atomic`, `bull_pool_unallocated_liability_atomic`, `suit_vault_liability_atomic`), `cowboy_reward_index`, `bull_reward_per_weight_scaled`, accumulator remainders, and `suit_vault_atomic`.
+   - Add `GlobalGameState` account with live counters.
+   - Add global `BullAccumulator` account.
+   - Add `BullRegistry` and `BullRegistryNode` accounts for sortition.
+   - Add per-source-mint `PendingBatch` accounts (Phase 4).
 
-4. **Reveal and randomness instructions**
-   - Implement `request_reveal` (commit) and `settle_reveal` with outcome mapping.
-   - Add mint theft eligibility and recipient selection.
+4. **BullRegistry design gate**
+   - Finalize `BullRegistry` and `BullRegistryNode` account sizes, page capacity, and proof format.
+   - Model worst-case compute cost for mint-theft selection.
+   - Get owner approval before implementing the reveal instruction that uses mint theft.
+
+5. **Reveal and randomness instructions (without mint theft selection until registry approved)**
+   - Implement `request_reveal` (commit) and `settle_reveal` with outcome mapping for role, rank/tier, and suit.
    - Keep local mock randomness for tests behind a feature flag or a separate test-only path.
    - Do not integrate a production oracle in Phase 2; use the mock or a deterministic test harness that satisfies the same interface.
+   - Mint theft remains blocked behind the BullRegistry gate.
 
-5. **Claim instruction**
+6. **Claim instructions**
    - Implement wallet-level one-hour cooldown.
-   - Implement batch claim across owned positions.
    - Implement normal Cowboy and Desperado splits.
    - Implement Bull reward pool claim using reward-per-buck-power.
 
-6. **Unstake instruction**
+7. **Unstake instruction**
    - Implement minimum stake period check.
-   - Implement `request_unstake` (commit) and `settle_unstake`.
+   - Implement `request_unstake` (commit), `cancel_unstake_request`, and `settle_unstake`.
    - Implement 5% RODEO tax and burn, 95% return.
    - Implement normal Cowboy 5% ANSEM theft to Bull pool (Desperado immune).
    - Implement Bull reward settlement before account close.
 
-7. **Ownership transfer and marketplace primitives**
+8. **Ownership transfer primitives**
    - Extend `transfer_position` with forced settlement of pending ANSEM.
    - Add receipt asset check.
    - Keep marketplace listing/sale as a Phase 3/4 deliverable; Phase 2 only ensures the ownership-transfer primitive is correct.
 
-8. **Epoch closure instruction**
-   - Implement permissionless `close_epoch`.
-   - Compute free ANSEM, epoch emission, and Cowboy/suit split.
-   - Update global `cowboy_reward_index` and `RoleStatistics`.
+9. **Epoch closure instruction**
+   - Implement permissionless `close_epochs(max_epochs)` with batched processing.
+   - Compute free ANSEM, epoch emission, and Cowboy/suit split using per-epoch snapshots.
+   - Update global `cowboy_reward_index` and `GlobalGameState` counters.
 
-9. **SDK and integration tests**
-   - Regenerate IDLs and SDK clients after each program change.
-   - Add integration tests for every new instruction and every error path.
-   - Add invariant assertions to integration tests.
+10. **SDK and integration tests**
+    - Regenerate IDLs and SDK clients after each program change.
+    - Add integration tests for every new instruction and every error path.
+    - Add invariant assertions to integration tests.
 
-10. **Security review and audit preparation**
+11. **Security review and audit preparation**
     - Threat-model randomness settlement ordering, oracle timeout, and marketplace atomicity.
     - Verify account sizes with new fields.
     - Run fuzz/property tests against the simulator.
@@ -75,6 +82,7 @@ Implement in the following order so that each layer can be tested before the nex
 ## What Phase 2 must not do
 
 - Integrate a production randomness provider (Phase 3).
+- Implement mint-theft recipient selection until the `BullRegistry` design is approved.
 - Implement the full marketplace listing/escrow/sale engine (Phase 3/4).
 - Implement the treasury router swap integrations (Phase 4).
 - Implement social scoring or oracle attestation (Phase 4/5).
@@ -92,6 +100,7 @@ Implement in the following order so that each layer can be tested before the nex
 
 ### Phase 3: Production randomness and keeper
 
+- Finalize and integrate the `BullRegistry` sortition tree.
 - Select and integrate a reviewed randomness provider.
 - Implement commit/settle timeout recovery.
 - Build keeper bots for settlement and epoch closure.
@@ -99,9 +108,8 @@ Implement in the following order so that each layer can be tested before the nex
 
 ### Phase 4: Marketplace and treasury router
 
-- Implement `MarketReceipt` asset and PDA.
 - Implement atomic marketplace listing, sale, and gift.
-- Implement `rodeo_router` with approved venues and slippage protection.
+- Implement `rodeo_router` with per-source-mint `PendingBatch` accounts, approved venues, and slippage protection.
 - Implement governance multisig and timelock accounts.
 
 ### Phase 5: Frontend, social, audit, launch
@@ -115,7 +123,8 @@ Implement in the following order so that each layer can be tested before the nex
 
 See individual sub-documents. The most urgent Phase 2 blockers are:
 
-- `MarketReceipt` asset type and PDA seeds.
-- `ACCRUAL_WEIGHT_SCALE` and `REWARD_PER_WEIGHT_SCALE`.
+- `BullRegistry` and `BullRegistryNode` account sizes, page capacity, and maximum supported Bull population.
+- Exact `PendingBatch` schema per source mint.
 - RODEO and ANSEM token decimals.
+- `ACCRUAL_WEIGHT_SCALE` and `REWARD_PER_WEIGHT_SCALE` values (currently set; may be revised after token-decimal and supply analysis).
 - Wallet-level claim-cooldown account design.

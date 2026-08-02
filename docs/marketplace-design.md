@@ -10,6 +10,8 @@ PositionReceipt PDA: [b"receipt", position.key().as_ref()]
 
 Rodeo holds the permanent transfer delegate and freeze delegate on every Core Asset. The asset can only be transferred through approved Rodeo instructions (sale, gift, mint theft). The asset's owner must always match `Position.owner`; instructions update both atomically.
 
+The `PositionReceipt` is created at reveal settlement directly for the final owner. A successful mint theft does not mint the asset to the victim and then transfer it; the selected Bull owner receives the asset directly.
+
 ## Ownership transfer rules
 
 - `Position.owner` changes only through approved protocol flows.
@@ -42,13 +44,15 @@ Listing requirements:
 
 A buyer settles by providing the sale price. The transaction must:
 
-1. Verify the listing is still valid (not expired, not cancelled, position still owned by seller).
-2. Force-settle the seller's pending ANSEM through the normal claim split (80/20 normal, 98/2 Desperado).
-3. Atomically transfer the receipt asset from seller to buyer and update `Position.owner` to buyer.
-4. Deduct the marketplace fee (`5%` of sale price, floor) from the seller's proceeds.
-5. Route the fee into the external revenue split.
-6. Credit the remainder to the seller.
-7. Emit `PositionSold`.
+1. Ensure all elapsed epochs are closed or invoke the permissionless `close_epochs` catch-up path.
+2. Synchronize the seller's Cowboy and Bull reward indices.
+3. Verify the listing is still valid (not expired, not cancelled, position still owned by seller, `state_version` matches).
+4. Force-settle the seller's pending ANSEM through the normal claim split (80/20 normal, 98/2 Desperado) or Bull claim.
+5. Atomically transfer the receipt asset from seller to buyer and update `Position.owner` to buyer.
+6. Deduct the marketplace fee (`5%` of sale price, floor) from the seller's proceeds.
+7. Route the fee into the external revenue split.
+8. Credit the remainder to the seller.
+9. Emit `PositionSold`.
 
 If any step fails, the entire transaction aborts and no ownership changes.
 
@@ -60,10 +64,12 @@ Marketplace v1 sales are denominated in **SOL only**. The sale price, marketplac
 
 A gift is a zero-price transfer initiated by the owner.
 
-1. Force-settle pending ANSEM through the normal claim split.
-2. Atomically transfer the receipt asset and update `Position.owner`.
-3. No marketplace fee is charged.
-4. Emit `PositionGifted`.
+1. Ensure all elapsed epochs are closed or invoke the permissionless `close_epochs` catch-up path.
+2. Synchronize the owner's Cowboy and Bull reward indices.
+3. Force-settle pending ANSEM through the normal claim split or Bull claim.
+4. Atomically transfer the receipt asset and update `Position.owner`.
+5. No marketplace fee is charged.
+6. Emit `PositionGifted`.
 
 Gifts must also be rejected while a randomness action is pending.
 

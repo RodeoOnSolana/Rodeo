@@ -10,7 +10,7 @@ The indexer ingests:
 
 - Anchor program event logs from `rodeo_core`, `rodeo_market`, and `rodeo_router`.
 - Transaction metadata (signature, slot, timestamp, program IDs).
-- Account snapshots for `Position`, `RewardState`, `BullAccumulator`, `RoleStatistics`, and token vault balances.
+- Account snapshots for `Position`, `RewardState`, `GlobalGameState`, `BullAccumulator`, `BullRegistry`, `WalletClaimCooldown`, `PendingRandomness`, `PendingBatch`, and token vault balances.
 
 ## Derived tables
 
@@ -27,10 +27,13 @@ The indexer ingests:
 | `principal_atomic` | `Position.principal_amount` |
 | `claimable_ansem_atomic` | `Position.claimable_ansem_atomic` |
 | `status` | `Position.status` |
-| `opened_epoch` | `Position.opened_epoch` |
-| `last_claimed_at` | `Position.last_claimed_at` |
+| `opened_at` | `Position.opened_at` |
+| `active_since` | `Position.active_since` |
+| `accrual_weight` | `Position.accrual_weight` |
+| `buck_power` | `Position.buck_power` |
 | `pending_action_active` | `Position.pending_action_active` |
 | `settlement_nonce` | `Position.settlement_nonce` |
+| `state_version` | `Position.state_version` |
 | `created_at_slot` | first `PositionStaked` event slot |
 
 ### `epochs`
@@ -39,20 +42,25 @@ The indexer ingests:
 | --- | --- |
 | `epoch` | `RewardState.current_epoch` or `EpochClosed` events |
 | `started_at` | `RewardState.epoch_started_at` |
+| `closed_at` | `EpochClosed.snapshot_timestamp` |
 | `cowboy_emission` | `EpochClosed.cowboy_emission` |
 | `suit_vault_contribution` | `EpochClosed.suit_vault_contribution` |
 | `free_ansem` | `EpochClosed.free_ansem` |
 | `total_cowboy_weight` | `EpochClosed.total_cowboy_weight` |
+| `total_bull_power` | `EpochClosed.total_bull_power` |
 
-### `role_statistics`
+### `global_game_state`
 
 | Field | Source |
 | --- | --- |
-| `epoch` | `RoleStatistics.epoch` |
-| `cowboy_population` | `RoleStatistics.cowboy_population` |
-| `bull_population` | `RoleStatistics.bull_population` |
-| `cowboy_principal_atomic` | `RoleStatistics.cowboy_principal_atomic` |
-| `bull_principal_atomic` | `RoleStatistics.bull_principal_atomic` |
+| `total_completed_reveals` | `GlobalGameState.total_completed_reveals` |
+| `live_position_count` | `GlobalGameState.live_position_count` |
+| `active_cowboy_count` | `GlobalGameState.active_cowboy_count` |
+| `active_bull_count` | `GlobalGameState.active_bull_count` |
+| `total_active_cowboy_weight` | `GlobalGameState.total_active_cowboy_weight` |
+| `total_active_bull_power` | `GlobalGameState.total_active_bull_power` |
+| `current_epoch` | `GlobalGameState.current_epoch` |
+| `last_closed_epoch_timestamp` | `GlobalGameState.last_closed_epoch_timestamp` |
 
 ### `suit_competitions`
 
@@ -94,15 +102,16 @@ The following metrics must be publicly queryable or displayed:
 | Metric | Definition |
 | --- | --- |
 | Total RODEO staked | `principal_vault_balance` |
+| Total live positions | `GlobalGameState.live_position_count` |
 | Total active positions | count of `positions` with `status == Active` |
-| Cowboy/Bull split | `RoleStatistics.cowboy_population` / `bull_population` for the current epoch |
+| Cowboy/Bull split | `GlobalGameState.active_cowboy_count` / `active_bull_count` |
 | Total ANSEM emitted | `RewardState.ansem_emitted_atomic` |
 | Total ANSEM claimed | `RewardState.ansem_claimed_atomic` |
-| Unclaimed ANSEM liability | `RewardState.ansem_liability_atomic` |
-| Free ANSEM | `reward_vault_balance - ansem_liability_atomic` |
+| Total unclaimed ANSEM liability | `RewardState.total_ansem_liability_atomic` |
+| Free ANSEM | `reward_vault_balance - total_ansem_liability_atomic` |
 | Runway (epochs) | `covered_epochs` from runway formula in [emissions-and-rewards.md](./emissions-and-rewards.md) |
 | Suit vault balance | suit-competition token account balance or derived from events |
-| Bull reward pool balance | derived from Bull pool contributions minus Bull claims |
+| Bull reward pool balance | `RewardState.bull_pool_liability_atomic + bull_pool_unallocated_liability_atomic` |
 | Marketplace volume | sum of `PositionSold` sale prices |
 | RODEO burned (unstake tax + buybacks) | `rodeoBurnedAtomic` from router and unstake events |
 | Active mint-theft eligibility | `completed_reveals >= 50 && eligible_bulls >= 3` |

@@ -9,6 +9,31 @@
 
 The first epoch begins at launch time plus `POT_FILL_SECONDS`. No ANSEM accrues during the pot-fill period even if the reward vault holds ANSEM.
 
+## `close_epochs`
+
+Epochs are advanced by a permissionless `close_epochs(max_epochs)` instruction. It processes epochs sequentially and advances the protocol clock atomically with each epoch boundary.
+
+| Parameter | Value |
+| --- | --- |
+| Maximum per transaction | `8` epochs |
+| Input | `max_epochs` capped at `8` |
+| Behavior | Closes all elapsed epochs up to `max_epochs` or until current |
+
+Any instruction that changes active Cowboy weight, active Bull power, reward-vault funding, ANSEM liabilities, or position ownership with forced settlement must first require all elapsed epochs to be closed, or the transaction must invoke the permissionless `close_epochs` catch-up path before performing the state change.
+
+If `close_epochs` is not called, the protocol state remains on the last closed epoch boundary. Funding deposited after an epoch boundary cannot be applied retroactively to that expired epoch. Population changes after an epoch boundary cannot receive rewards retroactively for that expired epoch.
+
+## Epoch snapshot
+
+For each closed epoch, the protocol snapshots the following values at the epoch boundary:
+
+- `reward_vault_balance`
+- `total_ansem_liability_atomic`
+- `total_active_cowboy_weight`
+- `total_active_bull_power`
+
+The emission for that epoch is computed from these snapshot values, not from any intermediate state that may have occurred during the epoch.
+
 ## Timing sources
 
 On-chain epoch boundaries use Solana cluster `Clock::unix_timestamp`. Off-chain indexers and keepers may use the same timestamp or a block-height derived schedule, but on-chain rewards use `Clock`.
@@ -60,7 +85,7 @@ Lazy accounting implementation (recommended):
   - `ansem_liability_atomic += accrued`.
   - `last_cowboy_reward_index = cowboy_reward_index`.
 
-If `total_active_cowboy_weight == 0`, the Cowboy production emission is not distributed. The fate of undistributed emission is **BLOCKED: OWNER DECISION REQUIRED** (carry over, return to reward vault, or burn).
+If `total_active_cowboy_weight == 0`, the Cowboy production emission is not reserved as a liability. It remains free ANSEM in the reward vault and is available for future epochs. No Cowboy production emission is burned.
 
 ## Bull reward pool
 
@@ -89,7 +114,7 @@ Lazy accounting:
   - Add to `claimable_ansem_atomic` and `ansem_liability_atomic`.
   - Update `last_bull_reward_per_weight`.
 
-If `total_active_bull_power == 0`, contributions remain in the pool and `reward_per_weight_scaled` does not change. The unallocated balance is tracked as a pool surplus and reallocated on the next contribution.
+If `total_active_bull_power == 0`, contributions are tracked as `bull_pool_unallocated_liability_atomic`. When the first eligible Bull set becomes active (or when a new contribution arrives while Bulls are active), the unallocated amount is distributed using the current `total_active_bull_power`, increasing `reward_per_weight_scaled` for all active Bulls from that point forward. Unallocated Bull-pool ANSEM is never burned.
 
 ## Suit competition rewards
 
@@ -117,7 +142,7 @@ proportional_share = proportional_half * position_score / total_eligible_score  
 position_suit_reward = equal_amount_per_position + proportional_share
 ```
 
-The remainder from floor divisions is carried into the next social epoch or burned. The exact policy is **BLOCKED: OWNER DECISION REQUIRED**.
+The remainder from floor divisions rolls into the next social epoch. A suit epoch with no eligible winner rolls the full suit vault into the next social epoch. No suit-competition ANSEM is burned.
 
 ## Runway reporting
 
@@ -125,7 +150,9 @@ The protocol reports runway after every epoch close:
 
 ```text
 required_ansem = sum(emission_target[epoch_i]) for the next 40 epochs
-available_ansem = free_ansem + (pending_fee_revenue * ansem_buy_rate)   // floor
+free_ansem = reward_vault_balance - total_ansem_liability_atomic
+purchasable_ansem = sum over source mints(pending_batch_atomic * ansem_buy_rate)   // floor per mint
+available_ansem = free_ansem + purchasable_ansem
 covered = available_ansem >= required_ansem
 covered_epochs = count of fully covered future epochs
 ```
@@ -142,7 +169,4 @@ There is no guaranteed yield, fixed APY, or minimum payout. All rewards are fund
 
 ## Open questions (BLOCKED)
 
-- Exact `ACCRUAL_WEIGHT_SCALE` and `REWARD_PER_WEIGHT_SCALE`: **BLOCKED: OWNER DECISION REQUIRED** (must be chosen after token decimals and max-supply analysis; minimum `1_000_000` recommended).
-- Fate of Cowboy production emission when no Active Cowboys exist: **BLOCKED: OWNER DECISION REQUIRED**.
-- Fate of suit-competition vault remainder: **BLOCKED: OWNER DECISION REQUIRED**.
-- Whether Bull pool surplus is distributed retroactively or only on new contributions: **BLOCKED: OWNER DECISION REQUIRED**.
+- None for the approved emission and reward mechanics. Implementation sizing and compute costs for the Bull registry remain blocked in [account-model.md](./account-model.md) and [randomness-design.md](./randomness-design.md).

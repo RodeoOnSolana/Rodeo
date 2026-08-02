@@ -15,7 +15,7 @@ Every randomness output must be bound to exactly one of the following domains. A
 | `bull_tier` | Bull tier 1-4 | `position`, `action_nonce`, epoch, `domain="rodeo-v1-bull-tier"` |
 | `suit` | Hearts, Diamonds, Clubs, Spades | `position`, `action_nonce`, epoch, `domain="rodeo-v1-suit"` |
 | `mint_theft_flag` | Whether a reveal becomes a mint theft | `position`, `action_nonce`, epoch, `domain="rodeo-v1-mint-theft"` |
-| `thief_selection` | Which eligible Bull receives a stolen position | `position`, `action_nonce`, epoch, eligible-recipient-set root, `domain="rodeo-v1-thief"` |
+| `thief_selection` | Which eligible Bull receives a stolen position | `position`, `action_nonce`, epoch, `BullRegistry` root, `domain="rodeo-v1-thief"` |
 | `unstake_theft_flag` | Whether normal Cowboy loses pending ANSEM on unstake | `position`, `action_nonce`, epoch, `domain="rodeo-v1-unstake-theft"` |
 
 Each domain produces a uniform integer in the range `[0, denominator - 1]` from the provider's verifiable random output. The protocol then applies the integer probability tables defined in [probabilities-and-rarities.md](./probabilities-and-rarities.md).
@@ -83,6 +83,33 @@ For an **unstake timeout**, the unstake action is cancelled and the position rem
 ## Local mock randomness
 
 Phase 0 used `hashv([b"rodeo-local-mock-v1", &secret, position_key.as_ref()])` for local integration tests. This is not production randomness. Production must replace the mock with a reviewed provider. Local tests may continue to use a deterministic mock, but mainnet deployment must not.
+
+## Bull recipient selection (mint theft)
+
+Mint theft requires selecting a Bull recipient weighted by active `buck_power` without scanning every Bull account. The protocol uses the two-level weighted sortition tree defined in [account-model.md](./account-model.md):
+
+- **Level 1** — a global sum tree indexed by owner aggregate `buck_power`.
+- **Level 2** — a per-owner sum tree indexed by that owner's Bull positions.
+
+Selection algorithm:
+
+1. Compute the effective draw range: `total_active_bull_power - victim_owner_buck_power`. The victim owner is excluded.
+2. Draw `r` in `[0, effective_range)`.
+3. Traverse Level 1 by cumulative owner power, skipping the victim owner node, to select a recipient owner in O(log o).
+4. Within the selected owner, draw `r'` in `[0, owner_buck_power)` and traverse Level 2 to select a Bull position in O(log p).
+
+The settlement transaction supplies the two page paths. The program verifies:
+
+- the supplied pages are part of the `BullRegistry` tree;
+- the cumulative sums match `total_active_bull_power`;
+- the victim owner is not selected;
+- the final selected position is an active Bull.
+
+This design is trustless, verifiable, and bounded in compute. Exact account sizes, page capacity, maximum supported Bull population, and proof serialization are **BLOCKED: OWNER DECISION REQUIRED**.
+
+## Reveal implementation status
+
+Production implementation of the reveal instruction, including mint theft, is **BLOCKED: OWNER DECISION REQUIRED** until the `BullRegistry` design above is reviewed and the maximum supported population and compute costs are confirmed.
 
 ## Provider adapter interface
 

@@ -12,12 +12,14 @@ All on-chain quantities are unsigned atomic integers. Token decimals are read fr
 
 `AtomicAmount<Token>` branded types are used in TypeScript to prevent accidental cross-unit arithmetic. Rust uses checked `u128` intermediates for multiplication/division and `u64` for stored balances unless overflow analysis requires `u128`.
 
-## Fixed economic constants (immutable after launch)
+## Fixed economic constants (code-enforced)
 
 | Constant | Value | Description |
 | --- | --- | --- |
-| `TOTAL_RODEO_SUPPLY` | `1_000_000_000` | Total RODEO minted at launch. |
-| `STAKE_AMOUNT_ATOMIC` | `100_000` | RODEO required to open one position. |
+| `RODEO_TOTAL_SUPPLY_WHOLE` | `1_000_000_000` | Total whole RODEO minted at launch. |
+| `STAKE_AMOUNT_WHOLE_RODEO` | `100_000` | Whole RODEO required to open one position. |
+| `STAKE_AMOUNT_ATOMIC` | `100_000 * 10^rodeo_decimals` | Computed at initialization and stored in `GlobalConfig`. |
+| `EXPECTED_TOTAL_SUPPLY_ATOMIC` | `1_000_000_000 * 10^rodeo_decimals` | Computed at initialization and stored in `GlobalConfig`. |
 | `MIN_STAKE_SECONDS` | `86_400` | 24-hour minimum active stake. |
 | `UNSTAKE_TAX_BPS` | `500` | 5% unstake tax on RODEO principal. |
 | `UNSTAKE_RETURN_BPS` | `9_500` | 95% of RODEO principal returned on unstake. |
@@ -40,18 +42,38 @@ All on-chain quantities are unsigned atomic integers. Token decimals are read fr
 | `ACCRUAL_WEIGHT_SCALE` | `10_000` | Scale for Cowboy accrual weights. |
 | `REWARD_PER_WEIGHT_SCALE` | `1_000_000_000_000_000_000` | Scale for Bull reward-per-buck-power accumulator. |
 
+These values are code-enforced. A program upgrade can change code-enforced constants, but only through the governance-protected upgrade process (3-of-5 Upgrade Council, 72-hour timelock). They are not technically immutable.
+
+## External revenue sources
+
+External revenue includes protocol-controlled fee receipts:
+
+- RODEO pump.fun creator fees.
+- Rodeo marketplace fees.
+- Protocol-controlled fee receipts from approved sponsorships or partnerships.
+
+Explicitly **not** external protocol revenue:
+
+- Player claim taxes (Cowboy 20%, Desperado 2%).
+- Unstake theft distributions.
+- Mint theft transfers.
+- RODEO unstake taxes.
+- Any player-to-player transfers.
+
+Protocol v1 denominates marketplace fees in SOL. Each source mint has its own `PendingBatch` router account.
+
 ## External revenue split
 
-External revenue is realized fee receipts denominated in SOL (Protocol v1). Marketplace fees are collected in SOL and routed through Jupiter. The split is applied after conversion to the destination token where applicable.
+For each batch of external revenue receipts denominated in a source token, the keeper/router applies the following split before conversion where applicable:
 
 | Destination | Share | Rounding |
 | --- | --- | --- |
-| Buy ANSEM for reward vault | 70% | Floor atomic units; remainders stay in router pending account. |
-| Team and marketing | 15% | Floor atomic units; remainder carried. |
-| Buy and burn RODEO | 10% | Floor atomic units; remainders stay in router pending account. |
-| Security and operations | 5% | Floor atomic units; remainder carried. |
+| Buy ANSEM for reward vault | 70% | Floor atomic units of source token. |
+| Team and marketing | 15% | Floor atomic units of source token. |
+| Buy and burn RODEO | 10% | Floor atomic units of source token. |
+| Security and operations | 5% | Floor atomic units of source token. |
 
-The sum of floor allocations may leave dust in the router pending account. Dust is swept into the ANSEM reward vault at the end of a successful routing batch. This rule prevents any rounding direction from reducing the 70% reward-vault target below its floor.
+The sum of floor allocations may leave source-token dust in the corresponding `PendingBatch`. All source-token dust remains in that `PendingBatch` and rolls into the next routing batch. There is no automatic sweep that redirects split-rounding dust into the ANSEM allocation.
 
 ## Principal flows
 
@@ -59,6 +81,8 @@ The sum of floor allocations may leave dust in the router pending account. Dust 
 
 - Owner transfers exactly `STAKE_AMOUNT_ATOMIC` RODEO into `principal_vault`.
 - `Position.principal_amount` is set to `STAKE_AMOUNT_ATOMIC`.
+- `GlobalConfig.stake_amount_atomic` and `expected_total_supply_atomic` are computed as `whole_amount * 10^rodeo_decimals` at initialization.
+- Initialization rejects any mint configuration whose required values overflow `u64` or `u128` intermediates.
 - No RODEO is burned on stake.
 
 ### Unstake
@@ -132,7 +156,7 @@ Each Bull position records the accumulator value at its last update. A Bull's cl
 (current_accumulator - last_accumulator) * buck_power / SCALE   // floor
 ```
 
-Remainders are carried in `division_remainder_atomic` and re-injected into the pool on the next contribution. This prevents reward-per-weight drift and preserves the invariant that total allocated Bull rewards do not exceed the pool balance.
+Remainders from the scaled accumulator divisions are carried in `RewardState.cowboy_index_remainder` and `RewardState.bull_index_remainder`. They stay reserved and are re-injected into the next distribution, preventing reward-per-weight drift and ensuring the same ANSEM is never counted twice.
 
 ## Marketplace accounting
 
@@ -145,10 +169,13 @@ Remainders are carried in `division_remainder_atomic` and re-injected into the p
 
 ## Invariants
 
-- `sum(Position.principal_amount) == principal_vault_balance`.
-- `sum(Position.claimable_ansem_atomic) + bull_pool_allocated + suit_vault_allocated == ansem_liability_atomic`.
+- `sum(Position.principal_amount for every live Position) == principal_vault_balance`.
+  - Live positions include: `RevealPending`, `Active`, and positions with a pending unstake action.
+- `total_ansem_liability_atomic == cowboy_unmaterialized_liability_atomic + position_claimable_liability_atomic + bull_pool_liability_atomic + bull_pool_unallocated_liability_atomic + suit_vault_liability_atomic`.
+- `position_claimable_liability_atomic == sum(Position.claimable_ansem_atomic for every live Position)`.
 - `ansem_liability_atomic <= reward_vault_balance`.
 - `total_allocated_ansem <= ansem_emitted_atomic + external_revenue_ansem`.
+- The same ANSEM is never emitted, reserved, or counted twice.
 - No negative quantities anywhere.
 
 ## Rounding policy
@@ -161,4 +188,4 @@ Remainders are carried in `division_remainder_atomic` and re-injected into the p
 ## Open questions (BLOCKED)
 
 - Maximum balance/supply bounds for account sizing: **BLOCKED: OWNER DECISION REQUIRED**.
-- Whether leftover suit vaults rollover or burn: **BLOCKED: OWNER DECISION REQUIRED**.
+- Exact `PendingBatch` account schema for each source mint: **BLOCKED: OWNER DECISION REQUIRED**.

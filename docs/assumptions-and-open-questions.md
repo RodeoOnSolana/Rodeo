@@ -8,7 +8,7 @@ This file has been superseded by the Rodeo Protocol Specification v1. All items 
 
 1. The requested six-hour epoch is exactly 21,600 seconds.
 2. The requested rolling 10-day runway is exactly 864,000 seconds, or 40 complete six-hour epochs.
-3. All token quantities are non-negative atomic integers. Token decimals are deliberately unknown.
+3. All token quantities are non-negative atomic integers. Token decimals are supplied at production initialization; whole-token amounts are converted to atomic units via `whole * 10^decimals`.
 4. On-chain counters use `u64` unless accumulation may require `u128`; overflow must fail rather than wrap.
 5. A position has exactly one owner pubkey at a time. Shared or fractional position ownership is out of scope. `Position.owner` is a mutable field, not part of the PDA, so ownership can move (marketplace sale, gift, mint theft) without the account changing address; `transfer_position` is the sole generic primitive for that change and requires the current owner's signature.
 5a. `position_id` is caller-chosen and, combined with `global_config`, is the Position PDA's entire, immutable identity. It no longer includes the owner, so the ID space is shared across all owners under one `GlobalConfig`; a colliding ID simply fails account creation (`init` cannot reuse an address) rather than causing any state corruption.
@@ -57,9 +57,10 @@ All questions formerly listed here are now resolved by Protocol Specification v1
 
 ### Assets and units
 
-- **Token mints and decimals:** resolved — mints are supplied at production initialization; decimals are read from the mint accounts and stored in `GlobalConfig`, immutable thereafter.
+- **Token mints and decimals:** resolved — mints are supplied at production initialization; decimals are read from the mint accounts and stored in `GlobalConfig`; `stake_amount_atomic` and `expected_total_supply_atomic` are computed from whole-token values.
 - **Maximum supply/balance bounds:** unresolved; now `BLOCKED: OWNER DECISION REQUIRED` in [account-model.md](./account-model.md).
 - **Marketplace price/fee denomination:** resolved — SOL only for v1.
+- **ANSEM fungibility:** resolved — ANSEM is a single SPL token mint; all reward flows are denominated in atomic ANSEM.
 
 ### Roles, positions, and lifecycle
 
@@ -78,8 +79,11 @@ All questions formerly listed here are now resolved by Protocol Specification v1
 - **Epoch emission formula:** resolved in [emissions-and-rewards.md](./emissions-and-rewards.md).
 - **10-day runway definition:** resolved — required amount is the sum of the next 40 epoch emissions; available is free ANSEM plus purchasable ANSEM from pending revenue.
 - **Runway below 10 days:** emissions continue as long as free ANSEM is positive; runway is a reporting/keeper signal, not an automatic cap.
-- **Epoch closure:** permissionless `close_epoch` instruction, keeper-assisted, catch-up by sequential closure.
+- **Epoch closure:** permissionless `close_epochs(max_epochs)` instruction, keeper-assisted, catch-up by sequential closure, maximum `8` epochs per transaction, per-epoch snapshots.
 - **Bull accumulator scale:** resolved — `REWARD_PER_WEIGHT_SCALE = 1_000_000_000_000_000_000`; `ACCRUAL_WEIGHT_SCALE = 10_000`.
+- **Missing epoch emission target:** resolved — transaction reverts if an emission target is missing for a closing epoch.
+- **Undistributed Cowboy production emission:** resolved — remains free ANSEM in the reward vault, never reserved or burned.
+- **Undistributed suit-competition rewards:** resolved — roll into the next social epoch, never burned.
 
 ### Claims, unstaking, rerolls, burns, and thefts
 
@@ -87,6 +91,7 @@ All questions formerly listed here are now resolved by Protocol Specification v1
 - **Transfers versus burns and source vaults:** resolved in [state-machine.md](./state-machine.md) and [economic-model.md](./economic-model.md).
 - **Theft scope:** mint theft transfers the entire position (receipt, role, rank/tier, suit, principal). Unstake theft only diverts pending ANSEM to the Bull pool.
 - **Action ordering:** resolved in [state-machine.md](./state-machine.md).
+- **Reroll semantics:** resolved — a "reroll" is performed by fully unstaking and staking again with a new `position_id` and randomness nonce; no in-place reroll instruction exists.
 - **Settlement identity:** resolved — `(position, action_type, action_nonce)` plus unique transaction/settlement ID.
 
 ### Marketplace and revenue
@@ -110,7 +115,8 @@ All questions formerly listed here are now resolved by Protocol Specification v1
 ### Security and governance
 
 - **Upgradeability and governance:** resolved — 3-of-5 Squads Upgrade Council (72-hour timelock), 3-of-5 Squads Treasury Council (48-hour timelock), 2-of-3 Emergency Guardians (immediate pause, 12-hour unpause delay).
-- **Emergency controls:** resolved — pause risky new actions; cannot withdraw principal; safe claims/exits preserved whenever possible.
+- **Immutability vs. governance-protected:** resolved — core parameters are governance-protected and timelocked, not technically immutable, because the program remains upgradeable. All upgrade proposals must publish source diff, reproducible build, program-data hash, and activation time.
+- **Emergency controls:** resolved — action-specific pause flags; cannot withdraw principal or liabilities; safe claims/exits preserved whenever technically possible.
 - **Authority separation:** resolved in [account-model.md](./account-model.md) and [treasury-and-governance.md](./treasury-and-governance.md).
 - **Pause behavior:** resolved — preserve safe claims and exits.
 - **Audit and formal verification:** deferred to Phase 5; recommended in [implementation-plan.md](./implementation-plan.md).
@@ -130,11 +136,11 @@ For the complete list of unresolved owner decisions, see the "Open questions (BL
 
 The most urgent remaining Phase 2 blockers are:
 
-1. Pending-action transfer behavior for future action types.
-2. Exact Switchboard integration (queue, task format, CPI vs. callback, proof serialization) and whether commit/reveal hashing is retained.
-3. Marketplace listing expiration policy and future support for bids/auctions/private offers.
-4. Exact Squads program addresses, member pubkeys, and timelock program instances.
-5. Off-chain price oracle for the $100-equivalent minimum batch and Jupiter integration mode.
-6. Incentive/reward for permissionless randomness settler bot.
-7. Policy for undistributed suit-competition rewards.
+1. `BullRegistry` and `BullRegistryNode` account sizes, page capacity, maximum supported Bull population, and proof serialization (reveal implementation blocked until reviewed).
+2. Exact per-source-mint `PendingBatch` account schema.
+3. Exact Switchboard integration (queue, task format, CPI vs. callback, proof serialization) and whether commit/reveal hashing is retained.
+4. Marketplace listing expiration policy and future support for bids/auctions/private offers.
+5. Exact Squads program addresses, member pubkeys, and timelock program instances.
+6. Off-chain price oracle for the $100-equivalent minimum batch and Jupiter integration mode.
+7. Incentive/reward for permissionless randomness settler bot.
 8. Exact X API integration and post-verification pipeline.

@@ -10,12 +10,14 @@ Events are emitted by the on-chain programs and consumed by the indexer, keeper,
 pub struct PositionStaked {
     pub position: Pubkey,
     pub owner: Pubkey,
+    pub position_id: u64,
     pub principal_amount: u64,
     pub commitment: [u8; 32],
+    pub global_game_state: Pubkey,
 }
 ```
 
-Emitted when a new position is staked and the reveal `PendingRandomness` is opened.
+Emitted when a new position is staked and the reveal `PendingRandomness` is opened. `GlobalGameState.live_position_count` and related counters are updated atomically.
 
 ### `PositionRevealed`
 
@@ -28,10 +30,12 @@ pub struct PositionRevealed {
     pub suit: Suit,
     pub stolen: bool,
     pub settlement_nonce: u64,
+    pub receipt_asset: Pubkey,
+    pub active_since: i64,
 }
 ```
 
-Emitted when a reveal settles. `stolen` is `true` if the position was transferred to an eligible Bull during the reveal.
+Emitted when a reveal settles. `stolen` is `true` if the position was transferred to an eligible Bull during the reveal. The `receipt_asset` is created directly for the final owner.
 
 ### `PositionOwnerChanged`
 
@@ -87,6 +91,31 @@ pub enum AnsemUnstakeFate {
 
 Emitted when a position is fully closed through unstake.
 
+### `UnstakeRequested`
+
+```rust
+pub struct UnstakeRequested {
+    pub position: Pubkey,
+    pub owner: Pubkey,
+    pub action_nonce: u64,
+    pub requested_at: i64,
+}
+```
+
+Emitted when an owner commits an unstake randomness action.
+
+### `UnstakeCancelled`
+
+```rust
+pub struct UnstakeCancelled {
+    pub position: Pubkey,
+    pub owner: Pubkey,
+    pub action_nonce: u64,
+}
+```
+
+Emitted when an owner cancels an unstake request before settlement.
+
 ### `BullPoolContribution`
 
 ```rust
@@ -118,6 +147,19 @@ pub struct BullRewardDistributed {
 
 Emitted when a Bull position's Bull-pool reward is credited (lazy update on claim/transfer/unstake).
 
+### `EpochsClosed`
+
+```rust
+pub struct EpochsClosed {
+    pub start_epoch: u64,
+    pub end_epoch: u64,                // exclusive
+    pub epochs_processed: u64,
+    pub last_closed_timestamp: i64,
+}
+```
+
+Emitted when `close_epochs` advances one or more epoch boundaries. Per-epoch details (`EpochClosed`) are emitted for each individual epoch if needed for indexing.
+
 ### `EpochClosed`
 
 ```rust
@@ -127,10 +169,12 @@ pub struct EpochClosed {
     pub suit_vault_contribution: u64,
     pub free_ansem: u64,
     pub total_cowboy_weight: u128,
+    pub total_bull_power: u64,
+    pub snapshot_timestamp: i64,
 }
 ```
 
-Emitted at the end of each six-hour epoch.
+Emitted at the end of each six-hour epoch, using the snapshot values at the epoch boundary.
 
 ### `SuitCompetitionResultAttested`
 
@@ -201,6 +245,45 @@ pub struct RandomnessSettled {
 
 Emitted when a randomness action settles successfully.
 
+### `RandomnessVerified`
+
+```rust
+pub struct RandomnessVerified {
+    pub pending_randomness: Pubkey,
+    pub random_output: [u8; 32],
+    pub provider: Pubkey,
+}
+```
+
+Emitted by the provider adapter after verifying an oracle proof. The core program consumes this output to map outcomes.
+
+### `BullRegistryUpdated`
+
+```rust
+pub struct BullRegistryUpdated {
+    pub registry: Pubkey,
+    pub owner: Pubkey,
+    pub position: Pubkey,
+    pub delta_power: i64,       // signed; positive on activate, negative on deactivate
+    pub total_buck_power: u64,
+}
+```
+
+Emitted when the sortition tree changes (Bull activated, deactivated, or transferred).
+
+### `PauseToggled`
+
+```rust
+pub struct PauseToggled {
+    pub guardian: Pubkey,
+    pub pause_flag: String,     // "new_stakes", "new_reveal_requests", "new_marketplace_listings", "router_swaps"
+    pub paused: bool,           // true = paused, false = unpaused
+    pub effective_at: i64,
+}
+```
+
+Emitted when an Emergency Guardian toggles an action-specific pause flag.
+
 ### `RandomnessTimeoutRecovered`
 
 ```rust
@@ -212,12 +295,12 @@ pub struct RandomnessTimeoutRecovered {
 }
 
 pub enum TimeoutRecoveryAction {
-    CloseAndRefundPrincipal,
-    RetryNewNonce,
+    CloseAndRefundPrincipal,   // reveal timeout before role assignment
+    CancelUnstake,             // unstake timeout
 }
 ```
 
-Emitted on timeout recovery. Exact recovery actions are **BLOCKED: OWNER DECISION REQUIRED**.
+Emitted on timeout recovery.
 
 ## Error codes
 
@@ -237,14 +320,16 @@ Emitted on timeout recovery. Exact recovery actions are **BLOCKED: OWNER DECISIO
 
 | Error | Message | Trigger |
 | --- | --- | --- |
-| `StakeAmountMismatch` | Stake amount must equal the configured requirement | `stake_and_commit` with `principal_amount != STAKE_AMOUNT_ATOMIC` |
+| `StakeAmountMismatch` | Stake amount must equal the configured requirement | stake with `principal_amount != STAKE_AMOUNT_ATOMIC` |
 | `MinimumStakePeriodNotMet` | Position has not been active long enough | unstake before `MIN_STAKE_SECONDS` elapsed |
 | `ClaimCooldownNotMet` | Wallet claim cooldown has not elapsed | claim before one hour since last wallet claim |
 | `NoClaimableRewards` | Position has no claimable ANSEM | claim with `claimable_ansem_atomic == 0` |
+| `EpochsNotClosed` | All elapsed epochs must be closed before this operation | state change crossing an epoch boundary |
 | `InvalidProbabilityOutcome` | Randomness outcome does not map to a valid role/rank/tier/suit | provider bug or malformed proof |
 | `TheftEligibilityNotMet` | Mint theft requires 50 reveals and 3 eligible Bulls | reveal with theft flag true but criteria not met |
 | `NoEligibleTheftRecipient` | No eligible external Bull exists for mint theft | all eligible Bulls owned by victim |
 | `PendingActionBlocksTransfer` | Cannot transfer while a randomness action is pending | marketplace/gift/transfer checks |
+| `PendingActionBlocksClaim` | Cannot claim while a randomness action is pending | claim while unstake/reveal pending |
 | `ListingExpired` | Marketplace listing has expired | settlement of expired listing |
 | `StaleListing` | Listing no longer matches the position state | ownership, unstake, or pending action changed |
 | `InvalidMarketReceipt` | Receipt asset does not match the position | marketplace or gift validation |
@@ -253,6 +338,10 @@ Emitted on timeout recovery. Exact recovery actions are **BLOCKED: OWNER DECISIO
 | `RunwayInsufficient` | Insufficient free ANSEM for requested emission | defensive check, should be handled by formula |
 | `UnauthorizedSwapVenue` | Swap venue is not in the approved list | treasury router |
 | `SlippageExceeded` | Swap output below minimum | treasury router |
+| `PausedNewStakes` | New stakes are paused | Emergency Guardian pause |
+| `PausedNewRevealRequests` | New reveal requests are paused | Emergency Guardian pause |
+| `PausedNewMarketplaceListings` | New marketplace listings are paused | Emergency Guardian pause |
+| `PausedRouterSwaps` | Router swaps are paused | Emergency Guardian pause |
 
 ## Event indexing rules
 
