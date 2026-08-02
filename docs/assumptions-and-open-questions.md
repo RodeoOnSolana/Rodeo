@@ -31,7 +31,7 @@ This file has been superseded by the Rodeo Protocol Specification v1. All items 
 - Generic multiplication/division uses a widened conceptual product. TypeScript uses arbitrary-precision `bigint`; Rust transitions must use checked `u128` intermediates where needed.
 - Fee-funded ANSEM purchasing floors output: `revenue * ANSEM numerator / revenue denominator`.
 - Revenue consumed for a chosen ANSEM amount rounds up: `ceil(ANSEM * revenue denominator / ANSEM numerator)`. This prevents creating ANSEM for less than the configured conversion cost.
-- A runway's required amount is the exact sum of the next 40 supplied epoch targets. Coverage is conservative and counts only fully covered epochs.
+- `epoch_emission = floor(free_ansem / 40)`; required runway amount = `epoch_emission * 40`. Coverage is conservative and counts only fully covered epochs.
 - Token display conversion, decimal parsing, and user-facing rounding are unresolved until token decimals are specified.
 
 ## Dependencies (retained)

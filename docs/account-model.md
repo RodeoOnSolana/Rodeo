@@ -21,6 +21,7 @@ All program addresses are deterministic PDAs. Seed arrays use raw byte literals 
 | `PendingRandomness` | `[b"randomness", position.key().as_ref(), &[action_type as u8], &action_nonce.to_le_bytes()]` | One per outstanding randomness action. |
 | `PendingBatch` (per source mint) | `[b"pending-batch", global_config.key().as_ref(), source_mint.key().as_ref()]` | Accumulated source-token revenue awaiting routing. |
 | `SocialResult` (per suit epoch) | `[b"social-result", global_config.key().as_ref(), &suit_epoch.to_le_bytes()]` | Attested suit-competition result. |
+| `SuitClaimReceipt` | `[b"suit-claim", social_result.key().as_ref(), &leaf_nonce.to_le_bytes()]` | Prevents replay of a suit-competition Merkle leaf claim. |
 
 ## Account schemas
 
@@ -79,6 +80,7 @@ pub struct RewardState {
     // Scaled global accumulators. RewardState is the sole owner of the Cowboy production index and its rounding carry.
     pub cowboy_reward_index: u128,                    // scaled by COWBOY_REWARD_INDEX_SCALE
     pub cowboy_index_remainder_scaled: u128,          // exact-rounding carry for the Cowboy index, scaled by COWBOY_REWARD_INDEX_SCALE
+    pub cowboy_orphaned_accrual_remainder_scaled: u128, // sub-atomic Cowboy carry orphaned by closed positions, scaled by COWBOY_REWARD_INDEX_SCALE
     pub suit_epoch: u64,
     pub bump: u8,
 }
@@ -87,6 +89,8 @@ pub struct RewardState {
 `RewardState` is the single source of truth for `current_epoch`, `epoch_started_at`, `last_closed_epoch_timestamp`, `cowboy_reward_index`, and `cowboy_index_remainder_scaled`. No other account duplicates them. `reward_per_weight_scaled` and `bull_index_remainder_scaled` are kept solely in `BullAccumulator`.
 
 `unrecognized_reward_surplus_atomic` is not a stored field. It is always computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`, so it can never drift from the actual vault balance.
+
+`cowboy_orphaned_accrual_remainder_scaled` collects the Cowboy sub-atomic carry (`Position.cowboy_accrual_remainder_scaled`) left behind when a position closes through unstake, so no dust is silently dropped. When this field reaches `COWBOY_REWARD_INDEX_SCALE`, the whole-atomic portion is converted, `cowboy_unmaterialized_liability_atomic` is reduced by that amount, the amount is routed to the Bull pool under the same active/unallocated rule as other Bull-pool contributions, and the fractional remainder is retained. See [economic-model.md](./economic-model.md) for the full rule.
 
 ### Exact accumulator rounding
 
@@ -182,20 +186,22 @@ pub struct GlobalGameState {
 
 Counter update rules:
 
-| Transition | `live_position_count` | `active_cowboy_count` | `active_bull_count` | `total_active_cowboy_weight` | `total_active_bull_power` | `total_completed_reveals` |
-| --- | --- | --- | --- | --- | --- | --- |
-| Stake | +1 | — | — | — | — | — |
-| Reveal → Cowboy | — | +1 | — | +accrual_weight | — | +1 |
-| Reveal → Bull | — | — | +1 | — | +buck_power | +1 |
-| Unstake close Cowboy | -1 | -1 | — | -accrual_weight | — | — |
-| Unstake close Bull | -1 | — | -1 | — | -buck_power | — |
-| Transfer | — | — | — | — | — | — |
+| Transition | `live_position_count` | `active_cowboy_count` | `active_bull_count` | `total_active_cowboy_weight` | `total_active_bull_power` | `total_completed_reveals` | `accounted_principal_atomic` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Stake | +1 | — | — | — | — | — | `+= principal_amount` |
+| Reveal → Cowboy | — | +1 | — | +accrual_weight | — | +1 | — |
+| Reveal → Bull | — | — | +1 | — | +buck_power | +1 | — |
+| Reveal timeout refund | -1 | — | — | — | — | — | `-= principal_amount` |
+| Unstake close Cowboy | -1 | -1 | — | -accrual_weight | — | — | `-= principal_amount` |
+| Unstake close Bull | -1 | — | -1 | — | -buck_power | — | `-= principal_amount` |
+| Transfer (sale/gift/mint theft) | — | — | — | — | — | — | — |
 
-- `live_position_count` increments on stake and decrements on unstake closure.
+- `live_position_count` increments on stake and decrements on unstake closure or reveal-timeout refund.
 - `total_completed_reveals` increments on every reveal settlement.
 - `active_cowboy_count` and `total_active_cowboy_weight` increment on Cowboy reveal and decrement on Cowboy unstake.
 - `active_bull_count` and `total_active_bull_power` increment on Bull reveal and decrement on Bull unstake.
-- Ownership transfers do not change counters, but they update `state_version`, reset reward checkpoints, and set `unstake_eligible_at = transfer_timestamp + 24 hours`.
+- `accounted_principal_atomic` increases by `principal_amount` on stake and decreases by `principal_amount` on a successful unstake or a reveal-timeout refund. Ownership changes (sale, gift, mint theft) never alter `accounted_principal_atomic`.
+- Ownership transfers do not change population/power counters, but they update `state_version`, reset reward checkpoints, and set `unstake_eligible_at = transfer_timestamp + 24 hours`. Mint theft's initial-owner path sets checkpoints directly rather than resetting them, since no prior owner had accrued rewards.
 
 ### `BullAccumulator`
 
@@ -205,6 +211,7 @@ pub struct BullAccumulator {
     pub global_config: Pubkey,
     pub reward_per_weight_scaled: u128,  // scaled by REWARD_PER_WEIGHT_SCALE
     pub bull_index_remainder_scaled: u128, // exact-rounding carry for the Bull index, scaled by REWARD_PER_WEIGHT_SCALE
+    pub bull_orphaned_accrual_remainder_scaled: u128, // sub-atomic Bull carry orphaned by closed positions, scaled by REWARD_PER_WEIGHT_SCALE
     pub bump: u8,
 }
 ```
@@ -212,6 +219,8 @@ pub struct BullAccumulator {
 `REWARD_PER_WEIGHT_SCALE` is `1_000_000_000_000_000_000` (`1e18`), chosen so that `u128` intermediates cannot overflow for the approved tokenomics. The accumulator is global, not per-epoch; epoch history belongs in events and the indexer.
 
 `BullAccumulator` is the sole owner of `reward_per_weight_scaled` and `bull_index_remainder_scaled`. It does not store `cowboy_reward_index`; that field lives only in `RewardState`.
+
+`bull_orphaned_accrual_remainder_scaled` collects the Bull sub-atomic carry (`Position.bull_accrual_remainder_scaled`) left behind when a position closes through unstake. When this field reaches `REWARD_PER_WEIGHT_SCALE`, the whole-atomic portion is converted, `bull_pool_liability_atomic` (or `bull_pool_unallocated_liability_atomic` if no Bull is active) is reduced by that amount, the amount is routed to the suit-competition vault, and the fractional remainder is retained. See [economic-model.md](./economic-model.md) for the full rule.
 
 ### `BullRegistry` — design proposal
 
@@ -279,6 +288,39 @@ pub struct PendingRandomness {
 
 The provider adapter must either return normalized randomness through CPI return data in the same transaction, or write a `VerifiedRandomness` PDA that is consumed exactly once by `rodeo_core`. `RandomnessVerified` is an observability event only and is not an on-chain data channel.
 
+### `SocialResult`
+
+```rust
+pub struct SocialResult {
+    pub version: u8,                    // ACCOUNT_VERSIONS.socialResult
+    pub global_config: Pubkey,
+    pub competition_epoch: u64,
+    pub winning_suits_mask: u8,         // bitmask over Suit; more than one bit set means a tie
+    pub total_amount: u64,              // total suit-vault ANSEM distributed for this competition_epoch
+    pub merkle_root: [u8; 32],
+    pub content_hash: [u8; 32],         // hash of the off-chain result file
+    pub oracle_threshold: u8,
+    pub attested_at: i64,
+    pub bump: u8,
+}
+```
+
+`winning_suits_mask` replaces the earlier singular `winning_suit` field so that tied suits can be represented exactly. For `N` tied suits (popcount of the mask), the distributable vault (`total_amount`) is divided equally among the `N` suits, and the 50/50 equal/proportional split described in [suits-and-social-competition.md](./suits-and-social-competition.md) is applied independently inside each tied suit; integer-division remainder rolls into the next competition epoch.
+
+### `SuitClaimReceipt`
+
+```rust
+pub struct SuitClaimReceipt {
+    pub version: u8,                    // ACCOUNT_VERSIONS.suitClaimReceipt
+    pub social_result: Pubkey,
+    pub leaf_nonce: u64,
+    pub claimed_at: i64,
+    pub bump: u8,
+}
+```
+
+Created on first successful claim of a suit-competition Merkle leaf; its existence prevents replay of the same `leaf_nonce` under the same `SocialResult`.
+
 ## Enums
 
 ```rust
@@ -307,15 +349,16 @@ Current account versions (from `packages/protocol-definition/src/accounts.ts`):
 | Account | Version | Reason |
 | --- | --- | --- |
 | globalConfig | 1 | Initial definition. |
-| rewardState | 2 | Added `last_closed_epoch_timestamp` (sole owner) and `cowboy_index_remainder_scaled`; removed `unrecognized_reward_surplus_atomic` (now computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`). |
+| rewardState | 3 | v2 added `last_closed_epoch_timestamp` (sole owner) and `cowboy_index_remainder_scaled`; removed `unrecognized_reward_surplus_atomic` (now computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`). v3 (1.3.2) added `cowboy_orphaned_accrual_remainder_scaled`. |
 | position | 3 | Added `bull_tier`, `cowboy_accrual_remainder_scaled`, `bull_accrual_remainder_scaled`; removed `rank_or_tier` sentinel. |
 | globalGameState | 3 | Removed `launch_timestamp`, `current_epoch`, `last_closed_epoch_timestamp` (now sole-owned by `GlobalConfig`/`RewardState`); account holds only population, power, and accounted-principal counters. |
-| bullAccumulator | 2 | Removed `cowboy_reward_index` (sole-owned by `RewardState`); added `bull_index_remainder_scaled` exact-rounding carry. |
+| bullAccumulator | 3 | v2 removed `cowboy_reward_index` (sole-owned by `RewardState`); added `bull_index_remainder_scaled` exact-rounding carry. v3 (1.3.2) added `bull_orphaned_accrual_remainder_scaled`. |
 | bullRegistry | 1 | Design-proposal placeholder; version will bump when finalized. |
 | pendingRandomness | 3 | Added `provider_program`, `provider_randomness_account`, `committed_protocol_epoch`, `timeout_timestamp`, `registry_root_snapshot`, `registry_version_snapshot`. |
 | pendingBatch | 1 | Per-source-mint router pending account. |
 | walletClaimCooldown | 1 | Initial definition. |
-| socialResult | 1 | Initial definition. |
+| socialResult | 2 | v2 (1.3.2) replaced singular `winning_suit` with `winning_suits_mask: u8` and added `total_amount`. |
+| suitClaimReceipt | 1 | Initial definition (1.3.2); replay-prevention PDA for suit-competition Merkle leaf claims. |
 
 ## Open questions (BLOCKED)
 

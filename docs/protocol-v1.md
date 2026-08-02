@@ -2,7 +2,7 @@
 
 ## Status
 
-**Version:** 1.3.1  
+**Version:** 1.3.2  
 **State:** authoritative source of truth for contract, frontend, indexer, keeper, marketplace, and treasury implementation.  
 **Replaces:** any prior `rodeo-game-spec.md` drafts and the Phase 0 economic placeholders.  
 **Scope:** Phase 1 protocol design only. No production Anchor instructions are implemented in this branch.
@@ -149,13 +149,14 @@ Conditional probabilities given Bull; total probability across all reveals is `c
 - Marketplace sale must be atomic.
 - Seller rewards are force-settled before transfer.
 - Normal claim tax applies during forced settlement.
-- Buyer receives role, rank/tier, suit, and locked principal.
+- Buyer receives role, `cowboy_kind`/`bull_tier`, suit, and locked principal.
 - Buyer does not receive seller's pending ANSEM.
 - Marketplace fee: `5%` of sale price, taken once from seller proceeds.
 - Marketplace fees enter the external revenue split.
 - Position ownership cannot change while a randomness action is pending.
-- There is no public, generic `transfer_position` instruction; sale, gift, and mint theft each call the same internal ownership-mutation helper. Transfers outside approved Rodeo flows must be rejected.
-- Sale and gift synchronize/force-settle the outgoing owner's rewards, set the new owner's checkpoints to current global indices, reset `claimable_ansem_atomic`, and reset `unstake_eligible_at`.
+- There is no public, generic `transfer_position` instruction. Sale and gift share one internal ownership-mutation helper; reveal-time mint theft uses a separate internal initial-owner path. Transfers outside approved Rodeo flows must be rejected.
+- Sale and gift synchronize/force-settle the outgoing owner's rewards, transfer the existing frozen receipt, set the new owner's checkpoints to current global indices, reset `claimable_ansem_atomic`, and reset `unstake_eligible_at`. If the resulting claimable amount is zero, the forced settlement is a successful no-op and the transfer continues; `NoClaimableRewards` never blocks a sale or gift.
+- Mint theft performs no reward settlement: it occurs during the initial reveal, before the position has accrued any rewards. The initial-owner path selects the final owner, sets `Position.owner` directly, initializes reward checkpoints, and creates the receipt directly for the final owner; it never transfers a nonexistent receipt and never requires the victim's signature.
 - Direct gifts use forced settlement but no marketplace fee.
 - Ownership authority and receipt asset transfer must occur atomically.
 - Marketplace v1 supports only fixed-price direct listings with no automatic expiration; bids, auctions, and private offers are out of scope for v1.
@@ -241,9 +242,23 @@ The following decisions have been applied across the v1 sub-documents:
 - **Suit snapshot claims:** suit rewards belong permanently to `owner_at_snapshot` and do not require the `Position` to remain open/active, nor that the current owner match `owner_at_snapshot`.
 - **Randomness:** unbiased integer mapping uses deterministic rejection sampling instead of modulo reduction; `PendingRandomness` records `registry_version_snapshot`; `RandomnessRequested` emits provider-specific details (VRF key, callback id, etc.).
 - **Role and event schemas:** `Position` stores `cowboy_kind` and `bull_tier`; `rank_or_tier` is removed everywhere. `PositionRevealed` emits role, cowboy_kind, bull_tier, suit, final_owner, previous_owner (only when stolen), stolen, receipt_asset, active_since, unstake_eligible_at, and settlement_nonce.
-- **Ownership mutation:** there is no public, generic `transfer_position` instruction. Sale, gift, and mint theft each call the same internal ownership-mutation helper, which synchronizes/force-settles the outgoing owner's rewards, sets the new owner's checkpoints to current global indices, resets `claimable_ansem_atomic`, transfers the frozen Core receipt atomically, updates `Position.owner`, and resets `unstake_eligible_at`.
+- **Ownership mutation:** there is no public, generic `transfer_position` instruction. Sale and gift call the same internal ownership-mutation helper, which synchronizes/force-settles the outgoing owner's rewards, sets the new owner's checkpoints to current global indices, resets `claimable_ansem_atomic`, transfers the frozen Core receipt atomically, updates `Position.owner`, and resets `unstake_eligible_at`. As of v1.3.2, reveal-time mint theft uses a separate internal initial-owner path instead of this helper; see "Owner decisions applied in v1.3.2" below.
 - **Marketplace V1 scope:** listings have no automatic expiration (`ListingExpired` is removed from the error list); bids, auctions, and private offers are out of scope for v1.
 - **Events and metrics:** added `ListingCreated`, `ListingCancelled`, `PositionSold`, `PositionGifted`, `RewardFundingRecognized`, `RewardPaid`, `SuitRewardClaimed`, `ReceiptCreated`, `ReceiptBurned`, and an updated `EpochClosed` (with recognized-balance and total-liability snapshots).
+
+## Owner decisions applied in v1.3.2
+
+This is a consistency patch. The following nine owner decisions are applied across the v1 sub-documents; no probability table changes:
+
+1. **Zero-reward forced settlement:** a manual claim synchronizes first and rejects with `NoClaimableRewards` only if the resulting claimable amount is zero. Sale and gift also synchronize first, but if the resulting claimable amount is zero, forced settlement is a successful no-op and the transfer continues; `NoClaimableRewards` must never block a sale or gift. Mint theft performs no reward settlement at all, because it happens during the initial reveal before any reward has accrued.
+2. **Separate mint-theft initial ownership:** sale and gift use the internal ownership-mutation helper (force-settle outgoing owner, transfer the existing frozen receipt, update `Position.owner`, reset checkpoints and `unstake_eligible_at`). Reveal-time mint theft uses a distinct internal initial-owner path: select the final owner, set `Position.owner` to the final owner, initialize reward checkpoints, and create the receipt directly for the final owner. It never transfers a nonexistent receipt, never force-settles rewards, and never requires the victim's signature.
+3. **Initial reward checkpoints:** on Cowboy reveal, `last_cowboy_reward_index = RewardState.cowboy_reward_index`, `cowboy_accrual_remainder_scaled = 0`, `last_bull_reward_per_weight = 0`, `bull_accrual_remainder_scaled = 0`. On Bull reveal, `last_bull_reward_per_weight = BullAccumulator.reward_per_weight_scaled`, `bull_accrual_remainder_scaled = 0`, `last_cowboy_reward_index = 0`, `cowboy_accrual_remainder_scaled = 0`. When the first eligible Bull activates while `bull_pool_unallocated_liability_atomic > 0`: (1) initialize the new Bull's checkpoint to the current accumulator; (2) add the Bull to `total_active_bull_power`; (3) distribute the unallocated amount through the accumulator; (4) move the amount from `bull_pool_unallocated_liability_atomic` to `bull_pool_liability_atomic`; (5) leave `total_ansem_liability_atomic` unchanged.
+4. **Position remainder lifecycle:** `RewardState.cowboy_orphaned_accrual_remainder_scaled` and `BullAccumulator.bull_orphaned_accrual_remainder_scaled` collect the role-appropriate sub-atomic carry of positions that leave synchronization. Sale/gift preserve the carry on the `Position` (it follows the position to the new owner, whose global checkpoint is reset to the current index). Unstake/closure moves the carry into the matching global orphaned field before the account closes. When an orphaned remainder reaches its scale, the whole-atomic portion is converted: the matching unmaterialized liability bucket is reduced, the amount is routed under a documented rule (Cowboy-orphaned atoms to the Bull pool; Bull-orphaned atoms to the suit-competition vault), and the fractional remainder is retained.
+5. **Accounted principal transitions:** `GlobalGameState.accounted_principal_atomic` increases by `principal_amount` on stake, decreases by `principal_amount` on a successful unstake, and decreases by `principal_amount` (with `live_position_count -= 1`) on a reveal-timeout refund. Ownership changes never alter accounted principal.
+6. **Tied suits:** `SocialResult`/`SuitCompetitionResultAttested` and the public indexer schema replace the singular `winning_suit` with `winning_suits_mask: u8`. For `N` tied suits, the distributable suit vault is divided equally among the `N` suits, the 50/50 equal/proportional split is applied independently inside each tied suit, and all integer-division remainder rolls into the next competition.
+7. **Randomness event consistency:** `RandomnessRequested` adds `committed_protocol_epoch: u64` and `timeout_timestamp: i64` so its schema matches `PendingRandomness` and the indexer's `randomness_requests` table.
+8. **Recognized balance wording:** `recognized_reward_balance_atomic` decreases only when ANSEM actually leaves `RewardVault`. It does not decrease for Cowboy tax reclassification, Desperado tax reclassification, unstake theft routed to the Bull pool, or active/unallocated Bull-pool routing, because none of those move ANSEM out of the vault.
+9. **Stale cleanup:** the "next 40 supplied epoch targets" wording is removed in favor of `epoch_emission = floor(free_ansem / 40)` and `required runway amount = epoch_emission * 40`. Remaining generic "rank/tier" wording in account/event field descriptions is reconciled to `cowboy_kind`/`bull_tier`; probability tables are unchanged.
 
 - Token mint addresses and decimals are supplied at production initialization and stored in `GlobalConfig`; `stake_amount_atomic` and `expected_total_supply_atomic` are computed as `whole_amount * 10^rodeo_decimals`.
 - `ACCRUAL_WEIGHT_SCALE = 10,000` and `REWARD_PER_WEIGHT_SCALE = 1,000,000,000,000,000,000`.

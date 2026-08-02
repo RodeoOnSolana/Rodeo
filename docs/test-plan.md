@@ -91,7 +91,7 @@ Every state transition, economic rule, rounding direction, and security invarian
 
 ### Reveal
 
-- [ ] Reveal assigns role, rank/tier, and suit.
+- [ ] Reveal assigns role, `cowboy_kind`/`bull_tier`, and suit.
 - [ ] Reveal increments settlement nonce.
 - [ ] Reveal cannot settle twice.
 - [ ] Reveal creates Metaplex Core receipt for final owner.
@@ -105,7 +105,9 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] Batch claim across multiple positions works.
 - [ ] Empty claim is rejected only after synchronization: elapsed epochs are closed and indices synchronized first, and `NoClaimableRewards` is returned only if the resulting claimable amount is zero.
 - [ ] Synchronization runs unconditionally and is never gated on `claimable_ansem_atomic > 0` before the check.
-- [ ] Forced settlement (sale/gift/mint theft) bypasses the one-hour wallet claim cooldown but still updates `WalletClaimCooldown.last_claimed_at`.
+- [ ] Forced settlement (sale/gift) bypasses the one-hour wallet claim cooldown but still updates `WalletClaimCooldown.last_claimed_at`.
+- [ ] Sale/gift forced settlement with a zero resulting claimable amount is a successful no-op and the transfer still proceeds; `NoClaimableRewards` is never raised for a sale or gift.
+- [ ] Mint theft performs no reward settlement instruction at all (no synchronization, no forced-settlement call).
 - [ ] Cowboy/Desperado claim-tax remainder routes to `bull_pool_liability_atomic` when `total_active_bull_power > 0`, or to `bull_pool_unallocated_liability_atomic` otherwise.
 - [ ] `RewardPaid` is emitted on every ANSEM transfer out of the reward vault, and `recognized_reward_balance_atomic` decreases by the paid amount.
 
@@ -121,20 +123,29 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] Unstake request cannot be cancelled after commitment.
 - [ ] Timeout recovery fails when the oracle value is already available.
 - [ ] Unstake closes the position and burns the receipt.
+- [ ] Successful unstake decreases `accounted_principal_atomic` by `principal_amount`.
+- [ ] Unstake moves the closing position's per-position accrual remainder into the matching global orphaned-remainder field (`cowboy_orphaned_accrual_remainder_scaled` or `bull_orphaned_accrual_remainder_scaled`) before the account closes.
+- [ ] Reveal-timeout refund decreases `accounted_principal_atomic` by `principal_amount` and decrements `live_position_count`.
 
 ### Mint theft
 
 - [ ] Theft activates only after 50 reveals and 3 eligible Bulls.
 - [ ] 5% theft rate matches expected distribution.
 - [ ] Victim's Bull cannot be the recipient.
-- [ ] Entire position transfers: principal, role, rank/tier, suit, receipt.
+- [ ] Entire position transfers: principal, role, `cowboy_kind`/`bull_tier`, suit, receipt.
 - [ ] Ineligibility or absence of an external recipient resolves safely as "not stolen" without reverting.
+- [ ] Mint theft uses the separate reveal-time initial-owner path, not the sale/gift ownership-mutation helper: it never transfers an existing receipt (none exists yet), never force-settles rewards, and never requires the victim's signature.
+- [ ] Mint theft does not change `accounted_principal_atomic`.
+- [ ] Reveal initializes the final owner's checkpoints per role: Cowboy sets `last_cowboy_reward_index = RewardState.cowboy_reward_index` and zeroes the Bull fields; Bull sets `last_bull_reward_per_weight = BullAccumulator.reward_per_weight_scaled` and zeroes the Cowboy fields.
+- [ ] The first eligible Bull activating while `bull_pool_unallocated_liability_atomic > 0` initializes its checkpoint, joins `total_active_bull_power`, distributes the unallocated amount through the accumulator, and moves it into `bull_pool_liability_atomic` without changing `total_ansem_liability_atomic`.
 
 ### Marketplace sale
 
 - [ ] Sale is atomic and updates owner and receipt together.
-- [ ] Seller's pending ANSEM is force-claimed before transfer.
+- [ ] Seller's pending ANSEM is force-claimed before transfer; a zero resulting claimable amount is a successful no-op and the sale still proceeds.
+- [ ] Seller's role-appropriate sub-atomic accrual remainder is preserved on the `Position` and follows it to the buyer.
 - [ ] Buyer starts with zero pending ANSEM.
+- [ ] Sale does not change `accounted_principal_atomic`.
 - [ ] 5% marketplace fee is routed to external revenue.
 - [ ] Sale is rejected while randomness action is pending.
 - [ ] Sale resets `Position.unstake_eligible_at = transfer_timestamp + 24 hours`.
@@ -148,7 +159,9 @@ Every state transition, economic rule, rounding direction, and security invarian
 ### Direct gift
 
 - [ ] Gift changes owner and receipt atomically via Rodeo delegate.
-- [ ] Force-settles pending ANSEM.
+- [ ] Force-settles pending ANSEM; a zero resulting claimable amount is a successful no-op and the gift still proceeds.
+- [ ] Giver's role-appropriate sub-atomic accrual remainder is preserved on the `Position` and follows it to the recipient.
+- [ ] Gift does not change `accounted_principal_atomic`.
 - [ ] No marketplace fee charged.
 - [ ] Rejected while randomness action is pending.
 - [ ] Resets `Position.unstake_eligible_at = transfer_timestamp + 24 hours`.
@@ -174,7 +187,7 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] Direct unsolicited transfer to reward vault increases the dynamically computed unrecognized surplus (`reward_vault_balance - recognized_reward_balance_atomic`); there is no stored `unrecognized_reward_surplus_atomic` field.
 - [ ] `recognize_rewards` after catch-up moves ANSEM from surplus to recognized balance and emits `RewardFundingRecognized`.
 - [ ] Emission uses `min(actual_reward_vault_balance, recognized_reward_balance) - total_ansem_liability`.
-- [ ] `recognized_reward_balance_atomic` decreases on every ANSEM transfer out of the reward vault (claim payouts, Bull-pool routing, suit distributions).
+- [ ] `recognized_reward_balance_atomic` decreases only when ANSEM actually leaves the reward vault (claim payouts, suit distributions); Cowboy/Desperado tax reclassification, unstake theft routed to the Bull pool, and active/unallocated Bull-pool routing do not decrease it.
 - [ ] RODEO buyback is burned.
 - [ ] Failed swap leaves funds pending.
 
@@ -188,6 +201,15 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] Ineligible positions receive nothing.
 - [ ] Undistributed vault rolls into the next social epoch.
 - [ ] Suit reward claim succeeds for `owner_at_snapshot` even after the position has been unstaked, sold, or gifted, and even if the current `Position.owner` differs from `owner_at_snapshot`. Emits `SuitRewardClaimed`.
+- [ ] Replaying a claimed `leaf_nonce` against the same `SocialResult` fails because its `SuitClaimReceipt` already exists.
+
+### Tied suits
+
+- [ ] `winning_suits_mask` with exactly one bit set distributes the full suit vault to that suit only.
+- [ ] `winning_suits_mask` with `N > 1` bits set divides the suit vault into `N` equal `per_suit_vault` shares (floor), with the remainder rolling into the next competition epoch.
+- [ ] Each tied suit applies the 50/50 equal/proportional split independently against its own `per_suit_vault` and its own eligible positions/scores.
+- [ ] Positions are never counted toward more than one tied suit's distribution.
+- [ ] `SocialResult.winning_suits_mask` and `total_amount` match `SuitCompetitionResultAttested`.
 
 ## Integration tests (Anchor localnet)
 
@@ -195,10 +217,10 @@ Every state transition, economic rule, rounding direction, and security invarian
 
 - [ ] `initialize_config` creates `GlobalConfig`, `GlobalGameState`, `RewardState`, `PrincipalVault`, `RewardVault`, `BullAccumulator`.
 - [ ] `stake_and_commit` rejects non-standard stake amounts.
-- [ ] `settle_reveal` assigns role/rank/tier/suit, creates receipt, and emits `PositionRevealed`.
+- [ ] `settle_reveal` assigns role/`cowboy_kind`/`bull_tier`/suit, creates receipt, initializes reward checkpoints, and emits `PositionRevealed`.
 - [ ] `claim_cowboy` and `claim_bull` respect role-specific splits and wallet cooldown.
-- [ ] `request_unstake` + `settle_unstake` burn tax, return principal, and close position; no cancel after commitment.
-- [ ] The internal ownership-mutation helper (used by sale, gift, and mint theft) is blocked while pending action is active and succeeds when cleared. There is no public, generic `transfer_position` instruction.
+- [ ] `request_unstake` + `settle_unstake` burn tax, return principal, decrement `accounted_principal_atomic`, orphan the remaining sub-atomic accrual carry, and close position; no cancel after commitment.
+- [ ] The internal ownership-mutation helper (used by sale and gift) is blocked while pending action is active and succeeds when cleared. There is no public, generic `transfer_position` instruction. Mint theft's separate initial-owner path is exercised only from `settle_reveal`.
 - [ ] `close_epochs` updates global reward index and suit vault using snapshot values.
 - [ ] Bull reward pool distribution matches reward-per-buck-power accounting.
 
@@ -217,6 +239,7 @@ Every state transition, economic rule, rounding direction, and security invarian
 Every integration test must assert at least one of:
 
 - `accounted_principal_atomic == sum(live_position.principal)`
+- `accounted_principal_atomic` changes only on stake (+), successful unstake (-), and reveal-timeout refund (-); ownership changes never move it
 - `principal_vault_balance >= accounted_principal_atomic`; surplus is not withdrawable principal
 - `total_ansem_liability <= recognized_reward_balance <= reward_vault_balance`
 - `total_ansem_liability` equals sum of explicit liability buckets

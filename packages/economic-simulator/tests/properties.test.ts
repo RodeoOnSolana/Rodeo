@@ -8,6 +8,7 @@ import {
   COWBOY_RANK_TABLE,
   COWBOY_REWARD_INDEX_SCALE,
   DESPERADO_ACCRUAL_WEIGHT,
+  REWARD_PER_WEIGHT_SCALE,
   DESPERADO_CLAIM_BULL_POOL_BPS,
   DESPERADO_CLAIM_OWNER_BPS,
   EMISSION_COWBOY_BPS,
@@ -523,20 +524,94 @@ describe("Protocol v1.3 simulator invariants", () => {
     const simulator = new EconomicSimulator(config);
     simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
     simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealCowboy("rank4", "hearts") });
-    simulator.apply({ type: "externalRevenue", settlementId: "rev1", revenueLamports: 200n });
-    fundRewards(simulator, 140n, POT_FILL_SECONDS + EPOCH_DURATION_SECONDS);
+    simulator.apply({ type: "directRewardTransfer", settlementId: "dr1", ansemAtomic: 1_000_000n });
+    simulator.apply({ type: "recognizeRewards", settlementId: "rec1", ansemAtomic: 1_000_000n });
     simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
 
     const vault = simulator.state.suitVaultLiabilityAtomic;
-    const leaf: SuitClaimLeaf = {
+    expect(vault).toBeGreaterThan(1n);
+    const half = vault / 2n;
+    const leafHearts: SuitClaimLeaf = {
       positionId: "p1",
       ownerAtSnapshot: "alice",
       suit: "hearts",
-      amount: vault,
+      amount: half,
       leafNonce: 1n,
     };
-    simulator.apply({ type: "socialResult", settlementId: "soc1", competitionEpoch: simulator.state.suitEpoch, winningSuitsMask: 0b0011, claims: [leaf] });
+    const leafDiamonds: SuitClaimLeaf = {
+      positionId: "p2",
+      ownerAtSnapshot: "bob",
+      suit: "diamonds",
+      amount: vault - half,
+      leafNonce: 2n,
+    };
+    simulator.apply({ type: "socialResult", settlementId: "soc1", competitionEpoch: simulator.state.suitEpoch, winningSuitsMask: 0b0011, claims: [leafHearts, leafDiamonds] });
     expect(simulator.state.suitClaimLiabilityAtomic).toBe(vault);
     expect(simulator.state.suitVaultLiabilityAtomic).toBe(0n);
+  });
+
+  it("allows sale and gift when claimable rewards are zero after sync", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealCowboy("rank4", "hearts") });
+    // No rewards have been emitted, so claimable is zero after synchronization.
+    simulator.apply({ type: "gift", settlementId: "g1", positionId: "p1", newOwner: "bob", claimedAt: 1n });
+    expect(simulator.state.positions.get("p1")?.owner).toBe("bob");
+    expect(simulator.state.positions.get("p1")?.claimableAnsemAtomic).toBe(0n);
+  });
+
+  it("preserves per-position carry across a gift", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    simulator.apply({ type: "stake", settlementId: "s2", positionId: "p2", owner: "bob", openedAt: now });
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealCowboy("rank4", "hearts") });
+    simulator.apply({ type: "reveal", settlementId: "r2", positionId: "p2", outcomes: revealCowboy("rank5", "diamonds") });
+    simulator.apply({ type: "directRewardTransfer", settlementId: "dr1", ansemAtomic: 80n });
+    simulator.apply({ type: "recognizeRewards", settlementId: "rec1", ansemAtomic: 80n });
+    simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
+
+    const beforeTotalLiability = simulator.state.totalAnsemLiabilityAtomic;
+
+    simulator.apply({ type: "gift", settlementId: "g1", positionId: "p1", newOwner: "carol", claimedAt: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS + 1n });
+    const pAfter = simulator.state.positions.get("p1")!;
+    expect(pAfter.owner).toBe("carol");
+    // The gift synchronizes rewards, so the role-appropriate sub-atomic carry
+    // is preserved on the Position while the global checkpoint resets.
+    expect(pAfter.cowboyAccrualRemainderScaled).toBeGreaterThan(0n);
+    expect(pAfter.cowboyAccrualRemainderScaled).toBeLessThan(COWBOY_REWARD_INDEX_SCALE);
+    expect(pAfter.lastCowboyRewardIndex).toBe(simulator.state.cowboyRewardIndex);
+    expect(simulator.state.totalAnsemLiabilityAtomic).toBe(beforeTotalLiability);
+  });
+
+  it("moves per-position carry into orphaned remainder on unstake", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    simulator.apply({ type: "stake", settlementId: "s2", positionId: "p2", owner: "bob", openedAt: now });
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealCowboy("rank4", "hearts") });
+    simulator.apply({ type: "reveal", settlementId: "r2", positionId: "p2", outcomes: revealCowboy("rank5", "diamonds") });
+    simulator.apply({ type: "directRewardTransfer", settlementId: "dr1", ansemAtomic: 80n });
+    simulator.apply({ type: "recognizeRewards", settlementId: "rec1", ansemAtomic: 80n });
+    simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
+
+    const beforeTotalLiability = simulator.state.totalAnsemLiabilityAtomic;
+    const p = simulator.state.positions.get("p1")!;
+    simulator.apply({ type: "requestUnstake", settlementId: "u1", positionId: "p1", requestedAt: p.unstakeEligibleAt + 1n });
+    const carry = simulator.state.positions.get("p1")!.cowboyAccrualRemainderScaled;
+    expect(carry).toBeGreaterThan(0n);
+    expect(carry).toBeLessThan(COWBOY_REWARD_INDEX_SCALE);
+
+    simulator.apply({ type: "settleUnstake", settlementId: "u2", positionId: "p1", fate: { ansemToBullPool: false } });
+    expect(simulator.state.cowboyOrphanedAccrualRemainderScaled).toBe(carry);
+    expect(simulator.state.totalAnsemLiabilityAtomic).toBe(beforeTotalLiability);
+  });
+
+  it("updates accounted principal on stake and unstake", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    expect(simulator.state.accountedPrincipalAtomic).toBe(stakeAmount);
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealCowboy("rank4", "hearts") });
+    simulator.apply({ type: "requestUnstake", settlementId: "u1", positionId: "p1", requestedAt: MIN_STAKE_SECONDS + 1n });
+    simulator.apply({ type: "settleUnstake", settlementId: "u2", positionId: "p1", fate: { ansemToBullPool: false } });
+    expect(simulator.state.accountedPrincipalAtomic).toBe(0n);
   });
 });

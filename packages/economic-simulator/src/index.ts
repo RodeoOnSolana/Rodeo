@@ -116,8 +116,10 @@ export interface SimulationState {
   // Reward accumulators
   cowboyRewardIndex: bigint;
   cowboyIndexRemainderScaled: bigint;
+  cowboyOrphanedAccrualRemainderScaled: bigint;
   bullRewardPerWeightScaled: bigint;
   bullIndexRemainderScaled: bigint;
+  bullOrphanedAccrualRemainderScaled: bigint;
   suitEpoch: bigint;
   // Game counters
   totalCompletedReveals: bigint;
@@ -220,8 +222,10 @@ export class EconomicSimulator {
       buybackRevenueAtomic: 0n,
       cowboyRewardIndex: 0n,
       cowboyIndexRemainderScaled: 0n,
+      cowboyOrphanedAccrualRemainderScaled: 0n,
       bullRewardPerWeightScaled: 0n,
       bullIndexRemainderScaled: 0n,
+      bullOrphanedAccrualRemainderScaled: 0n,
       suitEpoch: 0n,
       totalCompletedReveals: 0n,
       livePositionCount: 0n,
@@ -289,6 +293,7 @@ export class EconomicSimulator {
         break;
     }
 
+    this.convertOrphanedRemainders();
     this.state.settledIds.add(event.settlementId);
     this.assertInvariants();
   }
@@ -367,10 +372,14 @@ export class EconomicSimulator {
     position.unstakeEligibleAt = checkedAdd(position.activeSince, MIN_STAKE_SECONDS);
     this.state.totalCompletedReveals = checkedAdd(this.state.totalCompletedReveals, 1n);
 
+    // Mint-theft uses a separate reveal-time initial-owner path: it sets the
+    // final owner, initializes checkpoints, and would create the receipt
+    // directly for that owner. It must not force-settle rewards or transfer a
+    // nonexistent receipt.
     if (event.outcomes.mintTheft && event.outcomes.thiefPositionId !== null) {
       const thief = this.position(event.outcomes.thiefPositionId);
       if (thief.role !== "bull") throw new Error("Thief must be a Bull");
-      this.transferOwnership(position, thief.owner);
+      position.owner = thief.owner;
     }
 
     if (event.outcomes.role === "cowboy") {
@@ -385,6 +394,9 @@ export class EconomicSimulator {
       this.state.activeCowboyCount = checkedAdd(this.state.activeCowboyCount, 1n);
       this.state.totalActiveCowboyWeight = checkedAdd(this.state.totalActiveCowboyWeight, position.accrualWeight);
       position.lastCowboyRewardIndex = this.state.cowboyRewardIndex;
+      position.cowboyAccrualRemainderScaled = 0n;
+      position.lastBullRewardPerWeight = 0n;
+      position.bullAccrualRemainderScaled = 0n;
     } else if (event.outcomes.role === "bull") {
       const tier = event.outcomes.bullTier as BullTier;
       position.bullTier = BULL_BUCK_POWER[tier];
@@ -392,6 +404,9 @@ export class EconomicSimulator {
       this.state.activeBullCount = checkedAdd(this.state.activeBullCount, 1n);
       this.state.totalActiveBullPower = checkedAdd(this.state.totalActiveBullPower, BigInt(position.buckPower));
       position.lastBullRewardPerWeight = this.state.bullRewardPerWeightScaled;
+      position.bullAccrualRemainderScaled = 0n;
+      position.lastCowboyRewardIndex = 0n;
+      position.cowboyAccrualRemainderScaled = 0n;
       this.allocateBullPoolUnallocated();
     }
   }
@@ -512,6 +527,20 @@ export class EconomicSimulator {
         this.state.ansemClaimedAtomic = checkedAdd(this.state.ansemClaimedAtomic, pending);
         position.claimableAnsemAtomic = 0n;
       }
+    }
+
+    // Move any sub-atomic per-position carry into the global orphaned remainder
+    // before the Position account is closed.
+    if (position.role === "cowboy") {
+      this.state.cowboyOrphanedAccrualRemainderScaled = checkedAdd(
+        this.state.cowboyOrphanedAccrualRemainderScaled,
+        position.cowboyAccrualRemainderScaled
+      );
+    } else if (position.role === "bull") {
+      this.state.bullOrphanedAccrualRemainderScaled = checkedAdd(
+        this.state.bullOrphanedAccrualRemainderScaled,
+        position.bullAccrualRemainderScaled
+      );
     }
 
     position.principalAtomic = 0n;
@@ -676,12 +705,14 @@ export class EconomicSimulator {
     const numerator = deltaIndex * position.accrualWeight + position.cowboyAccrualRemainderScaled;
     const accrued = numerator / COWBOY_REWARD_INDEX_SCALE;
     position.cowboyAccrualRemainderScaled = numerator % COWBOY_REWARD_INDEX_SCALE;
+    // Advance the checkpoint even when the sync yields zero whole atoms so the
+    // sub-atomic carry is not double-counted by a later sync.
+    position.lastCowboyRewardIndex = this.state.cowboyRewardIndex;
     if (accrued === 0n) return;
     if (accrued > this.state.cowboyUnmaterializedLiabilityAtomic) {
       throw new Error("Cowboy accrual exceeds unmaterialized liability");
     }
     position.claimableAnsemAtomic = checkedAdd(position.claimableAnsemAtomic, accrued);
-    position.lastCowboyRewardIndex = this.state.cowboyRewardIndex;
     this.state.cowboyUnmaterializedLiabilityAtomic = checkedSub(this.state.cowboyUnmaterializedLiabilityAtomic, accrued);
     this.state.positionClaimableLiabilityAtomic = checkedAdd(this.state.positionClaimableLiabilityAtomic, accrued);
   }
@@ -693,12 +724,12 @@ export class EconomicSimulator {
     const numerator = delta * BigInt(position.buckPower) + position.bullAccrualRemainderScaled;
     const reward = numerator / REWARD_PER_WEIGHT_SCALE;
     position.bullAccrualRemainderScaled = numerator % REWARD_PER_WEIGHT_SCALE;
+    position.lastBullRewardPerWeight = this.state.bullRewardPerWeightScaled;
     if (reward === 0n) return;
     if (reward > this.state.bullPoolLiabilityAtomic) {
       throw new Error("Bull accrual exceeds bull pool liability");
     }
     position.claimableAnsemAtomic = checkedAdd(position.claimableAnsemAtomic, reward);
-    position.lastBullRewardPerWeight = this.state.bullRewardPerWeightScaled;
     this.state.bullPoolLiabilityAtomic = checkedSub(this.state.bullPoolLiabilityAtomic, reward);
     this.state.positionClaimableLiabilityAtomic = checkedAdd(this.state.positionClaimableLiabilityAtomic, reward);
   }
@@ -756,10 +787,46 @@ export class EconomicSimulator {
   private transferOwnership(position: PositionState, newOwner: string): void {
     position.owner = newOwner;
     position.stateVersion = checkedAdd(position.stateVersion, 1n);
-    position.lastCowboyRewardIndex = this.state.cowboyRewardIndex;
-    position.lastBullRewardPerWeight = this.state.bullRewardPerWeightScaled;
-    position.cowboyAccrualRemainderScaled = 0n;
-    position.bullAccrualRemainderScaled = 0n;
+    // Reset the new owner's global checkpoints to the current indices while
+    // preserving the role-appropriate sub-atomic carry that follows the Position.
+    if (position.role === "cowboy") {
+      position.lastCowboyRewardIndex = this.state.cowboyRewardIndex;
+      position.cowboyAccrualRemainderScaled = position.cowboyAccrualRemainderScaled;
+      position.lastBullRewardPerWeight = 0n;
+      position.bullAccrualRemainderScaled = 0n;
+    } else if (position.role === "bull") {
+      position.lastBullRewardPerWeight = this.state.bullRewardPerWeightScaled;
+      position.bullAccrualRemainderScaled = position.bullAccrualRemainderScaled;
+      position.lastCowboyRewardIndex = 0n;
+      position.cowboyAccrualRemainderScaled = 0n;
+    }
+  }
+
+  private convertOrphanedRemainders(): void {
+    const cowboyScale = COWBOY_REWARD_INDEX_SCALE;
+    const cowboyWhole = this.state.cowboyOrphanedAccrualRemainderScaled / cowboyScale;
+    if (cowboyWhole > 0n) {
+      if (cowboyWhole > this.state.cowboyUnmaterializedLiabilityAtomic) {
+        throw new Error("Cowboy orphaned conversion exceeds unmaterialized liability");
+      }
+      this.state.cowboyUnmaterializedLiabilityAtomic = checkedSub(
+        this.state.cowboyUnmaterializedLiabilityAtomic,
+        cowboyWhole
+      );
+      this.state.cowboyOrphanedAccrualRemainderScaled -= cowboyWhole * cowboyScale;
+      this.distributeToBullPool(cowboyWhole);
+    }
+
+    const bullScale = REWARD_PER_WEIGHT_SCALE;
+    const bullWhole = this.state.bullOrphanedAccrualRemainderScaled / bullScale;
+    if (bullWhole > 0n) {
+      if (bullWhole > this.state.bullPoolLiabilityAtomic) {
+        throw new Error("Bull orphaned conversion exceeds bull pool liability");
+      }
+      this.state.bullPoolLiabilityAtomic = checkedSub(this.state.bullPoolLiabilityAtomic, bullWhole);
+      this.state.bullOrphanedAccrualRemainderScaled -= bullWhole * bullScale;
+      this.state.suitVaultLiabilityAtomic = checkedAdd(this.state.suitVaultLiabilityAtomic, bullWhole);
+    }
   }
 
   private freeAnsem(): bigint {

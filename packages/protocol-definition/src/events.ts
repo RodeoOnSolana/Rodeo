@@ -65,6 +65,7 @@ export type SuitRewardClaimedEvent = ProtocolEventEnvelope<"suitRewardClaimed", 
   readonly position: string;
   readonly ownerAtSnapshot: string;
   readonly amountAtomic: bigint;
+  readonly leafNonce: bigint;
 }>;
 
 export type ReceiptCreatedEvent = ProtocolEventEnvelope<"receiptCreated", {
@@ -98,13 +99,31 @@ export type ListingCancelledEvent = ProtocolEventEnvelope<"listingCancelled", {
 
 export type RandomnessRequestedEvent = ProtocolEventEnvelope<"randomnessRequested", {
   readonly position: string;
+  readonly actionType: "reveal" | "unstake";
   readonly actionNonce: bigint;
-  readonly provider: string;
-  readonly request: {
-    readonly account?: string;
-    readonly commitment?: Uint8Array;
-    readonly seed?: Uint8Array;
-  };
+  readonly committedProtocolEpoch: bigint;
+  readonly timeoutTimestamp: bigint;
+  readonly providerProgram: string;
+  readonly providerRandomnessAccount: string;
+  readonly vrfKey: string | null;
+  readonly callbackId: Uint8Array | null;
+  readonly registryRootSnapshot: Uint8Array;
+  readonly registryVersionSnapshot: bigint;
+  readonly commitment: Uint8Array;
+}>;
+
+export type SocialResultEvent = ProtocolEventEnvelope<"socialResultAttested", {
+  readonly competitionEpoch: bigint;
+  readonly winningSuitsMask: number;
+  readonly totalAmount: bigint;
+  readonly merkleRoot: Uint8Array;
+  readonly contentHash: Uint8Array;
+}>;
+
+export type SuitClaimReceiptEvent = ProtocolEventEnvelope<"suitClaimReceiptCreated", {
+  readonly socialResult: string;
+  readonly leafNonce: bigint;
+  readonly claimed: boolean;
 }>;
 
 export type RodeoProtocolEvent =
@@ -121,4 +140,6 @@ export type RodeoProtocolEvent =
   | EpochClosedEvent
   | ListingCreatedEvent
   | ListingCancelledEvent
-  | RandomnessRequestedEvent;
+  | RandomnessRequestedEvent
+  | SocialResultEvent
+  | SuitClaimReceiptEvent;

@@ -57,7 +57,7 @@ pub enum OwnershipChangeReason {
 }
 ```
 
-Emitted whenever `Position.owner` changes. There is no public, generic `transfer_position` instruction; sale, gift, and mint theft each call the same internal ownership-mutation helper, which synchronizes/force-settles seller rewards, sets buyer checkpoints to the current global indices, resets `claimable_ansem_atomic`, transfers the frozen Core receipt atomically, updates `Position.owner`, and resets `unstake_eligible_at`.
+Emitted whenever `Position.owner` changes. There is no public, generic `transfer_position` instruction. Sale and gift call the same internal ownership-mutation helper, which synchronizes/force-settles seller rewards (a zero resulting claimable amount is a successful no-op, never `NoClaimableRewards`), sets buyer checkpoints to the current global indices, resets `claimable_ansem_atomic`, preserves the seller's role-appropriate sub-atomic accrual remainder on the `Position`, transfers the frozen Core receipt atomically, updates `Position.owner`, and resets `unstake_eligible_at`. Mint theft instead uses a separate internal initial-owner path at reveal settlement: it sets `Position.owner` directly, initializes reward checkpoints, and creates the receipt directly for the final owner, without transferring an existing receipt or settling any rewards.
 
 ### `PositionClaimed`
 
@@ -287,7 +287,8 @@ Emitted at the end of each six-hour epoch, using the snapshot values at the epoc
 ```rust
 pub struct SuitCompetitionResultAttested {
     pub competition_epoch: u64,
-    pub winning_suit: Suit,
+    pub winning_suits_mask: u8,    // bitmask over Suit; more than one bit set means a tie
+    pub total_amount: u64,         // distributable suit vault for this competition_epoch
     pub merkle_root: [u8; 32],
     pub content_hash: [u8; 32],    // hash of the off-chain result file
     pub oracle_threshold: u8,
@@ -295,7 +296,7 @@ pub struct SuitCompetitionResultAttested {
 }
 ```
 
-Emitted when the social oracle attests a competition result.
+Emitted when the social oracle attests a competition result. `winning_suits_mask` replaces the earlier singular `winning_suit` field; when `N > 1` bits are set, the tied suits split `total_amount` equally (`total_amount / N`, floor) and each applies the 50/50 equal/proportional split independently, with integer-division remainder rolling into the next competition epoch.
 
 ### `SuitRewardsDistributed`
 
@@ -347,16 +348,19 @@ pub struct RandomnessRequested {
     pub action_type: ActionType,
     pub action_nonce: u64,
     pub committed_slot: u64,
+    pub committed_protocol_epoch: u64,
+    pub timeout_timestamp: i64,
     pub provider_program: Pubkey,
     pub provider_randomness_account: Pubkey,
     pub vrf_key: Option<Pubkey>,            // provider VRF/oracle key, if applicable
     pub callback_id: Option<[u8; 32]>,      // provider callback/task id, if applicable
     pub registry_root_snapshot: [u8; 32],   // BullRegistry root at request time, if applicable
     pub registry_version_snapshot: u64,     // BullRegistry version at request time, if applicable
+    pub commitment: [u8; 32],
 }
 ```
 
-Emitted when a randomness action is committed. The provider-specific fields (`vrf_key`, `callback_id`) depend on the chosen production randomness provider's adapter; unused fields are `None`.
+Emitted when a randomness action is committed. The provider-specific fields (`vrf_key`, `callback_id`) depend on the chosen production randomness provider's adapter; unused fields are `None`. This schema mirrors `PendingRandomness` exactly (`position`, `action_type`, `action_nonce`, `committed_protocol_epoch`, `timeout_timestamp`, `provider_program`, `provider_randomness_account`, `vrf_key`, `callback_id`, `registry_root_snapshot`, `registry_version_snapshot`, `commitment`) so the indexer's `randomness_requests` table can be populated directly from the event without a separate account fetch.
 
 ### `RandomnessSettled`
 
@@ -458,7 +462,7 @@ Emitted on timeout recovery.
 | `ClaimCooldownNotMet` | Wallet claim cooldown has not elapsed | non-forced claim before one hour since last wallet claim (forced settlements bypass this cooldown but still update `WalletClaimCooldown.last_claimed_at`) |
 | `NoClaimableRewards` | Position has no claimable ANSEM after synchronization | claim or forced settlement where the resulting claimable amount is zero after closing elapsed epochs and synchronizing indices |
 | `EpochsNotClosed` | All elapsed epochs must be closed before this operation | state change crossing an epoch boundary |
-| `InvalidProbabilityOutcome` | Randomness outcome does not map to a valid role/rank/tier/suit | provider bug or malformed proof |
+| `InvalidProbabilityOutcome` | Randomness outcome does not map to a valid role/cowboy_kind/bull_tier/suit | provider bug or malformed proof |
 | `PendingActionBlocksTransfer` | Cannot change owner while a randomness action is pending | marketplace/gift/mint-theft ownership checks |
 | `PendingActionBlocksClaim` | Cannot claim while a randomness action is pending | claim while unstake/reveal pending |
 | `StaleListing` | Listing no longer matches the position state | ownership, unstake, or pending action changed |

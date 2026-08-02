@@ -94,6 +94,27 @@ Lazy accounting implementation:
 
 If `total_active_cowboy_weight == 0`, the Cowboy production emission is not reserved as a liability. It remains free ANSEM in the reward vault and is available for future epochs. No Cowboy production emission is burned.
 
+### Initial reward checkpoints
+
+At reveal settlement, the final owner's checkpoints are initialized before any synchronization can occur, so a newly revealed position never accrues rewards it did not earn and never misses rewards it is entitled to:
+
+| Reveal outcome | `last_cowboy_reward_index` | `cowboy_accrual_remainder_scaled` | `last_bull_reward_per_weight` | `bull_accrual_remainder_scaled` |
+| --- | --- | --- | --- | --- |
+| Cowboy | `RewardState.cowboy_reward_index` | `0` | `0` | `0` |
+| Bull | `0` | `0` | `BullAccumulator.reward_per_weight_scaled` | `0` |
+
+When the first eligible Bull activates while `bull_pool_unallocated_liability_atomic > 0`, the reveal settlement performs, in order:
+
+1. Initialize the new Bull's checkpoint to the current accumulator value as above.
+2. Add the Bull's `buck_power` to `total_active_bull_power`.
+3. Distribute the unallocated amount through the accumulator using the standard numerator/remainder formula.
+4. Move the distributed amount from `bull_pool_unallocated_liability_atomic` to `bull_pool_liability_atomic`.
+5. Leave `total_ansem_liability_atomic` unchanged (the amount was already counted there).
+
+### Orphaned accrual remainders
+
+When a position closes through unstake, its per-position sub-atomic carry (`cowboy_accrual_remainder_scaled` or `bull_accrual_remainder_scaled`) moves into the matching global orphaned field (`RewardState.cowboy_orphaned_accrual_remainder_scaled` or `BullAccumulator.bull_orphaned_accrual_remainder_scaled`) rather than being dropped. Sale and gift instead preserve the carry on the `Position`, which follows it to the new owner. See [account-model.md](./account-model.md) and [economic-model.md](./economic-model.md) for the full materialization rule.
+
 ## Bull reward pool
 
 The Bull reward pool receives:

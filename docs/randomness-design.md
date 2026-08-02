@@ -73,7 +73,7 @@ Timeout recovery is a safety valve, not a retry loop. It must:
 - be callable by the owner or a permissionless keeper;
 - emit a distinct event (`RandomnessTimeoutRecovered`).
 
-For a **reveal timeout** before role assignment, the position is closed and the full principal is returned to the staker. This is "reveal principal recovery before assignment": if no role has been assigned, the staker is not yet committed to the game and may reclaim their deposit.
+For a **reveal timeout** before role assignment, the position is closed and the full principal is returned to the staker; `GlobalGameState.accounted_principal_atomic -= principal_amount` and `live_position_count -= 1`. This is "reveal principal recovery before assignment": if no role has been assigned, the staker is not yet committed to the game and may reclaim their deposit.
 
 For an **unstake timeout**, the unstake action is cancelled and the position remains staked and Active (equivalent to unstake-request cancellation).
 

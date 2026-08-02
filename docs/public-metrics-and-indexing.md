@@ -72,9 +72,10 @@ The indexer ingests:
 | Field | Source |
 | --- | --- |
 | `competition_epoch` | `SuitCompetitionResultAttested.competition_epoch` |
-| `winning_suit` | `SuitCompetitionResultAttested.winning_suit` |
+| `winning_suits_mask` | `SuitCompetitionResultAttested.winning_suits_mask` |
 | `merkle_root` | `SuitCompetitionResultAttested.merkle_root` |
 | `content_hash` | `SuitCompetitionResultAttested.content_hash` |
+| `total_amount` | `SuitCompetitionResultAttested.total_amount` |
 | `total_reward_atomic` | `SuitRewardsDistributed.total_amount` |
 | `eligible_positions` | `SuitRewardsDistributed.eligible_positions` |
 

@@ -94,6 +94,18 @@ The sum of floor allocations may leave source-token dust in the corresponding `P
 4. The return amount is transferred to the owner's RODEO account.
 5. `UNSTAKE_TAX_BPS + UNSTAKE_RETURN_BPS == 10_000`, so there is no rounding remainder and the burned amount is exactly the tax.
 
+### Accounted principal transitions
+
+`GlobalGameState.accounted_principal_atomic` changes only on these transitions:
+
+| Transition | Effect |
+| --- | --- |
+| Stake | `accounted_principal_atomic += principal_amount` |
+| Successful unstake | `accounted_principal_atomic -= principal_amount` |
+| Reveal-timeout refund | `accounted_principal_atomic -= principal_amount`; `live_position_count -= 1` |
+
+Ownership changes (sale, gift, mint theft) never alter `accounted_principal_atomic`, because the principal never leaves the `Position`; only the owner field changes.
+
 ## Reward flows
 
 ### ANSEM funding
@@ -165,6 +177,11 @@ Bull:
 - `bull_pool_liability_atomic` was already reduced during synchronization; it is not reduced again.
 - Emit `RewardPaid` when ANSEM leaves the reward vault to the owner; `recognized_reward_balance_atomic` decreases by the paid amount.
 
+Marketplace sale and direct gift (forced settlement):
+- Synchronize the outgoing owner's rewards first, unconditionally, using the same rules as a manual claim.
+- If the resulting claimable amount is zero, the forced settlement is a successful no-op: nothing is paid out, and the sale or gift transfer continues. `NoClaimableRewards` is never raised for a sale or gift.
+- If the resulting claimable amount is non-zero, it is paid out through the normal Cowboy/Desperado/Bull split described above before ownership changes.
+
 Normal Cowboy unstake:
 - Synchronize pending production rewards before settlement.
 - `95%` outcome: 100% of synchronized pending ANSEM is paid to the owner.
@@ -207,14 +224,29 @@ bull_accrual_remainder_scaled = numerator % REWARD_PER_WEIGHT_SCALE
 
 Every contribution to the Bull pool — Cowboy claim tax, Desperado claim tax, and unstake-theft contributions — is routed the same way: if `total_active_bull_power > 0` it increases `bull_pool_liability_atomic` and updates the accumulator with this remainder-carry rounding; otherwise it increases `bull_pool_unallocated_liability_atomic`. When an eligible Bull set becomes active, `bull_pool_unallocated_liability_atomic` is distributed into the accumulator using the same formula and then cleared to zero.
 
+## Position remainder lifecycle
+
+Sub-atomic per-position rounding carries (`Position.cowboy_accrual_remainder_scaled`, `Position.bull_accrual_remainder_scaled`) must never be silently discarded when a position leaves synchronization:
+
+- **Sale/gift:** the whole-atomic rewards are synchronized as usual; the role-appropriate sub-atomic carry is preserved on the `Position` and follows it to the new owner, whose global checkpoint (`last_cowboy_reward_index` or `last_bull_reward_per_weight`) is reset to the current index.
+- **Unstake/closure:** the role-appropriate per-position carry is moved into the matching global orphaned-remainder field — `RewardState.cowboy_orphaned_accrual_remainder_scaled` for Cowboys, `BullAccumulator.bull_orphaned_accrual_remainder_scaled` for Bulls — before the `Position` account closes.
+- **Materialization:** when an orphaned-remainder field reaches its scale (`COWBOY_REWARD_INDEX_SCALE` or `REWARD_PER_WEIGHT_SCALE`), the whole-atomic portion is converted:
+  - the matching unmaterialized liability bucket is reduced by the converted amount (`cowboy_unmaterialized_liability_atomic` for Cowboy-orphaned atoms; `bull_pool_liability_atomic`, or `bull_pool_unallocated_liability_atomic` if no Bull is active, for Bull-orphaned atoms);
+  - Cowboy-orphaned atoms are routed to the Bull pool (using the same active/unallocated rule as any other Bull-pool contribution);
+  - Bull-orphaned atoms are routed to the suit-competition vault (`suit_vault_liability_atomic`);
+  - the fractional remainder below the scale is retained in the orphaned-remainder field.
+
+This is the conservative, documented rule for otherwise-unroutable dust: it guarantees the dust is never burned and never double-counted, while giving it an unambiguous, auditable destination.
+
 ## Marketplace accounting
 
 - Sale price is paid by buyer to an escrow or directly to the program.
 - Marketplace fee = `price * MARKETPLACE_FEE_BPS / 10_000` (floor).
 - Seller receives `price - fee`.
 - Fee enters external revenue split.
-- Seller's pending ANSEM is force-claimed before transfer.
+- Seller's pending ANSEM is synchronized and force-claimed before transfer if non-zero; a zero resulting claimable amount is a successful no-op and the sale still proceeds.
 - Buyer starts with `claimable_ansem_atomic = 0`.
+- Sale and gift never change `accounted_principal_atomic`.
 
 ## Invariants
 
@@ -223,11 +255,12 @@ Every contribution to the Bull pool — Cowboy claim tax, Desperado claim tax, a
 - `principal_vault_surplus_atomic = actual_principal_vault_balance - accounted_principal_atomic`. Surplus is never treated as player principal and cannot be withdrawn through normal unstake.
 - Live positions include: `RevealPending`, `Active`, and positions with a pending unstake action.
 - `total_ansem_liability_atomic == cowboy_unmaterialized_liability_atomic + position_claimable_liability_atomic + bull_pool_liability_atomic + bull_pool_unallocated_liability_atomic + suit_vault_liability_atomic`.
+- No ANSEM dust is dropped on position closure: the sum of ANSEM materialized plus the outstanding `cowboy_orphaned_accrual_remainder_scaled` / `bull_orphaned_accrual_remainder_scaled` fractional carry equals the total sub-atomic carry ever orphaned by closed positions.
 - `position_claimable_liability_atomic == sum(Position.claimable_ansem_atomic for every live Position)`.
 - `free_ansem = min(actual_reward_vault_balance, recognized_reward_balance_atomic) - total_ansem_liability_atomic`.
 - `total_ansem_liability_atomic <= recognized_reward_balance_atomic <= actual_reward_vault_balance`.
 - The unrecognized reward surplus is not a stored field; it is always computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`. Direct unsolicited transfers and ANSEM purchased before catch-up count toward this surplus until recognized.
-- `recognized_reward_balance_atomic` decreases with every ANSEM transfer out of the reward vault (claim payouts, Bull-pool routing, suit distributions), and increases only through the recognition instruction.
+- `recognized_reward_balance_atomic` decreases only when ANSEM actually leaves `RewardVault` (e.g. claim payouts, suit distributions), and increases only through the recognition instruction. It does **not** decrease for Cowboy tax reclassification, Desperado tax reclassification, unstake theft routed to the Bull pool, or active/unallocated Bull-pool routing — those are internal liability-bucket reclassifications that never move ANSEM out of the vault.
 - `total_allocated_ansem <= ansem_emitted_atomic + recognized_external_ansem`.
 - The same ANSEM is never emitted, reserved, or counted twice.
 - No negative quantities anywhere.
