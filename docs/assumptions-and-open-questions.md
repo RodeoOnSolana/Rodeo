@@ -10,7 +10,7 @@ This file has been superseded by the Rodeo Protocol Specification v1. All items 
 2. The requested rolling 10-day runway is exactly 864,000 seconds, or 40 complete six-hour epochs.
 3. All token quantities are non-negative atomic integers. Token decimals are supplied at production initialization; whole-token amounts are converted to atomic units via `whole * 10^decimals`.
 4. On-chain counters use `u64` unless accumulation may require `u128`; overflow must fail rather than wrap.
-5. A position has exactly one owner pubkey at a time. Shared or fractional position ownership is out of scope. `Position.owner` is a mutable field, not part of the PDA, so ownership can move (marketplace sale, gift, mint theft) without the account changing address; `transfer_position` is the sole generic primitive for that change and requires the current owner's signature.
+5. A position has exactly one owner pubkey at a time. Shared or fractional position ownership is out of scope. `Position.owner` is a mutable field, not part of the PDA, so ownership can move (marketplace sale, gift, mint theft) without the account changing address; sale, gift, and mint theft each call the same internal ownership-mutation helper, which is not exposed as a public, generic instruction. Sale and gift require the current owner's signature; mint theft is resolved by the protocol at reveal settlement.
 5a. `position_id` is caller-chosen and, combined with `global_config`, is the Position PDA's entire, immutable identity. It no longer includes the owner, so the ID space is shared across all owners under one `GlobalConfig`; a colliding ID simply fails account creation (`init` cannot reuse an address) rather than causing any state corruption.
 5b. A position's randomness actions (currently `Reveal` and the reserved `Unstake`) are individually addressed PDAs keyed by `[position, action_type, action_nonce]`, with `action_nonce` drawn from a per-position monotonic counter. `ActionType` is a stable, append-only integer enum; existing discriminants must never be renumbered or removed. A position cannot be transferred while it has an unresolved randomness action.
 6. Player RODEO principal is reconciled only against the dedicated principal vault, never a treasury balance.
@@ -68,7 +68,7 @@ All questions formerly listed here are now resolved by Protocol Specification v1
 - **Multiple positions, merging/splitting, partial unstake:** resolved — multiple positions allowed per wallet; merging, splitting, and partial unstake are not supported in v1.
 - **Stake activation and epoch boundaries:** resolved in [economic-model.md](./economic-model.md) and [emissions-and-rewards.md](./emissions-and-rewards.md).
 - **Complete position states and transitions:** resolved in [state-machine.md](./state-machine.md).
-- **Transfer mechanics:** positions are transferable through Metaplex Core Asset receipt flows (marketplace, gift, mint theft); Rodeo controls permanent transfer and freeze delegates; generic `transfer_position` remains the primitive. See [marketplace-design.md](./marketplace-design.md).
+- **Transfer mechanics:** positions are transferable through Metaplex Core Asset receipt flows (marketplace, gift, mint theft); Rodeo controls permanent transfer and freeze delegates; sale, gift, and mint theft each call the same internal ownership-mutation helper rather than a public, generic instruction. See [marketplace-design.md](./marketplace-design.md).
 - **Pending randomness on transfer:** positions with a pending randomness action cannot be transferred. Whether any future action type should be transferable with the pending action following the new owner is `BLOCKED: OWNER DECISION REQUIRED` in [marketplace-design.md](./marketplace-design.md).
 - **Other action types:** `ActionType::Unstake = 1` is reserved; no other action types are defined in v1.
 - **Wallet claim-cooldown account:** resolved — `[b"claim_cooldown", global_config, wallet]` PDA.
@@ -99,7 +99,7 @@ All questions formerly listed here are now resolved by Protocol Specification v1
 - **Listing, escrow, and atomic ownership transfer:** resolved — non-custodial `Listing` PDA from `[b"listing", position, listing_nonce]`; stale listings prevented by `Position.state_version` and `listing_nonce`.
 - **Fees:** marketplace fee is 5% of sale price in SOL; gift fee is 0%. Secondary royalties, listing fees, and cancellation fees are `BLOCKED: OWNER DECISION REQUIRED`.
 - **Protocol revenue definition:** resolved in [treasury-and-governance.md](./treasury-and-governance.md).
-- **Private sales, bids, partial fills, expirations:** not supported in v1; `BLOCKED: OWNER DECISION REQUIRED` for future versions.
+- **Private sales, bids, partial fills, expirations:** resolved — Marketplace v1 supports only fixed-price direct listings with no automatic expiration; bids, auctions, and private offers are out of scope for v1. Whether to add them in a future version remains `BLOCKED: OWNER DECISION REQUIRED`.
 - **Stale listing and double settlement prevention:** resolved by `state_version`/`listing_nonce` checks and atomic receipt+position transfer.
 - **Swap aggregator and routing:** resolved — Jupiter v1 with $100-equivalent minimum batch, 1% max slippage, 0.5% max price impact, no arbitrary dust-sweep recipient.
 
@@ -140,7 +140,7 @@ The most urgent remaining Phase 2 blockers are:
 2. Exact per-source-mint `PendingBatch` account schema.
 3. Exact Metaplex Core plugin configuration and receipt-authority PDA.
 4. Exact Switchboard integration (queue, task format, CPI vs. callback, proof serialization) and whether commit/reveal hashing is retained.
-5. Marketplace listing expiration policy and future support for bids/auctions/private offers.
+5. Future support for bids/auctions/private offers (v1 listings have no automatic expiration and support only fixed-price direct sale).
 6. Exact Squads program addresses, member pubkeys, and timelock program instances.
 7. Off-chain price oracle for the $100-equivalent minimum batch and Jupiter integration mode.
 8. Incentive/reward for permissionless randomness settler bot.

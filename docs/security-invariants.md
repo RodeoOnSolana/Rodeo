@@ -32,7 +32,7 @@ total_ansem_liability_atomic ==
   + suit_vault_liability_atomic
 ```
 
-The same ANSEM must never be emitted, reserved, or counted twice.
+The same ANSEM must never be emitted, reserved, or counted twice. The unrecognized reward surplus is never a stored field; it is always `reward_vault_balance - recognized_reward_balance_atomic`. `recognized_reward_balance_atomic` decreases with every ANSEM transfer out of the reward vault.
 
 ### No double spend
 
@@ -50,11 +50,11 @@ A `Position` has exactly one `owner` pubkey at any time. A position is validly o
 
 ### Ownership cannot change during pending randomness
 
-`Position.pending_action_active == true` implies no ownership transfer, marketplace sale, gift, or forced settlement may occur on that position. The owner must first settle or timeout-recover the pending action.
+`Position.pending_action_active == true` implies no ownership mutation (sale, gift, mint theft), marketplace sale, gift, or forced settlement may occur on that position. The owner must first settle or timeout-recover the pending action.
 
 ### Owner-gated instructions
 
-`claim`, `unstake`, `list`, `cancel_listing`, `gift`, and owner-initiated `transfer_position` require the current `Position.owner` signature. Randomness settlement is permissionless.
+`claim`, `unstake`, `list`, `cancel_listing`, and `gift` require the current `Position.owner` signature. There is no public, generic `transfer_position` instruction; sale and gift call the internal ownership-mutation helper under the owner's signature, and mint theft is resolved by the protocol at reveal settlement. Randomness settlement is permissionless.
 
 ## Randomness invariants
 
@@ -112,6 +112,10 @@ No authority may reduce, cancel, or reallocate accrued ANSEM liabilities except 
 
 Marketplace sale, gift, and mint theft must atomically update both the receipt asset owner and `Position.owner`. A transaction that updates one without the other must fail.
 
+### Claim ordering
+
+Synchronizing reward indices is never gated on `claimable_ansem_atomic > 0`. Every claim and forced settlement first closes elapsed epochs and synchronizes indices, then updates `Position.claimable_ansem_atomic` and the liability buckets, and rejects the instruction only if the resulting claimable amount is zero. Forced settlements (sale, gift, mint theft) bypass the one-hour wallet claim cooldown but still update `WalletClaimCooldown.last_claimed_at`.
+
 ### Seller keeps pending rewards
 
 Before a sale or gift, the seller's pending ANSEM is force-claimed. The buyer's `claimable_ansem_atomic` starts at `0`. The seller cannot sell pending ANSEM to the buyer.
@@ -122,7 +126,7 @@ Before a sale or gift, the seller's pending ANSEM is force-claimed. The buyer's 
 
 ### No stale settlement
 
-A marketplace settlement must verify that the listing is still valid (ownership unchanged, position active, no pending action, not expired). A stale listing cannot settle.
+A marketplace settlement must verify that the listing is still valid (ownership unchanged, position active, no pending action, `state_version` matches). Listings never expire automatically in Protocol v1; a stale listing cannot settle regardless.
 
 ## Governance invariants
 

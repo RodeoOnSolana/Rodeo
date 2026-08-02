@@ -30,10 +30,10 @@ Implement in the following order so that each layer can be tested before the nex
    - Add property tests for every invariant.
 
 3. **On-chain account schema extensions**
-   - Extend `Position` with `cowboy_kind`, `suit`, `claimable_ansem_atomic`, `active_since`, `unstake_eligible_at`, `opened_at`, `last_cowboy_reward_index`, `last_bull_reward_per_weight`, `buck_power`, and `accrual_weight`.
-   - Extend `RewardState` with explicit ANSEM liability buckets (`total_ansem_liability_atomic`, `cowboy_unmaterialized_liability_atomic`, `position_claimable_liability_atomic`, `bull_pool_liability_atomic`, `bull_pool_unallocated_liability_atomic`, `suit_vault_liability_atomic`), `recognized_reward_balance_atomic`, `unrecognized_reward_surplus_atomic`, `cowboy_reward_index`, and `suit_epoch`.
-   - Add `GlobalGameState` account with live counters and `accounted_principal_atomic`.
-   - Add global `BullAccumulator` account with `cowboy_reward_index` and `reward_per_weight_scaled`.
+   - Extend `Position` with `cowboy_kind`, `bull_tier`, `suit`, `claimable_ansem_atomic`, `active_since`, `unstake_eligible_at`, `opened_at`, `last_cowboy_reward_index`, `last_bull_reward_per_weight`, `cowboy_accrual_remainder_scaled`, `bull_accrual_remainder_scaled`, `buck_power`, and `accrual_weight`. `rank_or_tier` is removed everywhere in favor of `cowboy_kind`/`bull_tier`.
+   - Extend `RewardState` with explicit ANSEM liability buckets (`total_ansem_liability_atomic`, `cowboy_unmaterialized_liability_atomic`, `position_claimable_liability_atomic`, `bull_pool_liability_atomic`, `bull_pool_unallocated_liability_atomic`, `suit_vault_liability_atomic`), `recognized_reward_balance_atomic`, `cowboy_reward_index`, `cowboy_index_remainder_scaled`, and `suit_epoch`. `RewardState` is the sole owner of `current_epoch`, `epoch_started_at`, and `last_closed_epoch_timestamp`. There is no stored `unrecognized_reward_surplus_atomic` field; it is computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`.
+   - Add `GlobalGameState` account with only population, power, and accounted-principal counters (no epoch or timestamp fields).
+   - Add global `BullAccumulator` account, sole owner of `reward_per_weight_scaled` and `bull_index_remainder_scaled`.
    - Add `BullRegistry` and `BullRegistryNode` design-proposal accounts for sortition.
    - Add per-source-mint `PendingBatch` accounts (Phase 4).
 
@@ -62,16 +62,16 @@ Implement in the following order so that each layer can be tested before the nex
    - Implement Bull reward settlement before account close.
 
 8. **Ownership transfer primitives**
-   - Extend `transfer_position` with forced settlement of pending ANSEM.
+   - Implement the internal ownership-mutation helper used by sale, gift, and mint theft (not a public, generic instruction) with forced settlement of pending ANSEM, buyer checkpoint reset to current global indices, `claimable_ansem_atomic` reset, atomic frozen-receipt transfer, `Position.owner` update, and `unstake_eligible_at` reset.
    - Add receipt asset check.
-   - Keep marketplace listing/sale as a Phase 3/4 deliverable; Phase 2 only ensures the ownership-transfer primitive is correct.
+   - Keep marketplace listing/sale as a Phase 3/4 deliverable; Phase 2 only ensures the ownership-mutation helper is correct.
 
 9. **Epoch closure and reward recognition**
    - Implement permissionless `close_epochs(max_epochs)` with batched processing.
    - Compute free ANSEM, epoch emission, and Cowboy/suit split using per-epoch snapshots.
    - Update global `cowboy_reward_index` and `GlobalGameState` counters.
-   - Implement permissionless `recognize_rewards` after catch-up for ANSEM that arrived after elapsed boundaries.
-   - Track `unrecognized_reward_surplus_atomic` and ensure it never funds emissions before recognition.
+   - Implement permissionless `recognize_rewards` after catch-up for ANSEM that arrived after elapsed boundaries; emit `RewardFundingRecognized`.
+   - Compute the unrecognized reward surplus dynamically as `reward_vault_balance - recognized_reward_balance_atomic` and ensure it never funds emissions before recognition.
 
 10. **SDK and integration tests**
     - Regenerate IDLs and SDK clients after each program change.

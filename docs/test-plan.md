@@ -40,6 +40,8 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] Mint theft flag resolves correctly given eligibility criteria.
 - [ ] Thief selection weights by buck power.
 - [ ] Unstake theft flag resolves correctly for normal Cowboys and is skipped for Desperado and Bulls.
+- [ ] Unbiased integer mapping uses deterministic rejection sampling, not modulo reduction; rejected candidates are re-derived deterministically from the same domain, position, and action nonce.
+- [ ] `PendingRandomness.registry_version_snapshot` is recorded at request time and matches the `BullRegistry` version used at settlement.
 
 ## Property tests
 
@@ -54,6 +56,11 @@ Every state transition, economic rule, rounding direction, and security invarian
 ### ANSEM liability reconciliation
 
 - [ ] For any sequence of events, `total_ansem_liability` equals the sum of the explicit liability buckets.
+
+### Exact accumulator rounding
+
+- [ ] For any sequence of epoch closes and Bull-pool contributions, the sum of ANSEM distributed into per-position accrual plus the outstanding global and per-position remainders equals the total amount added to the index, with no dust lost or double-counted.
+- [ ] `RewardState` is the sole owner of `current_epoch`, `epoch_started_at`, `last_closed_epoch_timestamp`, `cowboy_reward_index`, and `cowboy_index_remainder_scaled`; `BullAccumulator` is the sole owner of `reward_per_weight_scaled` and `bull_index_remainder_scaled`; `GlobalGameState` holds only population/power/accounted-principal counters.
 
 ### No duplicate settlement
 
@@ -96,7 +103,11 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] Desperado claim splits 98/2.
 - [ ] Claim cooldown is enforced per wallet.
 - [ ] Batch claim across multiple positions works.
-- [ ] Empty claim is rejected.
+- [ ] Empty claim is rejected only after synchronization: elapsed epochs are closed and indices synchronized first, and `NoClaimableRewards` is returned only if the resulting claimable amount is zero.
+- [ ] Synchronization runs unconditionally and is never gated on `claimable_ansem_atomic > 0` before the check.
+- [ ] Forced settlement (sale/gift/mint theft) bypasses the one-hour wallet claim cooldown but still updates `WalletClaimCooldown.last_claimed_at`.
+- [ ] Cowboy/Desperado claim-tax remainder routes to `bull_pool_liability_atomic` when `total_active_bull_power > 0`, or to `bull_pool_unallocated_liability_atomic` otherwise.
+- [ ] `RewardPaid` is emitted on every ANSEM transfer out of the reward vault, and `recognized_reward_balance_atomic` decreases by the paid amount.
 
 ### Unstake
 
@@ -131,6 +142,8 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] Owner cannot burn the receipt directly through MPL Core; Rodeo unstake burn succeeds.
 - [ ] Sale is rejected if `Position.owner` and Core Asset owner do not match.
 - [ ] Stale listing cannot settle.
+- [ ] Listings never expire automatically; a listing remains valid until explicitly cancelled or invalidated by `state_version`/`listing_nonce`. Marketplace v1 has no bid/auction/private-offer instructions.
+- [ ] `ListingCreated` and `ListingCancelled` are emitted on listing creation and cancellation respectively.
 
 ### Direct gift
 
@@ -158,9 +171,10 @@ Every state transition, economic rule, rounding direction, and security invarian
 
 - [ ] 70/15/10/5 split applied to realized receipts.
 - [ ] ANSEM purchase deposits into reward vault but is not automatically recognized.
-- [ ] Direct unsolicited transfer to reward vault is tracked as unrecognized surplus.
-- [ ] `recognize_rewards` after catch-up moves ANSEM from surplus to recognized balance.
+- [ ] Direct unsolicited transfer to reward vault increases the dynamically computed unrecognized surplus (`reward_vault_balance - recognized_reward_balance_atomic`); there is no stored `unrecognized_reward_surplus_atomic` field.
+- [ ] `recognize_rewards` after catch-up moves ANSEM from surplus to recognized balance and emits `RewardFundingRecognized`.
 - [ ] Emission uses `min(actual_reward_vault_balance, recognized_reward_balance) - total_ansem_liability`.
+- [ ] `recognized_reward_balance_atomic` decreases on every ANSEM transfer out of the reward vault (claim payouts, Bull-pool routing, suit distributions).
 - [ ] RODEO buyback is burned.
 - [ ] Failed swap leaves funds pending.
 
@@ -173,6 +187,7 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] Multi-position X-account allocation conserves the total proportional half.
 - [ ] Ineligible positions receive nothing.
 - [ ] Undistributed vault rolls into the next social epoch.
+- [ ] Suit reward claim succeeds for `owner_at_snapshot` even after the position has been unstaked, sold, or gifted, and even if the current `Position.owner` differs from `owner_at_snapshot`. Emits `SuitRewardClaimed`.
 
 ## Integration tests (Anchor localnet)
 
@@ -183,7 +198,7 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] `settle_reveal` assigns role/rank/tier/suit, creates receipt, and emits `PositionRevealed`.
 - [ ] `claim_cowboy` and `claim_bull` respect role-specific splits and wallet cooldown.
 - [ ] `request_unstake` + `settle_unstake` burn tax, return principal, and close position; no cancel after commitment.
-- [ ] `transfer_position` is blocked while pending action is active and succeeds when cleared.
+- [ ] The internal ownership-mutation helper (used by sale, gift, and mint theft) is blocked while pending action is active and succeeds when cleared. There is no public, generic `transfer_position` instruction.
 - [ ] `close_epochs` updates global reward index and suit vault using snapshot values.
 - [ ] Bull reward pool distribution matches reward-per-buck-power accounting.
 

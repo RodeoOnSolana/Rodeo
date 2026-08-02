@@ -1,4 +1,15 @@
+import { createHash } from "node:crypto";
 import { PROBABILITY_DENOMINATOR } from "./constants.js";
+
+const TWO_POW_256 = 1n << 256n;
+
+function bytesToBigInt(bytes: Uint8Array): bigint {
+  let value = 0n;
+  for (let i = 0; i < bytes.length; i++) {
+    value = (value << 8n) | BigInt(bytes[i]);
+  }
+  return value;
+}
 
 export interface ProbabilityEntry<Outcome extends string = string> {
   readonly outcome: Outcome;
@@ -97,6 +108,8 @@ export const COWBOY_ACCRUAL_WEIGHTS: Record<CowboyRankOutcome, AccrualWeight> = 
   desperado: 10_000n,
 };
 
+export const DESPERADO_ACCRUAL_WEIGHT = COWBOY_ACCRUAL_WEIGHTS.desperado;
+
 export const BULL_BUCK_POWER: Record<BullTierOutcome, BuckPower> = {
   tier1: 4,
   tier2: 6,
@@ -117,4 +130,48 @@ export function sampleOutcome<Outcome extends string>(
     if (draw < cumulative) return entry.outcome;
   }
   throw new Error("Probability table is not normalized");
+}
+
+export interface RejectionSampleContext {
+  readonly randomOutput: Uint8Array; // provider output, e.g. 32 bytes
+  readonly domain: string;
+  readonly position: string;
+  readonly actionNonce: bigint;
+}
+
+/**
+ * Deterministic rejection sampling that returns an exactly uniform integer
+ * in [0, denominator - 1] for the given table. The output is bound to the
+ * domain, position, and action nonce so the same random bytes cannot be reused
+ * across domains. The retry counter increments deterministically until an
+ * accepted candidate is found.
+ */
+export function rejectionSample<Outcome extends string>(
+  table: ProbabilityTable<Outcome>,
+  context: RejectionSampleContext,
+): Outcome {
+  if (!isNormalized(table)) {
+    throw new Error("Probability table is not normalized");
+  }
+  const d = table.denominator;
+  const limit = TWO_POW_256 - (TWO_POW_256 % d);
+  let retry = 0n;
+  while (true) {
+    const hash = createHash("sha256")
+      .update(context.randomOutput)
+      .update(context.domain)
+      .update(context.position)
+      .update(context.actionNonce.toString())
+      .update(retry.toString())
+      .digest();
+    const candidate = bytesToBigInt(hash);
+    if (candidate < limit) {
+      const draw = candidate % d;
+      return sampleOutcome(table, draw);
+    }
+    retry += 1n;
+    if (retry > 1_000_000n) {
+      throw new Error("Rejection sampling exceeded safety limit");
+    }
+  }
 }

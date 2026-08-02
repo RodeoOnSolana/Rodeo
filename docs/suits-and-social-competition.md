@@ -112,13 +112,11 @@ If no positions are eligible, or total eligible score is zero, the entire suit v
 
 ## Merkle claims
 
-Suit allocations are stored as Merkle leaves bound to `competition_epoch`, `position`, `owner_at_snapshot`, `amount`, and `leaf_nonce`. A position owner claims by submitting a valid Merkle proof for a leaf. The program verifies:
+Suit allocations are stored as Merkle leaves bound to `competition_epoch`, `position`, `owner_at_snapshot`, `amount`, and `leaf_nonce`. `owner_at_snapshot` claims by submitting a valid Merkle proof for a leaf. The program verifies:
 - the leaf root matches the attested root;
-- `position` is Active and in the winning suit;
-- `owner_at_snapshot` matches the current `Position.owner`;
 - the leaf has not been claimed before (claim receipt/bitmap).
 
-Suit claims pay 100% of the leaf amount to the snapshot owner and are not subject to the Cowboy 80/20 claim tax.
+The reward belongs permanently to `owner_at_snapshot`. It does **not** require the `Position` to remain open/active, and it does **not** require the current `Position.owner` to match `owner_at_snapshot` — a position may have been unstaked, sold, or gifted since the snapshot without affecting the claim. Suit claims pay 100% of the leaf amount to `owner_at_snapshot` and are not subject to the Cowboy 80/20 claim tax. A successful claim emits `SuitRewardClaimed`.
 
 ## Oracle and attestation
 

@@ -126,29 +126,36 @@ Cowboy production emission is distributed pro-rata by accrual weight among activ
 
 ### Reward synchronization (before any claim or unstake)
 
-Cowboy synchronization:
-- `accrued = (current_cowboy_index - last_index) * position_weight / COWBOY_REWARD_INDEX_SCALE` (floor).
+Cowboy synchronization carries a per-position remainder scaled by `COWBOY_REWARD_INDEX_SCALE` so repeated small syncs never lose dust:
+- `numerator = (current_cowboy_index - last_index) * position_weight + cowboy_accrual_remainder_scaled`.
+- `accrued = numerator / COWBOY_REWARD_INDEX_SCALE` (floor).
+- `cowboy_accrual_remainder_scaled = numerator % COWBOY_REWARD_INDEX_SCALE`.
 - `cowboy_unmaterialized_liability_atomic -= accrued`.
 - `position_claimable_liability_atomic += accrued`.
 - `total_ansem_liability_atomic` unchanged.
 
-Bull synchronization:
-- `accrued = (current_bull_reward_per_weight - last_value) * buck_power / REWARD_PER_WEIGHT_SCALE` (floor).
+Bull synchronization carries the equivalent remainder scaled by `REWARD_PER_WEIGHT_SCALE`:
+- `numerator = (current_bull_reward_per_weight - last_value) * buck_power + bull_accrual_remainder_scaled`.
+- `accrued = numerator / REWARD_PER_WEIGHT_SCALE` (floor).
+- `bull_accrual_remainder_scaled = numerator % REWARD_PER_WEIGHT_SCALE`.
 - `bull_pool_liability_atomic -= accrued`.
 - `position_claimable_liability_atomic += accrued`.
 - `total_ansem_liability_atomic` unchanged.
+
+Synchronizing indices no longer requires `claimable_ansem_atomic > 0`. Claims and forced settlements always close elapsed epochs and synchronize indices first, then update `Position.claimable_ansem_atomic` and the liability buckets, and only reject afterward if the resulting claimable amount is zero.
 
 ### Claims
 
 Normal Cowboy:
 - Synchronize the position first.
+- Claims and forced settlements always close elapsed epochs and synchronize indices first, then update `Position.claimable_ansem_atomic` and the liability buckets; the claim is rejected only if the resulting claimable amount is zero. Synchronization is never gated on `claimable_ansem_atomic > 0`.
 - Owner receives `claimable * CLAIM_OWNER_BPS / 10_000` (floor).
-- The remainder `claimable - owner_amount` is reclassified from `position_claimable_liability_atomic` to `bull_pool_liability_atomic`.
+- The remainder `claimable - owner_amount` is routed to the Bull pool: if `total_active_bull_power > 0`, it increases `bull_pool_liability_atomic` and updates the Bull accumulator using the same remainder-carry rounding as any other pool contribution; otherwise it increases `bull_pool_unallocated_liability_atomic`.
 - `total_ansem_liability_atomic` decreases by `owner_amount`.
 
 Desperado:
 - Owner receives `claimable * DESPERADO_CLAIM_OWNER_BPS / 10_000` (floor).
-- The remainder goes to the Bull pool.
+- The remainder is routed to the Bull pool using the same active/unallocated rule described above.
 
 Bull:
 - Synchronize the position first.
@@ -156,11 +163,12 @@ Bull:
 - `position_claimable_liability_atomic -= claimable`.
 - `total_ansem_liability_atomic -= claimable`.
 - `bull_pool_liability_atomic` was already reduced during synchronization; it is not reduced again.
+- Emit `RewardPaid` when ANSEM leaves the reward vault to the owner; `recognized_reward_balance_atomic` decreases by the paid amount.
 
 Normal Cowboy unstake:
 - Synchronize pending production rewards before settlement.
 - `95%` outcome: 100% of synchronized pending ANSEM is paid to the owner.
-- `5%` outcome: 100% of synchronized pending ANSEM is reclassified to the Bull pool.
+- `5%` outcome: 100% of synchronized pending ANSEM is routed to the Bull pool using the same active/unallocated rule as claim taxes.
 - The normal 80/20 claim tax does **not** apply during unstake.
 
 Desperado and Bull unstake: 100% of synchronized claimable ANSEM is paid to the owner safely.
@@ -174,26 +182,30 @@ At the end of a seven-day social epoch:
    `account_reward = proportional_half * account_score / total_account_score` (floor).
 4. Each X account's reward is then divided equally among that account's eligible positions.
 5. Individual allocations are stored as Merkle leaves bound to `competition_epoch`, `position`, `owner_at_snapshot`, `amount`, and `leaf_nonce`.
-6. Suit claims pay 100% to the snapshot owner and are not subject to the Cowboy 80/20 claim tax.
-7. A claim receipt/bitmap prevents replay of the same leaf.
+6. Suit claims pay 100% to `owner_at_snapshot` and are not subject to the Cowboy 80/20 claim tax. The reward belongs permanently to `owner_at_snapshot`; it does not require the `Position` to remain open/active, and it does not require the current `Position.owner` to match `owner_at_snapshot`.
+7. A claim receipt/bitmap prevents replay of the same leaf. A successful claim emits `SuitRewardClaimed`.
 
 If there are no eligible positions or no scores, the vault rolls into the next social epoch. It is never burned.
 
 ## Bull reward pool
 
-The Bull reward pool is a conceptual allocation backed by ANSEM in the reward vault. It is accounted for through `BullAccumulator` using reward-per-buck-power.
+The Bull reward pool is a conceptual allocation backed by ANSEM in the reward vault. It is accounted for through `BullAccumulator` using reward-per-buck-power, which is the sole owner of `reward_per_weight_scaled` and `bull_index_remainder_scaled`.
 
 ```text
-reward_per_weight_increment = pool_contribution * SCALE / total_buck_power   // floor
+numerator = pool_contribution * REWARD_PER_WEIGHT_SCALE + bull_index_remainder_scaled
+reward_per_weight_increment = numerator / total_buck_power            // floor
+bull_index_remainder_scaled = numerator % total_buck_power
 ```
 
-Each Bull position records the accumulator value at its last update. A Bull's claimable reward is:
+Each Bull position records the accumulator value at its last update, plus a per-position remainder (`Position.bull_accrual_remainder_scaled`). A Bull's claimable reward is:
 
 ```text
-(current_accumulator - last_accumulator) * buck_power / SCALE   // floor
+numerator = (current_accumulator - last_accumulator) * buck_power + bull_accrual_remainder_scaled
+accrued = numerator / REWARD_PER_WEIGHT_SCALE                          // floor
+bull_accrual_remainder_scaled = numerator % REWARD_PER_WEIGHT_SCALE
 ```
 
-Remainders from scaled accumulator divisions remain in the global accumulator value; they are not tracked as separate liabilities. They carry forward into future distributions.
+Every contribution to the Bull pool — Cowboy claim tax, Desperado claim tax, and unstake-theft contributions — is routed the same way: if `total_active_bull_power > 0` it increases `bull_pool_liability_atomic` and updates the accumulator with this remainder-carry rounding; otherwise it increases `bull_pool_unallocated_liability_atomic`. When an eligible Bull set becomes active, `bull_pool_unallocated_liability_atomic` is distributed into the accumulator using the same formula and then cleared to zero.
 
 ## Marketplace accounting
 
@@ -214,7 +226,8 @@ Remainders from scaled accumulator divisions remain in the global accumulator va
 - `position_claimable_liability_atomic == sum(Position.claimable_ansem_atomic for every live Position)`.
 - `free_ansem = min(actual_reward_vault_balance, recognized_reward_balance_atomic) - total_ansem_liability_atomic`.
 - `total_ansem_liability_atomic <= recognized_reward_balance_atomic <= actual_reward_vault_balance`.
-- `unrecognized_reward_surplus_atomic` tracks ANSEM in the reward vault that has not been recognized for liability accounting. Direct unsolicited transfers and ANSEM purchased before catch-up are held here.
+- The unrecognized reward surplus is not a stored field; it is always computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`. Direct unsolicited transfers and ANSEM purchased before catch-up count toward this surplus until recognized.
+- `recognized_reward_balance_atomic` decreases with every ANSEM transfer out of the reward vault (claim payouts, Bull-pool routing, suit distributions), and increases only through the recognition instruction.
 - `total_allocated_ansem <= ansem_emitted_atomic + recognized_external_ansem`.
 - The same ANSEM is never emitted, reserved, or counted twice.
 - No negative quantities anywhere.

@@ -58,31 +58,34 @@ Rerolling is not an in-place instruction in Protocol v1. A "reroll" is performed
   - Resolve role (Cowboy/Bull), Cowboy rank or Bull tier, and suit using the approved probability tables and independent domain-separated randomness draws.
   - Evaluate mint theft. If eligibility criteria are met and an external eligible Bull recipient exists, atomically create the Metaplex Core receipt directly for the selected Bull owner and update `Position.owner`. If eligibility criteria are not met or no eligible external recipient exists, the theft resolves safely as "not stolen" with no additional ownership change.
   - If no theft occurs, create the receipt directly for the staker.
-  - Record `receipt_asset`, `accrual_weight` or `buck_power`, `active_since`, `unstake_eligible_at = active_since + 24 hours`, and clear `pending_action_active`.
-  - For Cowboy outcomes, represent the result as `CowboyKind::Rank(u8)` or `CowboyKind::Desperado` rather than an undocumented sentinel rank/tier value.
+  - Record `receipt_asset`, `accrual_weight` and `buck_power`, `bull_tier` (0 for Cowboys), `active_since`, `unstake_eligible_at = active_since + 24 hours`, and clear `pending_action_active`; emit `ReceiptCreated`.
+  - For Cowboy outcomes, represent the result as `CowboyKind::Rank(u8)` or `CowboyKind::Desperado` rather than an undocumented sentinel rank/tier value. `Position` never stores a `rank_or_tier` field.
   - Update `GlobalGameState.total_completed_reveals`, `active_cowboy_count`, `active_bull_count`, `total_active_cowboy_weight`, `total_active_bull_power`.
   - Mark `PendingRandomness` settled, set status `Active`.
-  - Emit `PositionRevealed`.
+  - Emit `PositionRevealed` with role, cowboy_kind, bull_tier, suit, final_owner, previous_owner (only when stolen), stolen, receipt_asset, active_since, unstake_eligible_at, and settlement_nonce.
 
 ### Cowboy claim
 
-- Requirements: owner signs; position is `Active` and role is `Cowboy`; wallet claim cooldown has elapsed; position has `claimable_ansem_atomic > 0`.
+- Requirements: owner signs; position is `Active` and role is `Cowboy`; wallet claim cooldown has elapsed. Synchronization is never gated on `claimable_ansem_atomic > 0`.
 - Effects:
-  - Synchronize pending Cowboy production rewards from `cowboy_unmaterialized_liability_atomic` to `position_claimable_liability_atomic`; `total_ansem_liability_atomic` is unchanged.
-  - For normal Cowboys: allocate `80%` to owner, `20%` to Bull reward pool.
-  - For Desperado: allocate `98%` to owner, `2%` to Bull reward pool.
-  - Decrease `position_claimable_liability_atomic` by the full claimable, decrease `total_ansem_liability_atomic` only by the owner amount transferred out, and increase `bull_pool_liability_atomic` by the Bull-pool share.
+  - Ensure all elapsed epochs are closed, then synchronize pending Cowboy production rewards from `cowboy_unmaterialized_liability_atomic` to `position_claimable_liability_atomic`; `total_ansem_liability_atomic` is unchanged. This synchronization happens first, unconditionally.
+  - If the resulting `claimable_ansem_atomic == 0`, reject with `NoClaimableRewards`.
+  - For normal Cowboys: allocate `80%` to owner, `20%` routed to the Bull pool (active accumulator if `total_active_bull_power > 0`, otherwise `bull_pool_unallocated_liability_atomic`).
+  - For Desperado: allocate `98%` to owner, `2%` routed to the Bull pool using the same rule.
+  - Decrease `position_claimable_liability_atomic` by the full claimable, decrease `total_ansem_liability_atomic` only by the owner amount transferred out, and increase `bull_pool_liability_atomic` (or the unallocated bucket) by the Bull-pool share.
+  - Decrease `recognized_reward_balance_atomic` by the owner amount transferred out; emit `RewardPaid`.
   - Update `WalletClaimCooldown.last_claimed_at`.
   - Emit `PositionClaimed`.
 
 ### Bull claim
 
-- Requirements: owner signs; position is `Active` and role is `Bull`; wallet claim cooldown has elapsed; position has `claimable_ansem_atomic > 0`.
+- Requirements: owner signs; position is `Active` and role is `Bull`; wallet claim cooldown has elapsed. Synchronization is never gated on `claimable_ansem_atomic > 0`.
 - Effects:
-  - Synchronize pending Bull rewards from `bull_pool_liability_atomic` to `position_claimable_liability_atomic`; `total_ansem_liability_atomic` is unchanged.
+  - Ensure all elapsed epochs are closed, then synchronize pending Bull rewards from `bull_pool_liability_atomic` to `position_claimable_liability_atomic`; `total_ansem_liability_atomic` is unchanged. This synchronization happens first, unconditionally.
+  - If the resulting `claimable_ansem_atomic == 0`, reject with `NoClaimableRewards`.
   - Reduce `position_claimable_liability_atomic` and `total_ansem_liability_atomic` by the amount transferred out.
   - `bull_pool_liability_atomic` was reduced during synchronization; it is not reduced again.
-  - Transfer ANSEM to the owner and update the Bull checkpoint.
+  - Transfer ANSEM to the owner and update the Bull checkpoint. Decrease `recognized_reward_balance_atomic`; emit `RewardPaid`.
   - No Cowboy claim tax applies.
   - Emit `PositionClaimed`.
 
@@ -92,7 +95,7 @@ Rerolling is not an in-place instruction in Protocol v1. A "reroll" is performed
 - Steps:
   1. **Request unstake**. Commit an unstake randomness action. `status` remains `Active`; `pending_action_active = true`; `pending_action_type = Unstake`. There is no voluntary cancellation after commitment.
   2. **Settle unstake**. The result determines whether pending ANSEM is stolen (normal Cowboys only; 5% chance) or returned to the owner (95% chance). Desperado is immune. If the oracle value is already available, timeout recovery fails; permissionless settlement must be used.
-  3. Force-settle all pending ANSEM. For normal Cowboys, the full synchronized pending amount is either paid to the owner (95% outcome) or reclassified to the Bull pool (5% outcome); the normal 80/20 claim tax does not apply. For Desperado, 100% is paid to the owner. For Bulls, 100% of synchronized Bull rewards is paid to the owner.
+  3. Force-settle all pending ANSEM. For normal Cowboys, the full synchronized pending amount is either paid to the owner (95% outcome) or routed to the Bull pool (5% outcome, using the same active/unallocated rule as claim taxes); the normal 80/20 claim tax does not apply. For Desperado, 100% is paid to the owner. For Bulls, 100% of synchronized Bull rewards is paid to the owner.
   4. Apply the `5%` RODEO unstake tax, burn it (`principal - returned`), and return `95%` of the principal.
   5. Update `GlobalGameState` population and power counters.
   6. Burn the receipt asset and close the `Position` account.
@@ -105,7 +108,7 @@ Rerolling is not an in-place instruction in Protocol v1. A "reroll" is performed
   1. Ensure all elapsed epochs are closed or invoke the permissionless catch-up path.
   2. Synchronize the seller's reward indices.
   3. Force-settle seller's pending ANSEM through the normal claim split.
-  4. Atomically transfer the receipt asset via the Rodeo-controlled permanent transfer delegate and call `transfer_position`.
+  4. Atomically transfer the receipt asset via the Rodeo-controlled permanent transfer delegate and call the internal ownership-mutation helper, which sets the buyer's checkpoints to the current global indices, resets `claimable_ansem_atomic` to `0`, and updates `Position.owner`.
   5. Set `Position.unstake_eligible_at = transfer_timestamp + 24 hours`.
   6. Deduct `5%` of the sale price (in SOL) as marketplace fee and route it into the external revenue split.
   7. Transfer the remainder to the seller.
@@ -117,14 +120,14 @@ Rerolling is not an in-place instruction in Protocol v1. A "reroll" is performed
 - Effects:
   1. Ensure all elapsed epochs are closed or invoke the permissionless catch-up path.
   2. Synchronize and force-settle pending ANSEM through the normal claim split.
-  3. Atomically transfer the receipt asset via the Rodeo-controlled permanent transfer delegate and call `transfer_position`.
+  3. Atomically transfer the receipt asset via the Rodeo-controlled permanent transfer delegate and call the internal ownership-mutation helper, which sets the recipient's checkpoints to the current global indices, resets `claimable_ansem_atomic` to `0`, and updates `Position.owner`.
   4. Set `Position.unstake_eligible_at = transfer_timestamp + 24 hours`.
   5. No marketplace fee is charged.
   6. Emit `PositionGifted`.
 
 ### Mint theft
 
-Mint theft is described in detail in [randomness-design.md](./randomness-design.md) and [probabilities-and-rarities.md](./probabilities-and-rarities.md). It is a reveal-time ownership change, not a marketplace sale, but it uses the same atomic receipt+position transfer primitive. The victim's receipt is never minted; the selected Bull owner receives the receipt directly. `Position.unstake_eligible_at` is set to `active_since + 24 hours` for the new owner.
+Mint theft is described in detail in [randomness-design.md](./randomness-design.md) and [probabilities-and-rarities.md](./probabilities-and-rarities.md). It is a reveal-time ownership change, not a marketplace sale, but it uses the same internal ownership-mutation helper. There is no public, generic `transfer_position` instruction. The victim's receipt is never minted; the selected Bull owner receives the receipt directly. `Position.unstake_eligible_at` is set to `active_since + 24 hours` for the new owner.
 
 ## Receipt ownership rule
 

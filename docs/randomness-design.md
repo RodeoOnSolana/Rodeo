@@ -88,7 +88,7 @@ Mint theft requires selecting a Bull recipient weighted by active `buck_power` w
 Required properties for the final design:
 
 1. A Merkle-sum root hash and a monotonically increasing registry version.
-2. Immutable root/version snapshot stored in `PendingRandomness` at the time the randomness is requested.
+2. Immutable root/version snapshot stored in `PendingRandomness` at the time the randomness is requested (`registry_root_snapshot` and `registry_version_snapshot`).
 3. Exact unbiased victim-owner exclusion.
 4. Historical proof availability after the live registry changes, so a reveal settlement can still verify a snapshot that was current at commitment time.
 5. Exact node/page format, account size, and page capacity.
@@ -132,13 +132,15 @@ The adapter may be upgraded independently of `rodeo_core` to support future orac
 
 ## Unbiased integer mapping
 
-The provider adapter returns a uniform random byte string. The protocol maps it to each probability table as follows:
+The provider adapter returns a uniform random byte string. The protocol maps it to each probability table using deterministic rejection sampling, not modulo reduction:
 
 1. Derive a domain-separated 32-byte seed for the table: `hash(domain || output || position || action_nonce)`.
-2. Reduce the seed to an integer in `[0, denominator - 1]` using a standard modular reduction.
-3. Select the first table interval whose cumulative weight exceeds the reduced integer.
+2. Compute the largest multiple of `denominator` that fits in the seed's integer range (`limit = floor(2^256 / denominator) * denominator`).
+3. If the seed's integer value is `>= limit`, re-derive a new candidate deterministically (e.g., by hashing the seed with an incrementing round counter bound to the same domain, position, and action nonce) and repeat until a value `< limit` is found.
+4. Reduce the accepted value modulo `denominator` to obtain an integer in `[0, denominator - 1]`.
+5. Select the first table interval whose cumulative weight exceeds the reduced integer.
 
-Because denominators are not powers of two, modular reduction introduces a small, bounded modulo bias. The proposed denominators (`10_000_000`, `9_000_000`, and `1_000_000`) are far smaller than `2^256`, so the bias is negligible. If a future owner requires an exact unbiased draw, the implementation must use rejection sampling or a multiple-of-denominator range. The spec must explicitly document the chosen approach.
+Rejection sampling guarantees an exactly uniform draw over `[0, denominator - 1]` with no modulo bias, because every accepted candidate is drawn from a range that is an exact multiple of `denominator`. The re-derivation step must remain deterministic and bound to the same domain, position, and action nonce so that settlement is reproducible and cannot be manipulated by an adversary choosing which round to accept.
 
 ## Open questions (BLOCKED)
 

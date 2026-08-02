@@ -2,7 +2,7 @@
 
 ## Status
 
-**Version:** 1.3.0  
+**Version:** 1.3.1  
 **State:** authoritative source of truth for contract, frontend, indexer, keeper, marketplace, and treasury implementation.  
 **Replaces:** any prior `rodeo-game-spec.md` drafts and the Phase 0 economic placeholders.  
 **Scope:** Phase 1 protocol design only. No production Anchor instructions are implemented in this branch.
@@ -153,10 +153,12 @@ Conditional probabilities given Bull; total probability across all reveals is `c
 - Buyer does not receive seller's pending ANSEM.
 - Marketplace fee: `5%` of sale price, taken once from seller proceeds.
 - Marketplace fees enter the external revenue split.
-- Position cannot transfer while a randomness action is pending.
-- Generic transfers outside approved Rodeo flows must be rejected.
+- Position ownership cannot change while a randomness action is pending.
+- There is no public, generic `transfer_position` instruction; sale, gift, and mint theft each call the same internal ownership-mutation helper. Transfers outside approved Rodeo flows must be rejected.
+- Sale and gift synchronize/force-settle the outgoing owner's rewards, set the new owner's checkpoints to current global indices, reset `claimable_ansem_atomic`, and reset `unstake_eligible_at`.
 - Direct gifts use forced settlement but no marketplace fee.
 - Ownership authority and receipt asset transfer must occur atomically.
+- Marketplace v1 supports only fixed-price direct listings with no automatic expiration; bids, auctions, and private offers are out of scope for v1.
 
 ### Suits and social competition
 
@@ -220,16 +222,28 @@ Phase 0 delivered:
 - monorepo scaffolding;
 - Anchor workspace and localnet tooling;
 - SDK generation from IDLs;
-- a generic `transfer_position` primitive that changes `Position.owner` without changing the PDA;
+- an internal ownership-mutation primitive that changes `Position.owner` without changing the PDA (not exposed as a public, generic instruction);
 - `PendingRandomness` addressing by `[position, action_type, action_nonce]`;
 - an economic-simulator event reducer with explicit configuration required;
 - local integration tests proving PDA identity survives ownership change.
 
 Phase 1 fills in all economic and game rules while leaving production instruction implementations for Phase 2. No Phase 0 behavior is overturned; probability tables, constants, and emission formulas are added where Phase 0 intentionally left placeholders.
 
-## Owner decisions applied in v1.3.0
+## Owner decisions applied in v1.3.1
 
 The following decisions have been applied across the v1 sub-documents:
+
+- **Single sources of truth:** `RewardState` alone owns `current_epoch`, `epoch_started_at`, `last_closed_epoch_timestamp`, `cowboy_reward_index`, and `cowboy_index_remainder_scaled`. `BullAccumulator` alone owns `reward_per_weight_scaled` and `bull_index_remainder_scaled` (it no longer stores `cowboy_reward_index`). `GlobalGameState` holds only population, power, and accounted-principal counters (no `current_epoch`, `last_closed_epoch_timestamp`, or `launch_timestamp`; launch timing lives solely in `GlobalConfig`).
+- **Exact accumulator rounding:** global scaled carries (`RewardState.cowboy_index_remainder_scaled`, `BullAccumulator.bull_index_remainder_scaled`) and per-position carries (`Position.cowboy_accrual_remainder_scaled`, `Position.bull_accrual_remainder_scaled`) ensure emission and per-position accrual formulas never drop rounding dust.
+- **Claim ordering:** synchronization is never gated on `claimable_ansem_atomic > 0`. Claims and forced settlements first close elapsed epochs and synchronize indices, then update `Position.claimable_ansem_atomic` and the liability buckets, and reject only if the resulting claimable amount is zero. Forced settlements bypass the one-hour claim cooldown but still update `WalletClaimCooldown.last_claimed_at`.
+- **Recognized reward balance:** `unrecognized_reward_surplus_atomic` is not a stored field; it is computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`. `recognized_reward_balance_atomic` decreases with every ANSEM transfer out of the reward vault.
+- **Bull-pool routing:** Cowboy claim tax, Desperado claim tax, and unstake-theft contributions route to `bull_pool_liability_atomic` (with accumulator update) when `total_active_bull_power > 0`, or to `bull_pool_unallocated_liability_atomic` otherwise; the unallocated bucket is distributed and cleared when an eligible Bull set becomes active.
+- **Suit snapshot claims:** suit rewards belong permanently to `owner_at_snapshot` and do not require the `Position` to remain open/active, nor that the current owner match `owner_at_snapshot`.
+- **Randomness:** unbiased integer mapping uses deterministic rejection sampling instead of modulo reduction; `PendingRandomness` records `registry_version_snapshot`; `RandomnessRequested` emits provider-specific details (VRF key, callback id, etc.).
+- **Role and event schemas:** `Position` stores `cowboy_kind` and `bull_tier`; `rank_or_tier` is removed everywhere. `PositionRevealed` emits role, cowboy_kind, bull_tier, suit, final_owner, previous_owner (only when stolen), stolen, receipt_asset, active_since, unstake_eligible_at, and settlement_nonce.
+- **Ownership mutation:** there is no public, generic `transfer_position` instruction. Sale, gift, and mint theft each call the same internal ownership-mutation helper, which synchronizes/force-settles the outgoing owner's rewards, sets the new owner's checkpoints to current global indices, resets `claimable_ansem_atomic`, transfers the frozen Core receipt atomically, updates `Position.owner`, and resets `unstake_eligible_at`.
+- **Marketplace V1 scope:** listings have no automatic expiration (`ListingExpired` is removed from the error list); bids, auctions, and private offers are out of scope for v1.
+- **Events and metrics:** added `ListingCreated`, `ListingCancelled`, `PositionSold`, `PositionGifted`, `RewardFundingRecognized`, `RewardPaid`, `SuitRewardClaimed`, `ReceiptCreated`, `ReceiptBurned`, and an updated `EpochClosed` (with recognized-balance and total-liability snapshots).
 
 - Token mint addresses and decimals are supplied at production initialization and stored in `GlobalConfig`; `stake_amount_atomic` and `expected_total_supply_atomic` are computed as `whole_amount * 10^rodeo_decimals`.
 - `ACCRUAL_WEIGHT_SCALE = 10,000` and `REWARD_PER_WEIGHT_SCALE = 1,000,000,000,000,000,000`.
@@ -248,7 +262,7 @@ The following decisions have been applied across the v1 sub-documents:
 - ANSEM liabilities are explicitly bucketed (`total_ansem_liability_atomic`, `cowboy_unmaterialized_liability_atomic`, `position_claimable_liability_atomic`, `bull_pool_liability_atomic`, `bull_pool_unallocated_liability_atomic`, `suit_vault_liability_atomic`) and must be vault-backed.
 - Cowboy synchronization reclassifies `accrued` from `cowboy_unmaterialized_liability_atomic` to `position_claimable_liability_atomic` with no change to `total_ansem_liability_atomic`.
 - Bull synchronization reclassifies `accrued` from `bull_pool_liability_atomic` to `position_claimable_liability_atomic` with no change to `total_ansem_liability_atomic`; Bull claim pays from `position_claimable_liability_atomic` and reduces `total_ansem_liability_atomic` but does not decrement `bull_pool_liability_atomic` a second time.
-- Reward vault accounting tracks `recognized_reward_balance_atomic` and `unrecognized_reward_surplus_atomic`; free ANSEM = `min(actual_reward_vault_balance, recognized_reward_balance_atomic) - total_ansem_liability_atomic`.
+- Reward vault accounting tracks `recognized_reward_balance_atomic`; the unrecognized reward surplus is computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`, not stored. Free ANSEM = `min(actual_reward_vault_balance, recognized_reward_balance_atomic) - total_ansem_liability_atomic`.
 - Principal vault accounting tracks `accounted_principal_atomic` and reports surplus as `actual_principal_vault_balance - accounted_principal_atomic`; surplus is never player principal.
 - Unstake burn = `principal - principal_returned`; no burn remainder sits in the vault.
 - Bull rewards use a single global `BullAccumulator`; mint-theft selection requires a finalized `BullRegistry` design with Merkle-sum root and snapshot availability before implementation.
@@ -266,7 +280,7 @@ The following remain `BLOCKED: OWNER DECISION REQUIRED` in the relevant sub-docu
 - Exact per-source-mint `PendingBatch` account schema;
 - Exact Metaplex Core plugin configuration and receipt-authority PDA for permanent transfer, freeze, and burn delegates;
 - Production randomness provider exact Switchboard integration (queue, task format, CPI vs. callback, proof serialization) and whether commit/reveal hashing is retained as defense-in-depth;
-- Marketplace listing expiration policy, and future support for bids/auctions/private offers;
+- Future support for bids/auctions/private offers (v1 listings have no automatic expiration and support only fixed-price direct sale);
 - Marketplace secondary royalties, listing fees, and cancellation fees (v1 has none);
 - Exact Squads program addresses, member pubkeys, and timelock program instances;
 - Off-chain price oracle for the $100-equivalent minimum batch and Jupiter integration mode (v6 API vs. on-chain program vs. custom keeper);

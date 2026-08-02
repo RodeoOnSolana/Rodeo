@@ -49,7 +49,10 @@ The indexer ingests:
 | `free_ansem` | `min(reward_vault_balance, recognized_reward_balance) - total_ansem_liability` |
 | `total_cowboy_weight` | `EpochClosed.total_cowboy_weight` |
 | `total_bull_power` | `EpochClosed.total_bull_power` |
-| `recognized_reward_balance_atomic` | `RewardState.recognized_reward_balance_atomic` |
+| `recognized_reward_balance_atomic` | `EpochClosed.recognized_reward_balance_atomic` (snapshot) or `RewardState.recognized_reward_balance_atomic` (live) |
+| `total_ansem_liability_atomic` | `EpochClosed.total_ansem_liability_atomic` (snapshot) |
+
+`RewardState` is the sole owner of `current_epoch`, `epoch_started_at`, and `last_closed_epoch_timestamp`; no other account duplicates them.
 
 ### `global_game_state`
 
@@ -61,8 +64,8 @@ The indexer ingests:
 | `active_bull_count` | `GlobalGameState.active_bull_count` |
 | `total_active_cowboy_weight` | `GlobalGameState.total_active_cowboy_weight` |
 | `total_active_bull_power` | `GlobalGameState.total_active_bull_power` |
-| `current_epoch` | `GlobalGameState.current_epoch` |
-| `last_closed_epoch_timestamp` | `GlobalGameState.last_closed_epoch_timestamp` |
+| `current_epoch` | `RewardState.current_epoch` |
+| `last_closed_epoch_timestamp` | `RewardState.last_closed_epoch_timestamp` |
 
 ### `suit_competitions`
 
@@ -99,7 +102,10 @@ The indexer ingests:
 | `timeout_timestamp` | `RandomnessRequested.timeout_timestamp` |
 | `provider_program` | `RandomnessRequested.provider_program` |
 | `provider_randomness_account` | `RandomnessRequested.provider_randomness_account` |
+| `vrf_key` | `RandomnessRequested.vrf_key` |
+| `callback_id` | `RandomnessRequested.callback_id` |
 | `registry_root_snapshot` | `RandomnessRequested.registry_root_snapshot` |
+| `registry_version_snapshot` | `RandomnessRequested.registry_version_snapshot` |
 | `settled` | true after `RandomnessSettled` for the same `(position, action_type, action_nonce)` |
 
 ## Public dashboards
@@ -108,8 +114,8 @@ The following metrics must be publicly queryable or displayed:
 
 | Metric | Definition |
 | --- | --- |
-| Total RODEO staked | `principal_vault_balance` |
-| Accounted principal | `GlobalGameState.accounted_principal_atomic` |
+| Total RODEO staked | `accounted_principal_atomic` (sum of `Position.principal_amount` for every live Position) |
+| Actual principal-vault balance | `principal_vault_balance` (on-chain token balance of the `PrincipalVault`) |
 | Principal vault surplus | `principal_vault_balance - accounted_principal_atomic` |
 | Total live positions | `GlobalGameState.live_position_count` |
 | Total active positions | count of `positions` with `status == Active` |
@@ -118,7 +124,7 @@ The following metrics must be publicly queryable or displayed:
 | Total ANSEM claimed | `RewardState.ansem_claimed_atomic` |
 | Total unclaimed ANSEM liability | `RewardState.total_ansem_liability_atomic` |
 | Recognized reward balance | `RewardState.recognized_reward_balance_atomic` |
-| Unrecognized reward surplus | `RewardState.unrecognized_reward_surplus_atomic` |
+| Unrecognized reward surplus | computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic` (not a stored field) |
 | Free ANSEM | `min(reward_vault_balance, recognized_reward_balance) - total_ansem_liability_atomic` |
 | Runway (epochs) | `covered_epochs` from runway formula in [emissions-and-rewards.md](./emissions-and-rewards.md) |
 | Suit vault balance | `RewardState.suit_vault_liability_atomic` |

@@ -60,8 +60,10 @@ Token mint addresses, decimals, stake amount, and expected supply are supplied a
 pub struct RewardState {
     pub version: u8,                 // ACCOUNT_VERSIONS.rewardState
     pub global_config: Pubkey,
+    // RewardState is the sole owner of epoch/timing state; no other account duplicates these fields.
     pub current_epoch: u64,
     pub epoch_started_at: i64,
+    pub last_closed_epoch_timestamp: i64,
     // ANSEM liability buckets (sum == total_ansem_liability_atomic)
     pub total_ansem_liability_atomic: u64,
     pub cowboy_unmaterialized_liability_atomic: u64,  // owed to active Cowboys, not yet synced
@@ -70,19 +72,34 @@ pub struct RewardState {
     pub bull_pool_unallocated_liability_atomic: u64,   // allocated to Bull pool while no eligible Bull set
     pub suit_vault_liability_atomic: u64,             // reserved for suit competitions; authoritative suit reservation
     // Vault accounting
-    pub recognized_reward_balance_atomic: u64,      // ANSEM in RewardVault recognized for liability accounting
-    pub unrecognized_reward_surplus_atomic: u64,    // ANSEM in RewardVault not yet recognized
+    pub recognized_reward_balance_atomic: u64,      // ANSEM in RewardVault recognized for liability accounting; decreases on every ANSEM transfer out of RewardVault
     // ANSEM flows
     pub ansem_emitted_atomic: u64,
     pub ansem_claimed_atomic: u64,
-    // Scaled global accumulators
+    // Scaled global accumulators. RewardState is the sole owner of the Cowboy production index and its rounding carry.
     pub cowboy_reward_index: u128,                    // scaled by COWBOY_REWARD_INDEX_SCALE
+    pub cowboy_index_remainder_scaled: u128,          // exact-rounding carry for the Cowboy index, scaled by COWBOY_REWARD_INDEX_SCALE
     pub suit_epoch: u64,
     pub bump: u8,
 }
 ```
 
-`bull_reward_per_weight_scaled` is kept in `BullAccumulator`, not duplicated in `RewardState`. Scaled-accumulator rounding remainders stay in the global index value and are not tracked as separate liabilities.
+`RewardState` is the single source of truth for `current_epoch`, `epoch_started_at`, `last_closed_epoch_timestamp`, `cowboy_reward_index`, and `cowboy_index_remainder_scaled`. No other account duplicates them. `reward_per_weight_scaled` and `bull_index_remainder_scaled` are kept solely in `BullAccumulator`.
+
+`unrecognized_reward_surplus_atomic` is not a stored field. It is always computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`, so it can never drift from the actual vault balance.
+
+### Exact accumulator rounding
+
+Emission distribution into the Cowboy production index carries its division remainder forward instead of discarding it:
+
+```text
+numerator = cowboy_emission * COWBOY_REWARD_INDEX_SCALE + cowboy_index_remainder_scaled
+index_increment = numerator / total_active_cowboy_weight            // floor
+cowboy_index_remainder_scaled = numerator % total_active_cowboy_weight
+cowboy_reward_index += index_increment
+```
+
+The Bull reward-per-weight accumulator carries its remainder the same way through `BullAccumulator.bull_index_remainder_scaled`. Each `Position` also carries a per-position remainder (`cowboy_accrual_remainder_scaled`, `bull_accrual_remainder_scaled`) so that per-position accrual is exact rather than re-floored on every synchronization.
 
 ### `Position`
 
@@ -95,14 +112,17 @@ pub struct Position {
     pub role: Role,                  // Unassigned | Cowboy | Bull
     pub status: PositionStatus,      // RevealPending | Active
     pub cowboy_kind: CowboyKind,     // Unassigned | Rank(u8) | Desperado
+    pub bull_tier: u8,               // 0 if not a Bull; 1-4 otherwise
     pub suit: Suit,                  // 0 until revealed; Hearts | Diamonds | Clubs | Spades
     pub opened_at: i64,
     pub active_since: i64,           // reveal settlement timestamp; 0 until revealed
     pub unstake_eligible_at: i64,   // active_since + 24 hours; reset on sale/gift/theft
     pub accrual_weight: u32,         // Cowboy rank weight (ACCRUAL_WEIGHT_SCALE base)
-    pub buck_power: u8,              // Bull tier power
+    pub buck_power: u8,              // Bull tier power, derived from bull_tier
     pub last_cowboy_reward_index: u128,
     pub last_bull_reward_per_weight: u128,
+    pub cowboy_accrual_remainder_scaled: u128, // per-position rounding carry for Cowboy accrual, scaled by COWBOY_REWARD_INDEX_SCALE
+    pub bull_accrual_remainder_scaled: u128,   // per-position rounding carry for Bull accrual, scaled by REWARD_PER_WEIGHT_SCALE
     pub claimable_ansem_atomic: u64, // accrued but unclaimed ANSEM
     pub settlement_nonce: u64,       // increments on every settled randomness action
     pub state_version: u64,          // increments on every ownership-changing event; invalidates stale listings
@@ -154,12 +174,11 @@ pub struct GlobalGameState {
     pub total_active_cowboy_weight: u128, // sum of accrual_weight for active Cowboys
     pub total_active_bull_power: u64,     // sum of buck_power for active Bulls
     pub accounted_principal_atomic: u64,  // sum of principal_amount for every live Position
-    pub launch_timestamp: i64,
-    pub current_epoch: u64,
-    pub last_closed_epoch_timestamp: i64,
     pub bump: u8,
 }
 ```
+
+`GlobalGameState` holds only population, power, and accounted-principal counters. Launch timing lives solely in `GlobalConfig.launch_timestamp`; epoch and timestamp fields (`current_epoch`, `epoch_started_at`, `last_closed_epoch_timestamp`) live solely in `RewardState`. No account duplicates them.
 
 Counter update rules:
 
@@ -184,13 +203,15 @@ Counter update rules:
 pub struct BullAccumulator {
     pub version: u8,                     // ACCOUNT_VERSIONS.bullAccumulator
     pub global_config: Pubkey,
-    pub cowboy_reward_index: u128,       // scaled by COWBOY_REWARD_INDEX_SCALE
     pub reward_per_weight_scaled: u128,  // scaled by REWARD_PER_WEIGHT_SCALE
+    pub bull_index_remainder_scaled: u128, // exact-rounding carry for the Bull index, scaled by REWARD_PER_WEIGHT_SCALE
     pub bump: u8,
 }
 ```
 
 `REWARD_PER_WEIGHT_SCALE` is `1_000_000_000_000_000_000` (`1e18`), chosen so that `u128` intermediates cannot overflow for the approved tokenomics. The accumulator is global, not per-epoch; epoch history belongs in events and the indexer.
+
+`BullAccumulator` is the sole owner of `reward_per_weight_scaled` and `bull_index_remainder_scaled`. It does not store `cowboy_reward_index`; that field lives only in `RewardState`.
 
 ### `BullRegistry` — design proposal
 
@@ -239,7 +260,7 @@ Reveal implementation for mint theft is **BLOCKED: OWNER DECISION REQUIRED** unt
 
 ```rust
 pub struct PendingRandomness {
-    pub version: u8,                 // ACCOUNT_VERSIONS.pendingRandomness (2)
+    pub version: u8,                 // ACCOUNT_VERSIONS.pendingRandomness (3)
     pub position: Pubkey,
     pub action_type: ActionType,     // stable, append-only enum
     pub action_nonce: u64,
@@ -250,6 +271,7 @@ pub struct PendingRandomness {
     pub committed_protocol_epoch: u64,
     pub timeout_timestamp: i64,
     pub registry_root_snapshot: [u8; 32], // registry root/version for mint theft if applicable
+    pub registry_version_snapshot: u64,   // monotonically increasing BullRegistry version at request time
     pub settled: bool,
     pub bump: u8,
 }
@@ -285,12 +307,12 @@ Current account versions (from `packages/protocol-definition/src/accounts.ts`):
 | Account | Version | Reason |
 | --- | --- | --- |
 | globalConfig | 1 | Initial definition. |
-| rewardState | 2 | Added `recognized_reward_balance_atomic`, `unrecognized_reward_surplus_atomic`; removed `suit_vault_atomic`, `cowboy_index_remainder`, `bull_index_remainder`, and duplicated Bull accumulator fields. |
-| position | 4 | Added `cowboy_kind`, `unstake_eligible_at`; removed `rank_or_tier` sentinel. |
-| globalGameState | 2 | Added `accounted_principal_atomic`. |
-| bullAccumulator | 2 | Added `cowboy_reward_index`; removed `division_remainder`. |
+| rewardState | 2 | Added `last_closed_epoch_timestamp` (sole owner) and `cowboy_index_remainder_scaled`; removed `unrecognized_reward_surplus_atomic` (now computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`). |
+| position | 3 | Added `bull_tier`, `cowboy_accrual_remainder_scaled`, `bull_accrual_remainder_scaled`; removed `rank_or_tier` sentinel. |
+| globalGameState | 3 | Removed `launch_timestamp`, `current_epoch`, `last_closed_epoch_timestamp` (now sole-owned by `GlobalConfig`/`RewardState`); account holds only population, power, and accounted-principal counters. |
+| bullAccumulator | 2 | Removed `cowboy_reward_index` (sole-owned by `RewardState`); added `bull_index_remainder_scaled` exact-rounding carry. |
 | bullRegistry | 1 | Design-proposal placeholder; version will bump when finalized. |
-| pendingRandomness | 3 | Added `provider_program`, `provider_randomness_account`, `committed_protocol_epoch`, `timeout_timestamp`, `registry_root_snapshot`. |
+| pendingRandomness | 3 | Added `provider_program`, `provider_randomness_account`, `committed_protocol_epoch`, `timeout_timestamp`, `registry_root_snapshot`, `registry_version_snapshot`. |
 | pendingBatch | 1 | Per-source-mint router pending account. |
 | walletClaimCooldown | 1 | Initial definition. |
 | socialResult | 1 | Initial definition. |

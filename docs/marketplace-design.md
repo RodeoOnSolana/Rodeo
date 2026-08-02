@@ -28,9 +28,9 @@ The `PositionReceipt` is created at reveal settlement directly for the final own
 
 - `Position.owner` changes only through approved protocol flows.
 - `Position` PDA never changes address when ownership changes.
-- Generic `transfer_position` requires the current owner's signature.
-- Marketplace sale, gift, and mint theft each call the same underlying ownership-transfer primitive after applying their own preconditions.
-- A transfer is rejected while `Position.pending_action_active == true`.
+- There is no public, generic `transfer_position` instruction. Marketplace sale, gift, and mint theft each call the same internal ownership-mutation helper after applying their own preconditions. Sale and gift require the current owner's signature; mint theft is resolved by the protocol at reveal settlement.
+- The internal helper synchronizes/force-settles the seller's or giver's rewards, sets the new owner's checkpoints to the current global indices, resets `Position.claimable_ansem_atomic` to `0`, transfers the frozen Core receipt atomically, updates `Position.owner`, and resets `unstake_eligible_at`.
+- Ownership mutation is rejected while `Position.pending_action_active == true`.
 - A transfer outside approved Rodeo flows is rejected (the permanent transfer delegate ensures the owner cannot move the receipt directly).
 - After a marketplace sale or gift, `Position.unstake_eligible_at = transfer_timestamp + 24 hours`.
 - After mint theft at reveal, `Position.unstake_eligible_at = active_since + 24 hours`.
@@ -60,7 +60,7 @@ A buyer settles by providing the sale price. The transaction must:
 
 1. Ensure all elapsed epochs are closed or invoke the permissionless `close_epochs` catch-up path.
 2. Synchronize the seller's Cowboy and Bull reward indices.
-3. Verify the listing is still valid (not expired, not cancelled, position still owned by seller, `state_version` matches).
+3. Verify the listing is still valid (not cancelled, position still owned by seller, `state_version` matches). Listings never expire automatically.
 4. Force-settle the seller's pending ANSEM through the normal claim split (80/20 normal, 98/2 Desperado) or Bull claim.
 5. Atomically transfer the receipt asset from seller to buyer via the Rodeo-controlled permanent transfer delegate and update `Position.owner` to buyer.
 6. Set `Position.unstake_eligible_at = transfer_timestamp + 24 hours`.
@@ -70,6 +70,10 @@ A buyer settles by providing the sale price. The transaction must:
 10. Emit `PositionSold`.
 
 If any step fails, the entire transaction aborts and no ownership changes.
+
+### Marketplace V1 scope
+
+Marketplace v1 supports only fixed-price direct listings. Listings have no automatic expiration; a listing remains valid until explicitly cancelled or invalidated by a `state_version`/`listing_nonce` mismatch. Bids, auctions, and private offers are out of scope for v1.
 
 ### Denomination
 
@@ -128,5 +132,4 @@ Stale listings can be closed by anyone to reclaim rent.
 ## Open questions (BLOCKED)
 
 - Secondary royalties, listing fees, and cancellation fees: **BLOCKED: OWNER DECISION REQUIRED** (Protocol v1 has no royalty, listing fee, or cancellation fee).
-- Listing expiration policy (e.g., fixed TTL, epoch-based, or none): **BLOCKED: OWNER DECISION REQUIRED**.
-- Whether bids, auctions, or private offers are supported in future versions: **BLOCKED: OWNER DECISION REQUIRED**.
+- Whether bids, auctions, or private offers are supported in future versions: **BLOCKED: OWNER DECISION REQUIRED** (out of scope for v1; v1 supports only fixed-price direct listings with no automatic expiration).
