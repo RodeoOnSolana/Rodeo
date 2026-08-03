@@ -8,3 +8,6 @@ coverage/
 .DS_Store
 *.log
 generated-artifacts/
+phase-0-generated-artifacts/
+rodeo-phase-2a-*.zip
+phase-2a-*.txt
