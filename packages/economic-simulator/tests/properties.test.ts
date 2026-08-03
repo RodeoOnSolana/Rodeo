@@ -24,8 +24,9 @@ import {
   STAKE_AMOUNT_WHOLE_RODEO,
   UNSTAKE_RETURN_BPS,
   UNSTAKE_TAX_BPS,
+  RandomnessDomain,
   isNormalized,
-  rejectionSample,
+  rejectionSampleDraw,
   sampleOutcome,
   stakeAmountAtomic,
 } from "@rodeo/protocol-definition";
@@ -390,14 +391,29 @@ describe("Protocol v1.3 simulator invariants", () => {
   it("uses deterministic rejection sampling for exact probability mapping", () => {
     const output = new Uint8Array(32);
     for (let i = 0; i < 32; i++) output[i] = i;
-    const ctx = { randomOutput: output, domain: "rodeo-v1-cowboy-rank", position: "p1", actionNonce: 1n };
-    const result = rejectionSample(COWBOY_RANK_TABLE, ctx);
-    // Same inputs must always map to the same outcome.
-    expect(rejectionSample(COWBOY_RANK_TABLE, ctx)).toBe(result);
+    const position = new Uint8Array(32);
+    const encoder = new TextEncoder();
+    const nameBytes = encoder.encode("p1");
+    position.set(nameBytes, 0);
+
+    const ctx = {
+      randomOutput: output,
+      domain: RandomnessDomain.CowboyKind,
+      position,
+      actionNonce: 1n,
+    };
+    const result = rejectionSampleDraw(COWBOY_RANK_TABLE, ctx);
+    // Same inputs must always map to the same draw.
+    expect(rejectionSampleDraw(COWBOY_RANK_TABLE, ctx)).toBe(result);
     // A different domain must not be assumed equal.
-    const ctx2 = { randomOutput: output, domain: "rodeo-v1-suit", position: "p1", actionNonce: 1n };
+    const ctx2 = {
+      randomOutput: output,
+      domain: RandomnessDomain.Suit,
+      position,
+      actionNonce: 1n,
+    };
     // Just verify it runs without error and is deterministic.
-    expect(rejectionSample(SUIT_TABLE, ctx2)).toBe(rejectionSample(SUIT_TABLE, ctx2));
+    expect(rejectionSampleDraw(SUIT_TABLE, ctx2)).toBe(rejectionSampleDraw(SUIT_TABLE, ctx2));
   });
 
   it("carries accumulator remainder to preserve small accrual units", () => {

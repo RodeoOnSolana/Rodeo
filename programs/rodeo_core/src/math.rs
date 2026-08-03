@@ -10,7 +10,7 @@ pub fn checked_add_u64(a: u64, b: u64) -> Result<u64> {
 
 pub fn checked_sub_u64(a: u64, b: u64) -> Result<u64> {
     a.checked_sub(b)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))
+        .ok_or(error!(RodeoError::ArithmeticUnderflow))
 }
 
 pub fn checked_mul_u64(a: u64, b: u64) -> Result<u64> {
@@ -24,22 +24,35 @@ pub fn checked_mul_u128(a: u128, b: u128) -> Result<u128> {
 }
 
 pub fn floor_mul_div_u128(a: u128, b: u128, c: u128) -> Result<u128> {
-    require!(c != 0, RodeoError::ArithmeticOverflow);
+    require!(c != 0, RodeoError::DivisionByZero);
     let product = checked_mul_u128(a, b)?;
     Ok(product / c)
 }
 
 pub fn ceil_mul_div_u128(a: u128, b: u128, c: u128) -> Result<u128> {
-    require!(c != 0, RodeoError::ArithmeticOverflow);
+    require!(c != 0, RodeoError::DivisionByZero);
     let product = checked_mul_u128(a, b)?;
-    Ok((product + c - 1) / c)
+    let numerator = product
+        .checked_add(
+            c.checked_sub(1)
+                .ok_or(error!(RodeoError::ArithmeticOverflow))?,
+        )
+        .ok_or(error!(RodeoError::ArithmeticOverflow))?;
+    Ok(numerator / c)
 }
 
 pub fn floor_bps(amount: u64, bps: u64) -> Result<u64> {
+    require!(bps <= BPS_DENOMINATOR, RodeoError::InvalidBps);
     let numerator = (amount as u128)
         .checked_mul(bps as u128)
         .ok_or(error!(RodeoError::ArithmeticOverflow))?;
-    Ok((numerator / BPS_DENOMINATOR as u128) as u64)
+    Ok(u128_to_u64(numerator / BPS_DENOMINATOR as u128)?)
+}
+
+pub fn u128_to_u64(value: u128) -> Result<u64> {
+    value
+        .try_into()
+        .map_err(|_| error!(RodeoError::ArithmeticOverflow))
 }
 
 pub fn bps_remainder(amount: u64, bps: u64) -> Result<u64> {
@@ -63,7 +76,8 @@ pub fn increment_cowboy_index(
     total_weight: u128,
     scale: u128,
 ) -> Result<(u128, u128)> {
-    require!(total_weight != 0, RodeoError::ArithmeticOverflow);
+    require!(scale != 0, RodeoError::DivisionByZero);
+    require!(total_weight != 0, RodeoError::DivisionByZero);
     let emission_u128 = emission as u128;
     let numerator = checked_mul_u128(emission_u128, scale)?
         .checked_add(remainder)
@@ -84,7 +98,8 @@ pub fn increment_bull_index(
     total_power: u128,
     scale: u128,
 ) -> Result<(u128, u128)> {
-    require!(total_power != 0, RodeoError::ArithmeticOverflow);
+    require!(scale != 0, RodeoError::DivisionByZero);
+    require!(total_power != 0, RodeoError::DivisionByZero);
     let contribution_u128 = contribution as u128;
     let numerator = checked_mul_u128(contribution_u128, scale)?
         .checked_add(remainder)
@@ -105,16 +120,17 @@ pub fn accrue_cowboy(
     remainder: u128,
     scale: u128,
 ) -> Result<(u64, u128)> {
+    require!(scale != 0, RodeoError::DivisionByZero);
+    require!(current_index >= last_index, RodeoError::ArithmeticUnderflow);
     let delta = current_index
         .checked_sub(last_index)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))?;
+        .ok_or(error!(RodeoError::ArithmeticUnderflow))?;
     let numerator = checked_mul_u128(delta, weight)?
         .checked_add(remainder)
         .ok_or(error!(RodeoError::ArithmeticOverflow))?;
     let accrued = numerator / scale;
     let new_remainder = numerator % scale;
-    require!(accrued <= u64::MAX as u128, RodeoError::ArithmeticOverflow);
-    Ok((accrued as u64, new_remainder))
+    Ok((u128_to_u64(accrued)?, new_remainder))
 }
 
 /// Compute per-position Bull accrual and updated per-position remainder.
@@ -125,14 +141,15 @@ pub fn accrue_bull(
     remainder: u128,
     scale: u128,
 ) -> Result<(u64, u128)> {
+    require!(scale != 0, RodeoError::DivisionByZero);
+    require!(current_index >= last_index, RodeoError::ArithmeticUnderflow);
     let delta = current_index
         .checked_sub(last_index)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))?;
+        .ok_or(error!(RodeoError::ArithmeticUnderflow))?;
     let numerator = checked_mul_u128(delta, power)?
         .checked_add(remainder)
         .ok_or(error!(RodeoError::ArithmeticOverflow))?;
     let accrued = numerator / scale;
     let new_remainder = numerator % scale;
-    require!(accrued <= u64::MAX as u128, RodeoError::ArithmeticOverflow);
-    Ok((accrued as u64, new_remainder))
+    Ok((u128_to_u64(accrued)?, new_remainder))
 }

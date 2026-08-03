@@ -15,12 +15,40 @@ use state::*;
 pub mod rodeo_core {
     use super::*;
 
+    /// Anchor constant used to expose the PauseFlag enum in the generated IDL.
+    #[constant]
+    pub const DEFAULT_PAUSE_FLAG: state::PauseFlag = state::PauseFlag::NewStakes;
+
     pub fn initialize_protocol(
         ctx: Context<InitializeProtocol>,
         upgrade_council: Pubkey,
         treasury_council: Pubkey,
         emergency_guardians: Pubkey,
     ) -> Result<()> {
+        let program_data = ctx.accounts.program_data.try_borrow_data()?;
+        require!(
+            program_data.len() >= 4 + 8 + 1 + 32,
+            RodeoError::InvalidProgramData
+        );
+        // BPF Upgradeable Loader serializes the ProgramData variant index as a u32.
+        require!(
+            program_data[0..4] == [3, 0, 0, 0],
+            RodeoError::InvalidProgramData
+        );
+        let authority_option_tag = program_data[12];
+        require!(
+            authority_option_tag == 1,
+            RodeoError::UnauthorizedInitializer
+        );
+        let mut upgrade_authority_bytes = [0u8; 32];
+        upgrade_authority_bytes.copy_from_slice(&program_data[13..45]);
+        let upgrade_authority = Pubkey::new_from_array(upgrade_authority_bytes);
+        require_eq!(
+            upgrade_authority,
+            ctx.accounts.initializer.key(),
+            RodeoError::UnauthorizedInitializer
+        );
+
         let decimals = ctx.accounts.rodeo_mint.decimals;
         require_gte!(RODEO_DECIMALS_MAX, decimals, RodeoError::InvalidDecimals);
 
@@ -38,11 +66,53 @@ pub mod rodeo_core {
             expected_total_supply_atomic,
             RodeoError::UnexpectedRodeoSupply
         );
+        require_keys_neq!(
+            ctx.accounts.rodeo_mint.key(),
+            ctx.accounts.ansem_mint.key(),
+            RodeoError::IdenticalTokenMints
+        );
+        require!(
+            ctx.accounts.rodeo_mint.mint_authority.is_none(),
+            RodeoError::ActiveMintAuthority
+        );
+        require!(
+            ctx.accounts.rodeo_mint.freeze_authority.is_none(),
+            RodeoError::ActiveFreezeAuthority
+        );
+        require!(
+            ctx.accounts.ansem_mint.mint_authority.is_none(),
+            RodeoError::ActiveMintAuthority
+        );
+        require!(
+            ctx.accounts.ansem_mint.freeze_authority.is_none(),
+            RodeoError::ActiveFreezeAuthority
+        );
+
+        require!(
+            !upgrade_council.eq(&Pubkey::default()),
+            RodeoError::InvalidGovernanceAuthority
+        );
+        require!(
+            !treasury_council.eq(&Pubkey::default()),
+            RodeoError::InvalidGovernanceAuthority
+        );
+        require!(
+            !emergency_guardians.eq(&Pubkey::default()),
+            RodeoError::InvalidGovernanceAuthority
+        );
+        require!(
+            upgrade_council != treasury_council
+                && upgrade_council != emergency_guardians
+                && treasury_council != emergency_guardians,
+            RodeoError::GovernanceAuthoritiesNotDistinct
+        );
 
         let launch_timestamp = Clock::get()?.unix_timestamp;
+        let first_epoch_start = launch_timestamp
+            .checked_add(POT_FILL_SECONDS)
+            .ok_or(RodeoError::ArithmeticOverflow)?;
 
         let global_config = &mut ctx.accounts.global_config;
-        require_eq!(global_config.version, 0, RodeoError::AlreadyInitialized);
         global_config.version = ACCOUNT_VERSION_GLOBAL_CONFIG;
         global_config.rodeo_mint = ctx.accounts.rodeo_mint.key();
         global_config.ansem_mint = ctx.accounts.ansem_mint.key();
@@ -68,8 +138,8 @@ pub mod rodeo_core {
         reward_state.version = ACCOUNT_VERSION_REWARD_STATE;
         reward_state.global_config = global_config.key();
         reward_state.current_epoch = 0;
-        reward_state.epoch_started_at = launch_timestamp;
-        reward_state.last_closed_epoch_timestamp = 0;
+        reward_state.epoch_started_at = first_epoch_start;
+        reward_state.last_closed_epoch_timestamp = first_epoch_start;
         reward_state.total_ansem_liability_atomic = 0;
         reward_state.cowboy_unmaterialized_liability_atomic = 0;
         reward_state.position_claimable_liability_atomic = 0;
@@ -135,6 +205,23 @@ pub struct InitializeProtocol<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
+    /// The upgrade authority of the deployed rodeo_core program.
+    pub initializer: Signer<'info>,
+
+    /// The deployed rodeo_core program account.
+    #[account(
+        constraint = program.key() == crate::ID @ RodeoError::InvalidProgramAccount,
+        constraint = program.executable @ RodeoError::InvalidProgramAccount,
+    )]
+    pub program: AccountInfo<'info>,
+
+    /// The BPF Upgradeable Loader program-data account for this program.
+    #[account(
+        constraint = program_data.key() == anchor_lang::solana_program::bpf_loader_upgradeable::programdata_address(&crate::ID) @ RodeoError::InvalidProgramData,
+        constraint = program_data.owner == &anchor_lang::solana_program::bpf_loader_upgradeable::id() @ RodeoError::InvalidProgramData,
+    )]
+    pub program_data: AccountInfo<'info>,
+
     pub rodeo_mint: Account<'info, Mint>,
     pub ansem_mint: Account<'info, Mint>,
 
@@ -142,7 +229,7 @@ pub struct InitializeProtocol<'info> {
         init,
         payer = payer,
         space = 8 + GlobalConfig::INIT_SPACE,
-        seeds = [b"global-config"],
+        seeds = [SEED_GLOBAL_CONFIG],
         bump
     )]
     pub global_config: Account<'info, GlobalConfig>,
@@ -151,7 +238,7 @@ pub struct InitializeProtocol<'info> {
         init,
         payer = payer,
         space = 8 + RewardState::INIT_SPACE,
-        seeds = [b"reward-state", global_config.key().as_ref()],
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump
     )]
     pub reward_state: Account<'info, RewardState>,
@@ -160,7 +247,7 @@ pub struct InitializeProtocol<'info> {
         init,
         payer = payer,
         space = 8 + GlobalGameState::INIT_SPACE,
-        seeds = [b"global-game-state", global_config.key().as_ref()],
+        seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
         bump
     )]
     pub global_game_state: Account<'info, GlobalGameState>,
@@ -169,7 +256,7 @@ pub struct InitializeProtocol<'info> {
         init,
         payer = payer,
         space = 8 + BullAccumulator::INIT_SPACE,
-        seeds = [b"bull-accumulator", global_config.key().as_ref()],
+        seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
         bump
     )]
     pub bull_accumulator: Account<'info, BullAccumulator>,
@@ -177,7 +264,7 @@ pub struct InitializeProtocol<'info> {
     #[account(
         init,
         payer = payer,
-        seeds = [b"principal-vault"],
+        seeds = [SEED_PRINCIPAL_VAULT],
         bump,
         token::mint = rodeo_mint,
         token::authority = global_config
@@ -187,7 +274,7 @@ pub struct InitializeProtocol<'info> {
     #[account(
         init,
         payer = payer,
-        seeds = [b"reward-vault"],
+        seeds = [SEED_REWARD_VAULT],
         bump,
         token::mint = ansem_mint,
         token::authority = global_config
@@ -239,8 +326,30 @@ pub struct PositionOwnerChanged {
 pub enum RodeoError {
     #[msg("Integer arithmetic overflow")]
     ArithmeticOverflow,
+    #[msg("Integer arithmetic underflow")]
+    ArithmeticUnderflow,
+    #[msg("Division by zero")]
+    DivisionByZero,
     #[msg("Protocol has already been initialized")]
     AlreadyInitialized,
+    #[msg("Invalid program account")]
+    InvalidProgramAccount,
+    #[msg("Invalid program data account")]
+    InvalidProgramData,
+    #[msg("Initializer is not the program upgrade authority")]
+    UnauthorizedInitializer,
+    #[msg("Invalid governance authority")]
+    InvalidGovernanceAuthority,
+    #[msg("Governance authorities must be pairwise distinct")]
+    GovernanceAuthoritiesNotDistinct,
+    #[msg("RODEO and ANSEM mints must be different")]
+    IdenticalTokenMints,
+    #[msg("Mint authority must be revoked")]
+    ActiveMintAuthority,
+    #[msg("Freeze authority must be revoked")]
+    ActiveFreezeAuthority,
+    #[msg("Rejection sampling exhausted without an accepted candidate")]
+    RejectionSamplingExhausted,
     #[msg("Invalid mint account")]
     InvalidMint,
     #[msg("RODEO mint supply does not match the expected total supply")]
@@ -314,6 +423,24 @@ mod tests {
     use super::*;
     use constants::*;
 
+    fn pubkey_from_u64(n: u64) -> Pubkey {
+        let mut bytes = [0u8; 32];
+        bytes[0..8].copy_from_slice(&n.to_le_bytes());
+        Pubkey::new_from_array(bytes)
+    }
+
+    fn sample_ctx(
+        domain: probability::RandomnessDomain,
+        tag: u8,
+    ) -> probability::RandomnessSampleContext {
+        probability::RandomnessSampleContext {
+            random_output: [tag + 1; 32],
+            domain,
+            position: pubkey_from_u64((tag + 7) as u64),
+            action_nonce: tag as u64,
+        }
+    }
+
     #[test]
     fn constants_match_typescript_expectations() {
         assert_eq!(RODEO_TOTAL_SUPPLY_WHOLE, 1_000_000_000u64);
@@ -345,6 +472,17 @@ mod tests {
     }
 
     #[test]
+    fn account_init_space_values() {
+        assert_eq!(GlobalConfig::INIT_SPACE, 258);
+        assert_eq!(RewardState::INIT_SPACE, 194);
+        assert_eq!(GlobalGameState::INIT_SPACE, 98);
+        assert_eq!(BullAccumulator::INIT_SPACE, 82);
+        assert_eq!(Position::INIT_SPACE, 231);
+        assert_eq!(WalletClaimCooldown::INIT_SPACE, 74);
+        assert_eq!(PendingRandomness::INIT_SPACE, 204);
+    }
+
+    #[test]
     fn action_type_discriminants_are_stable() {
         let mut buf = Vec::new();
         state::ActionType::Reveal.serialize(&mut buf).unwrap();
@@ -367,10 +505,21 @@ mod tests {
     }
 
     #[test]
-    fn checked_math_rejects_overflow() {
+    fn checked_math_rejects_overflow_and_underflow() {
         assert!(math::checked_add_u64(u64::MAX, 1).is_err());
         assert!(math::checked_sub_u64(0, 1).is_err());
         assert!(math::checked_mul_u64(u64::MAX, 2).is_err());
+        assert!(matches!(
+            math::checked_sub_u64(0, 1),
+            Err(anchor_lang::error::Error::AnchorError(e)) if e.error_name == "ArithmeticUnderflow"
+        ));
+    }
+
+    #[test]
+    fn u128_to_u64_rejects_overflow() {
+        assert!(math::u128_to_u64(u64::MAX as u128).is_ok());
+        assert!(math::u128_to_u64((u64::MAX as u128) + 1).is_err());
+        assert!(math::u128_to_u64(u128::MAX).is_err());
     }
 
     #[test]
@@ -384,9 +533,16 @@ mod tests {
     }
 
     #[test]
-    fn ceil_mul_div_rounds_up() {
+    fn floor_bps_rejects_invalid_bps() {
+        assert!(math::floor_bps(1_000, BPS_DENOMINATOR).is_ok());
+        assert!(math::floor_bps(1_000, BPS_DENOMINATOR + 1).is_err());
+    }
+
+    #[test]
+    fn ceil_mul_div_rounds_up_without_overflow() {
         assert_eq!(math::ceil_mul_div_u128(10, 1, 3).unwrap(), 4);
         assert_eq!(math::ceil_mul_div_u128(9, 1, 3).unwrap(), 3);
+        assert!(math::ceil_mul_div_u128(1, 1, 0).is_err());
     }
 
     #[test]
@@ -397,6 +553,12 @@ mod tests {
         let expected_numerator = 2_000_000u128 * COWBOY_REWARD_INDEX_SCALE;
         assert_eq!(new_index, expected_numerator / 20_000);
         assert_eq!(new_remainder, expected_numerator % 20_000);
+    }
+
+    #[test]
+    fn cowboy_index_rejects_zero_scale_or_weight() {
+        assert!(math::increment_cowboy_index(0, 0, 1_000, 1, 0).is_err());
+        assert!(math::increment_cowboy_index(0, 0, 1_000, 0, COWBOY_REWARD_INDEX_SCALE).is_err());
     }
 
     #[test]
@@ -422,83 +584,244 @@ mod tests {
     }
 
     #[test]
+    fn accrue_rejects_invalid_state() {
+        assert!(math::accrue_cowboy(0, 1, 10_000, 0, COWBOY_REWARD_INDEX_SCALE).is_err());
+        assert!(math::accrue_cowboy(0, 0, 10_000, 0, 0).is_err());
+        assert!(math::accrue_bull(0, 1, 10, 0, COWBOY_REWARD_INDEX_SCALE).is_err());
+        assert!(math::accrue_bull(0, 0, 10, 0, 0).is_err());
+    }
+
+    #[test]
     fn probability_tables_are_valid() {
         probability::ROLE_TABLE.validate().unwrap();
         probability::COWBOY_RANK_TABLE.validate().unwrap();
         probability::BULL_TIER_TABLE.validate().unwrap();
         probability::SUIT_TABLE.validate().unwrap();
         probability::THEFT_FLAG_TABLE.validate().unwrap();
+        probability::UNSTAKE_THEFT_FLAG_TABLE.validate().unwrap();
+    }
+
+    #[test]
+    fn outcome_index_draw_validation() {
+        assert!(probability::ROLE_TABLE
+            .outcome_index_for_draw(ROLE_TABLE.denominator)
+            .is_err());
+        assert!(probability::ROLE_TABLE.outcome_index_for_draw(0).is_ok());
     }
 
     #[test]
     fn role_mapping_boundaries() {
-        let mut buf = [0u8; 32];
-        buf[0..8].copy_from_slice(&0u64.to_le_bytes());
-        assert_eq!(probability::map_role(buf), state::Role::Cowboy);
-
-        buf[0..8].copy_from_slice(&8_999_999u64.to_le_bytes());
-        assert_eq!(probability::map_role(buf), state::Role::Cowboy);
-
-        buf[0..8].copy_from_slice(&9_000_000u64.to_le_bytes());
-        assert_eq!(probability::map_role(buf), state::Role::Bull);
-
-        buf[0..8].copy_from_slice(&9_999_999u64.to_le_bytes());
-        assert_eq!(probability::map_role(buf), state::Role::Bull);
+        assert_eq!(
+            probability::ROLE_TABLE.outcome_index_for_draw(0).unwrap(),
+            0
+        );
+        assert_eq!(
+            probability::ROLE_TABLE
+                .outcome_index_for_draw(8_999_999)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            probability::ROLE_TABLE
+                .outcome_index_for_draw(9_000_000)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            probability::ROLE_TABLE
+                .outcome_index_for_draw(9_999_999)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
     fn cowboy_rank_mapping_boundaries() {
-        let mut buf = [0u8; 32];
-        let mut check = |draw: u64, expected: state::CowboyKind| {
-            buf[0..8].copy_from_slice(&draw.to_le_bytes());
-            assert_eq!(probability::map_cowboy_kind(buf), expected);
+        let check = |draw, expected| {
+            assert_eq!(
+                probability::COWBOY_RANK_TABLE
+                    .outcome_index_for_draw(draw)
+                    .unwrap(),
+                expected
+            );
         };
-        check(0, state::CowboyKind::Rank(4));
-        check(4_047_749, state::CowboyKind::Rank(4));
-        check(4_047_750, state::CowboyKind::Rank(5));
-        check(4_047_750 + 2_248_749, state::CowboyKind::Rank(5));
-        check(4_047_750 + 2_248_750, state::CowboyKind::Rank(6));
+        check(0, 0);
+        check(4_047_749, 0);
+        check(4_047_750, 1);
+        check(4_047_750 + 2_248_749, 1);
+        check(4_047_750 + 2_248_750, 2);
         let cumulative_before_desperado = 9_000_000 - 5_000;
-        check(cumulative_before_desperado - 1, state::CowboyKind::Rank(10));
-        check(cumulative_before_desperado, state::CowboyKind::Desperado);
-        check(8_999_999, state::CowboyKind::Desperado);
+        check(cumulative_before_desperado - 1, 6);
+        check(cumulative_before_desperado, 7);
+        check(8_999_999, 7);
     }
 
     #[test]
     fn bull_tier_mapping_boundaries() {
-        let mut buf = [0u8; 32];
-        buf[0..8].copy_from_slice(&0u64.to_le_bytes());
-        assert_eq!(probability::map_bull_tier(buf), 1);
-        buf[0..8].copy_from_slice(&599_999u64.to_le_bytes());
-        assert_eq!(probability::map_bull_tier(buf), 1);
-        buf[0..8].copy_from_slice(&600_000u64.to_le_bytes());
-        assert_eq!(probability::map_bull_tier(buf), 2);
-        buf[0..8].copy_from_slice(&999_999u64.to_le_bytes());
-        assert_eq!(probability::map_bull_tier(buf), 4);
+        let check = |draw, expected| {
+            assert_eq!(
+                probability::BULL_TIER_TABLE
+                    .outcome_index_for_draw(draw)
+                    .unwrap(),
+                expected
+            );
+        };
+        check(0, 0);
+        check(599_999, 0);
+        check(600_000, 1);
+        check(849_999, 1);
+        check(850_000, 2);
+        check(949_999, 2);
+        check(950_000, 3);
+        check(999_999, 3);
     }
 
     #[test]
-    fn suit_mapping_is_uniform() {
-        let mut buf = [0u8; 32];
-        buf[0..8].copy_from_slice(&0u64.to_le_bytes());
-        assert_eq!(probability::map_suit(buf), state::Suit::Hearts);
-        buf[0..8].copy_from_slice(&2_499_999u64.to_le_bytes());
-        assert_eq!(probability::map_suit(buf), state::Suit::Hearts);
-        buf[0..8].copy_from_slice(&2_500_000u64.to_le_bytes());
-        assert_eq!(probability::map_suit(buf), state::Suit::Diamonds);
-        buf[0..8].copy_from_slice(&7_500_000u64.to_le_bytes());
-        assert_eq!(probability::map_suit(buf), state::Suit::Spades);
+    fn suit_mapping_boundaries() {
+        let check = |draw, expected| {
+            assert_eq!(
+                probability::SUIT_TABLE
+                    .outcome_index_for_draw(draw)
+                    .unwrap(),
+                expected
+            );
+        };
+        check(0, 0);
+        check(2_499_999, 0);
+        check(2_500_000, 1);
+        check(4_999_999, 1);
+        check(5_000_000, 2);
+        check(7_499_999, 2);
+        check(7_500_000, 3);
+        check(9_999_999, 3);
     }
 
     #[test]
-    fn theft_flag_boundaries() {
-        let mut buf = [0u8; 32];
-        buf[0..8].copy_from_slice(&0u64.to_le_bytes());
-        assert!(probability::map_theft_flag(buf));
-        buf[0..8].copy_from_slice(&499_999u64.to_le_bytes());
-        assert!(probability::map_theft_flag(buf));
-        buf[0..8].copy_from_slice(&500_000u64.to_le_bytes());
-        assert!(!probability::map_theft_flag(buf));
+    fn theft_flag_mapping_boundaries() {
+        let check = |draw, expected| {
+            assert_eq!(
+                probability::THEFT_FLAG_TABLE
+                    .outcome_index_for_draw(draw)
+                    .unwrap(),
+                expected
+            );
+        };
+        check(0, 0);
+        check(499_999, 0);
+        check(500_000, 1);
+        check(9_999_999, 1);
+    }
+
+    #[test]
+    fn rejection_sampling_golden_vectors() {
+        let vectors = [
+            (
+                probability::RandomnessDomain::Reveal,
+                0u8,
+                10_000_000u64,
+                7_594_516u64,
+            ),
+            (
+                probability::RandomnessDomain::Unstake,
+                1u8,
+                10_000_000u64,
+                9_569_442u64,
+            ),
+            (
+                probability::RandomnessDomain::MintTheft,
+                2u8,
+                10_000_000u64,
+                8_120_026u64,
+            ),
+            (
+                probability::RandomnessDomain::UnstakeTheft,
+                3u8,
+                10_000_000u64,
+                4_556_769u64,
+            ),
+            (
+                probability::RandomnessDomain::Role,
+                4u8,
+                10_000_000u64,
+                1_865_101u64,
+            ),
+            (
+                probability::RandomnessDomain::CowboyKind,
+                5u8,
+                9_000_000u64,
+                6_521_817u64,
+            ),
+            (
+                probability::RandomnessDomain::BullTier,
+                6u8,
+                1_000_000u64,
+                813_273u64,
+            ),
+            (
+                probability::RandomnessDomain::Suit,
+                7u8,
+                10_000_000u64,
+                6_972_047u64,
+            ),
+        ];
+
+        for (domain, tag, denominator, expected_draw) in vectors.iter().copied() {
+            let ctx = sample_ctx(domain, tag);
+            let draw = probability::rejection_sample_draw(ctx, denominator).unwrap();
+            assert_eq!(
+                draw, expected_draw,
+                "domain {:?} tag {} denominator {} mismatch",
+                domain, tag, denominator
+            );
+        }
+    }
+
+    #[test]
+    fn map_role_is_stable_and_valid() {
+        let ctx = sample_ctx(probability::RandomnessDomain::Role, 4);
+        let first = probability::map_role(ctx).unwrap();
+        let second = probability::map_role(ctx).unwrap();
+        assert_eq!(first, second);
+        assert!(first == state::Role::Cowboy || first == state::Role::Bull);
+    }
+
+    #[test]
+    fn map_cowboy_kind_is_stable_and_valid() {
+        let ctx = sample_ctx(probability::RandomnessDomain::CowboyKind, 5);
+        let kind = probability::map_cowboy_kind(ctx).unwrap();
+        assert!(matches!(
+            kind,
+            state::CowboyKind::Rank(4 | 5 | 6 | 7 | 8 | 9 | 10) | state::CowboyKind::Desperado
+        ));
+        assert_eq!(probability::map_cowboy_kind(ctx).unwrap(), kind);
+    }
+
+    #[test]
+    fn map_bull_tier_is_stable_and_valid() {
+        let ctx = sample_ctx(probability::RandomnessDomain::BullTier, 6);
+        let tier = probability::map_bull_tier(ctx).unwrap();
+        assert!((1..=4).contains(&tier));
+        assert_eq!(probability::map_bull_tier(ctx).unwrap(), tier);
+    }
+
+    #[test]
+    fn map_suit_is_stable_and_valid() {
+        let ctx = sample_ctx(probability::RandomnessDomain::Suit, 7);
+        let suit = probability::map_suit(ctx).unwrap();
+        assert!(matches!(
+            suit,
+            state::Suit::Hearts | state::Suit::Diamonds | state::Suit::Clubs | state::Suit::Spades
+        ));
+        assert_eq!(probability::map_suit(ctx).unwrap(), suit);
+    }
+
+    #[test]
+    fn theft_flag_helpers_are_distinct_domains() {
+        let mint_ctx = sample_ctx(probability::RandomnessDomain::MintTheft, 2);
+        let unstake_ctx = sample_ctx(probability::RandomnessDomain::UnstakeTheft, 3);
+        // The outputs are deterministic booleans; this just verifies both helpers run.
+        let _ = probability::map_mint_theft_flag(mint_ctx).unwrap();
+        let _ = probability::map_unstake_theft_flag(unstake_ctx).unwrap();
     }
 
     #[test]
@@ -511,10 +834,15 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_mapping_is_stable() {
-        let buf = [42u8; 32];
-        let role1 = probability::map_role(buf);
-        let role2 = probability::map_role(buf);
-        assert_eq!(role1, role2);
+    fn seed_constants_match_protocol_definition() {
+        assert_eq!(SEED_GLOBAL_CONFIG, b"global-config");
+        assert_eq!(SEED_REWARD_STATE, b"reward-state");
+        assert_eq!(SEED_GLOBAL_GAME_STATE, b"global-game-state");
+        assert_eq!(SEED_BULL_ACCUMULATOR, b"bull-accumulator");
+        assert_eq!(SEED_PRINCIPAL_VAULT, b"principal-vault");
+        assert_eq!(SEED_REWARD_VAULT, b"reward-vault");
+        assert_eq!(SEED_POSITION, b"position");
+        assert_eq!(SEED_CLAIM_COOLDOWN, b"claim-cooldown");
+        assert_eq!(SEED_RANDOMNESS, b"randomness");
     }
 }

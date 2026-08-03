@@ -44,6 +44,19 @@ pub const REWARD_PER_WEIGHT_SCALE: u128 = 1_000_000_000_000_000_000;
 
 pub const PROBABILITY_DENOMINATOR: u64 = 10_000_000;
 
+pub const REJECTION_SAMPLING_MAX_RETRIES: u64 = 64;
+pub const RANDOMNESS_DOMAIN_PREFIX: &[u8] = b"rodeo_randomness_v1";
+
+pub const SEED_GLOBAL_CONFIG: &[u8] = b"global-config";
+pub const SEED_REWARD_STATE: &[u8] = b"reward-state";
+pub const SEED_GLOBAL_GAME_STATE: &[u8] = b"global-game-state";
+pub const SEED_BULL_ACCUMULATOR: &[u8] = b"bull-accumulator";
+pub const SEED_PRINCIPAL_VAULT: &[u8] = b"principal-vault";
+pub const SEED_REWARD_VAULT: &[u8] = b"reward-vault";
+pub const SEED_POSITION: &[u8] = b"position";
+pub const SEED_CLAIM_COOLDOWN: &[u8] = b"claim-cooldown";
+pub const SEED_RANDOMNESS: &[u8] = b"randomness";
+
 pub const ACCOUNT_VERSION_GLOBAL_CONFIG: u8 = 1;
 pub const ACCOUNT_VERSION_REWARD_STATE: u8 = 3;
 pub const ACCOUNT_VERSION_GLOBAL_GAME_STATE: u8 = 3;

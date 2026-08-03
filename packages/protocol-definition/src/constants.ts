@@ -58,3 +58,28 @@ export const COWBOY_REWARD_INDEX_SCALE = 1_000_000_000_000_000_000n;
 export const REWARD_PER_WEIGHT_SCALE = 1_000_000_000_000_000_000n;
 
 export const PROBABILITY_DENOMINATOR = 10_000_000n;
+
+export const REJECTION_SAMPLING_MAX_RETRIES = 64;
+
+export const RANDOMNESS_DOMAIN_PREFIX = new TextEncoder().encode("rodeo_randomness_v1");
+
+export enum RandomnessDomain {
+  Reveal = 0,
+  Unstake = 1,
+  MintTheft = 2,
+  UnstakeTheft = 3,
+  Role = 4,
+  CowboyKind = 5,
+  BullTier = 6,
+  Suit = 7,
+}
+
+export const SEED_GLOBAL_CONFIG = Buffer.from("global-config");
+export const SEED_REWARD_STATE = Buffer.from("reward-state");
+export const SEED_GLOBAL_GAME_STATE = Buffer.from("global-game-state");
+export const SEED_BULL_ACCUMULATOR = Buffer.from("bull-accumulator");
+export const SEED_PRINCIPAL_VAULT = Buffer.from("principal-vault");
+export const SEED_REWARD_VAULT = Buffer.from("reward-vault");
+export const SEED_POSITION = Buffer.from("position");
+export const SEED_CLAIM_COOLDOWN = Buffer.from("claim-cooldown");
+export const SEED_RANDOMNESS = Buffer.from("randomness");
