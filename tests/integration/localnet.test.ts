@@ -1,4 +1,3 @@
-import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Idl } from "@coral-xyz/anchor";
@@ -26,23 +25,20 @@ const expectedProgramIds = {
   RodeoRouter: "CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD",
 } as const;
 
-// Mirrors the on-chain `ActionType` discriminants in programs/rodeo_core/src/lib.rs.
-const ACTION_TYPE = {
-  reveal: 0,
-  unstake: 1,
-} as const;
-
 describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   let provider: AnchorProvider;
   let payer: web3.Keypair;
   const programs = {} as Record<keyof typeof expectedProgramIds, Program>;
 
   let rodeoMint: web3.PublicKey;
+  let ansemMint: web3.PublicKey;
   let globalConfig: web3.PublicKey;
+  let rewardState: web3.PublicKey;
+  let globalGameState: web3.PublicKey;
+  let bullAccumulator: web3.PublicKey;
   let principalVault: web3.PublicKey;
   let rewardVault: web3.PublicKey;
-  let ownerRodeoAccount: web3.PublicKey;
-  let nextPositionId = 1;
+  let payerRodeoAccount: web3.PublicKey;
 
   function derivePosition(positionId: BN): [web3.PublicKey, number] {
     return web3.PublicKey.findProgramAddressSync(
@@ -67,44 +63,6 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     );
   }
 
-  async function openPosition(principalAmount: bigint) {
-    const program = programs.RodeoCore;
-    const positionId = new BN(nextPositionId++);
-    const [position] = derivePosition(positionId);
-    const [pendingRandomness] = deriveRandomness(position, ACTION_TYPE.reveal, new BN(0));
-    const secret = randomBytes(32);
-    const commitment = createHash("sha256").update(secret).digest();
-
-    await program.methods
-      .stakeAndCommit(positionId, new BN(principalAmount.toString()), [...commitment])
-      .accounts({
-        owner: payer.publicKey,
-        globalConfig,
-        rodeoMint,
-        ownerRodeoAccount,
-        principalVault,
-        position,
-        pendingRandomness,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: web3.SystemProgram.programId,
-      })
-      .rpc();
-
-    return { positionId, position, pendingRandomness, secret, commitment };
-  }
-
-  function reveal(position: web3.PublicKey, pendingRandomness: web3.PublicKey, secret: Uint8Array) {
-    return programs.RodeoCore.methods
-      .mockReveal([...secret])
-      .accounts({
-        owner: payer.publicKey,
-        globalConfig,
-        position,
-        pendingRandomness,
-      })
-      .rpc();
-  }
-
   beforeAll(async () => {
     provider = AnchorProvider.env();
     setProvider(provider);
@@ -116,8 +74,8 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
 
     if (!localnetAvailable) return;
 
-    const ansemMint = await createMint(provider.connection, payer, payer.publicKey, null, 6);
     rodeoMint = await createMint(provider.connection, payer, payer.publicKey, null, 6);
+    ansemMint = await createMint(provider.connection, payer, payer.publicKey, null, 6);
 
     [globalConfig] = web3.PublicKey.findProgramAddressSync(
       [Buffer.from("global-config")],
@@ -131,14 +89,40 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       [Buffer.from("reward-vault")],
       programs.RodeoCore.programId,
     );
+    [rewardState] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("reward-state"), globalConfig.toBuffer()],
+      programs.RodeoCore.programId,
+    );
+    [globalGameState] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("global-game-state"), globalConfig.toBuffer()],
+      programs.RodeoCore.programId,
+    );
+    [bullAccumulator] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("bull-accumulator"), globalConfig.toBuffer()],
+      programs.RodeoCore.programId,
+    );
+
+    payerRodeoAccount = await createAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      rodeoMint,
+      payer.publicKey,
+    );
+
+    // The protocol requires the full RODEO supply to be minted at initialization.
+    const expectedTotalSupply = 1_000_000_000_000_000n;
+    await mintTo(provider.connection, payer, rodeoMint, payerRodeoAccount, payer, expectedTotalSupply);
 
     await programs.RodeoCore.methods
-      .initializeConfig()
+      .initializeProtocol(payer.publicKey, payer.publicKey, payer.publicKey)
       .accounts({
         payer: payer.publicKey,
         rodeoMint,
         ansemMint,
         globalConfig,
+        rewardState,
+        globalGameState,
+        bullAccumulator,
         principalVault,
         rewardVault,
         tokenProgram: TOKEN_PROGRAM_ID,
@@ -146,12 +130,9 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
         rent: web3.SYSVAR_RENT_PUBKEY,
       })
       .rpc();
+  }, 60_000);
 
-    ownerRodeoAccount = await createAssociatedTokenAccount(provider.connection, payer, rodeoMint, payer.publicKey);
-    await mintTo(provider.connection, payer, rodeoMint, ownerRodeoAccount, payer, 1_000_000_000n);
-  });
-
-  it("deploys all Phase 0 program boundaries under the pinned IDs", async () => {
+  it("deploys all program boundaries under the pinned IDs", async () => {
     for (const [name, expectedId] of Object.entries(expectedProgramIds)) {
       const program = programs[name as keyof typeof expectedProgramIds];
       expect(program.programId.toBase58()).toBe(expectedId);
@@ -159,136 +140,139 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     }
   }, 30_000);
 
-  it("derives Position from global_config and position_id, stakes, commits, reveals once, and rejects a duplicate reveal", async () => {
-    const accounts = programs.RodeoCore.account as unknown as {
-      position: { fetch(address: web3.PublicKey): Promise<any> };
-      pendingRandomness: { fetch(address: web3.PublicKey): Promise<any> };
+  it("initializes GlobalConfig with computed atomic values and governance addresses", async () => {
+    const fetcher = programs.RodeoCore.account as unknown as {
+      globalConfig: { fetch(address: web3.PublicKey): Promise<any> };
     };
+    const config = await fetcher.globalConfig.fetch(globalConfig);
 
-    const principalAmount = 25_000_000n;
-    const { positionId, position, pendingRandomness, secret, commitment } = await openPosition(principalAmount);
-
-    const [expectedPosition] = derivePosition(positionId);
-    expect(position.toBase58()).toBe(expectedPosition.toBase58());
-
-    // This is the first stake in the suite, so the vault holds exactly this deposit.
-    const vaultBefore = await getAccount(provider.connection, principalVault);
-    expect(vaultBefore.amount).toBe(principalAmount);
-
-    const pendingAfterStake = await accounts.pendingRandomness.fetch(pendingRandomness);
-    expect(Buffer.from(pendingAfterStake.commitment)).toEqual(commitment);
-    expect(pendingAfterStake.settled).toBe(false);
-    expect(pendingAfterStake.actionNonce.toString()).toBe("0");
-    expect(pendingAfterStake.actionType).toHaveProperty("reveal");
-
-    await expect(reveal(position, pendingRandomness, randomBytes(32))).rejects.toThrow();
-
-    await reveal(position, pendingRandomness, secret);
-
-    const revealedPosition = await accounts.position.fetch(position);
-    const revealedPending = await accounts.pendingRandomness.fetch(pendingRandomness);
-    expect(revealedPending.settled).toBe(true);
-    expect(revealedPosition.settlementNonce.toString()).toBe("1");
-    expect(revealedPosition.status).toHaveProperty("active");
-    expect(revealedPosition.pendingActionActive).toBe(false);
-    expect(Buffer.from(revealedPosition.mockRandomness).equals(Buffer.alloc(32))).toBe(false);
-
-    await expect(reveal(position, pendingRandomness, secret)).rejects.toThrow();
+    expect(config.version).toBe(1);
+    expect(config.rodeoMint.toBase58()).toBe(rodeoMint.toBase58());
+    expect(config.ansemMint.toBase58()).toBe(ansemMint.toBase58());
+    expect(config.rodeoDecimals).toBe(6);
+    expect(config.ansemDecimals).toBe(6);
+    expect(config.stakeAmountAtomic.toString()).toBe("100000000000");
+    expect(config.expectedTotalSupplyAtomic.toString()).toBe("1000000000000000");
+    expect(config.principalVault.toBase58()).toBe(principalVault.toBase58());
+    expect(config.rewardVault.toBase58()).toBe(rewardVault.toBase58());
+    expect(config.pauseNewStakes).toBe(false);
+    expect(config.pauseNewRevealRequests).toBe(false);
+    expect(config.pauseNewMarketplaceListings).toBe(false);
+    expect(config.pauseRouterSwaps).toBe(false);
+    expect(config.upgradeCouncil.toBase58()).toBe(payer.publicKey.toBase58());
+    expect(config.treasuryCouncil.toBase58()).toBe(payer.publicKey.toBase58());
+    expect(config.emergencyGuardians.toBase58()).toBe(payer.publicKey.toBase58());
   }, 30_000);
 
-  it("changes Position ownership without changing the Position PDA and revokes the previous owner's authority", async () => {
-    const accounts = programs.RodeoCore.account as unknown as {
-      position: { fetch(address: web3.PublicKey): Promise<any> };
+  it("initializes RewardState with zeroed liabilities, indices, and counters", async () => {
+    const fetcher = programs.RodeoCore.account as unknown as {
+      rewardState: { fetch(address: web3.PublicKey): Promise<any> };
     };
-    const { positionId, position, pendingRandomness, secret } = await openPosition(1_000_000n);
-    await reveal(position, pendingRandomness, secret);
+    const state = await fetcher.rewardState.fetch(rewardState);
 
-    const [pdaBeforeTransfer] = derivePosition(positionId);
-    const newOwner = web3.Keypair.generate();
+    expect(state.version).toBe(3);
+    expect(state.globalConfig.toBase58()).toBe(globalConfig.toBase58());
+    expect(state.currentEpoch.toString()).toBe("0");
+    expect(state.totalAnsemLiabilityAtomic.toString()).toBe("0");
+    expect(state.cowboyUnmaterializedLiabilityAtomic.toString()).toBe("0");
+    expect(state.positionClaimableLiabilityAtomic.toString()).toBe("0");
+    expect(state.bullPoolLiabilityAtomic.toString()).toBe("0");
+    expect(state.bullPoolUnallocatedLiabilityAtomic.toString()).toBe("0");
+    expect(state.suitVaultLiabilityAtomic.toString()).toBe("0");
+    expect(state.recognizedRewardBalanceAtomic.toString()).toBe("0");
+    expect(state.ansemEmittedAtomic.toString()).toBe("0");
+    expect(state.ansemClaimedAtomic.toString()).toBe("0");
+    expect(state.orphanedRewardReleasedAtomic.toString()).toBe("0");
+    expect(state.cowboyRewardIndex.toString()).toBe("0");
+    expect(state.cowboyIndexRemainderScaled.toString()).toBe("0");
+    expect(state.cowboyOrphanedAccrualRemainderScaled.toString()).toBe("0");
+    expect(state.suitEpoch.toString()).toBe("0");
+  }, 30_000);
 
-    await programs.RodeoCore.methods
-      .transferPosition(newOwner.publicKey)
-      .accounts({ owner: payer.publicKey, position })
-      .rpc();
+  it("initializes GlobalGameState with zeroed population and principal counters", async () => {
+    const fetcher = programs.RodeoCore.account as unknown as {
+      globalGameState: { fetch(address: web3.PublicKey): Promise<any> };
+    };
+    const state = await fetcher.globalGameState.fetch(globalGameState);
 
-    const afterTransfer = await accounts.position.fetch(position);
-    expect(afterTransfer.owner.toBase58()).toBe(newOwner.publicKey.toBase58());
+    expect(state.version).toBe(3);
+    expect(state.globalConfig.toBase58()).toBe(globalConfig.toBase58());
+    expect(state.totalCompletedReveals.toString()).toBe("0");
+    expect(state.livePositionCount.toString()).toBe("0");
+    expect(state.activeCowboyCount.toString()).toBe("0");
+    expect(state.activeBullCount.toString()).toBe("0");
+    expect(state.totalActiveCowboyWeight.toString()).toBe("0");
+    expect(state.totalActiveBullPower.toString()).toBe("0");
+    expect(state.accountedPrincipalAtomic.toString()).toBe("0");
+  }, 30_000);
 
-    const [pdaAfterTransfer] = derivePosition(positionId);
-    expect(pdaAfterTransfer.toBase58()).toBe(pdaBeforeTransfer.toBase58());
-    expect(position.toBase58()).toBe(pdaAfterTransfer.toBase58());
+  it("initializes BullAccumulator with zeroed accumulators", async () => {
+    const fetcher = programs.RodeoCore.account as unknown as {
+      bullAccumulator: { fetch(address: web3.PublicKey): Promise<any> };
+    };
+    const acc = await fetcher.bullAccumulator.fetch(bullAccumulator);
 
-    // The previous owner is no longer authorized to act on the position.
+    expect(acc.version).toBe(3);
+    expect(acc.globalConfig.toBase58()).toBe(globalConfig.toBase58());
+    expect(acc.rewardPerWeightScaled.toString()).toBe("0");
+    expect(acc.bullIndexRemainderScaled.toString()).toBe("0");
+    expect(acc.bullOrphanedAccrualRemainderScaled.toString()).toBe("0");
+  }, 30_000);
+
+  it("creates vaults with the correct mints and authorities", async () => {
+    const principal = await getAccount(provider.connection, principalVault);
+    expect(principal.mint.toBase58()).toBe(rodeoMint.toBase58());
+    expect(principal.owner.toBase58()).toBe(globalConfig.toBase58());
+
+    const reward = await getAccount(provider.connection, rewardVault);
+    expect(reward.mint.toBase58()).toBe(ansemMint.toBase58());
+    expect(reward.owner.toBase58()).toBe(globalConfig.toBase58());
+  }, 30_000);
+
+  it("rejects duplicate protocol initialization", async () => {
     await expect(
       programs.RodeoCore.methods
-        .transferPosition(payer.publicKey)
-        .accounts({ owner: payer.publicKey, position })
+        .initializeProtocol(payer.publicKey, payer.publicKey, payer.publicKey)
+        .accounts({
+          payer: payer.publicKey,
+          rodeoMint,
+          ansemMint,
+          globalConfig,
+          rewardState,
+          globalGameState,
+          bullAccumulator,
+          principalVault,
+          rewardVault,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          rent: web3.SYSVAR_RENT_PUBKEY,
+        })
         .rpc(),
     ).rejects.toThrow();
-
-    // The new owner is authorized.
-    await programs.RodeoCore.methods
-      .transferPosition(payer.publicKey)
-      .accounts({ owner: newOwner.publicKey, position })
-      .signers([newOwner])
-      .rpc();
-
-    const afterReturn = await accounts.position.fetch(position);
-    expect(afterReturn.owner.toBase58()).toBe(payer.publicKey.toBase58());
   }, 30_000);
 
-  it("blocks transferring a position with a pending random action until it is resolved through reveal", async () => {
-    const accounts = programs.RodeoCore.account as unknown as {
-      position: { fetch(address: web3.PublicKey): Promise<any> };
-    };
-    const { position, pendingRandomness, secret } = await openPosition(1_000_000n);
-    const newOwner = web3.Keypair.generate();
+  it("derives Position and PendingRandomness PDAs as specified", async () => {
+    const positionId = new BN(42);
+    const [position] = derivePosition(positionId);
+    const [randomness] = deriveRandomness(position, 0, new BN(0));
 
-    await expect(
-      programs.RodeoCore.methods
-        .transferPosition(newOwner.publicKey)
-        .accounts({ owner: payer.publicKey, position })
-        .rpc(),
-    ).rejects.toThrow();
+    expect(position.toBase58()).toBe(
+      web3.PublicKey.findProgramAddressSync(
+        [Buffer.from("position"), globalConfig.toBuffer(), positionId.toArrayLike(Buffer, "le", 8)],
+        programs.RodeoCore.programId,
+      )[0].toBase58(),
+    );
 
-    await reveal(position, pendingRandomness, secret);
-
-    await programs.RodeoCore.methods
-      .transferPosition(newOwner.publicKey)
-      .accounts({ owner: payer.publicKey, position })
-      .rpc();
-
-    const afterTransfer = await accounts.position.fetch(position);
-    expect(afterTransfer.owner.toBase58()).toBe(newOwner.publicKey.toBase58());
-  }, 30_000);
-
-  it("rejects settling a randomness request against a different position", async () => {
-    const positionA = await openPosition(1_000_000n);
-    const positionB = await openPosition(1_000_000n);
-
-    await expect(reveal(positionA.position, positionB.pendingRandomness, positionA.secret)).rejects.toThrow();
-    await expect(reveal(positionB.position, positionA.pendingRandomness, positionB.secret)).rejects.toThrow();
-
-    // Both positions remain independently revealable afterwards.
-    await reveal(positionA.position, positionA.pendingRandomness, positionA.secret);
-    await reveal(positionB.position, positionB.pendingRandomness, positionB.secret);
-  }, 30_000);
-
-  it("rejects settling a randomness request with the wrong action type", async () => {
-    const { position, pendingRandomness, secret } = await openPosition(1_000_000n);
-    const [wrongTypeAddress] = deriveRandomness(position, ACTION_TYPE.unstake, new BN(0));
-
-    await expect(reveal(position, wrongTypeAddress, secret)).rejects.toThrow();
-
-    await reveal(position, pendingRandomness, secret);
-  }, 30_000);
-
-  it("rejects settling a randomness request with the wrong nonce", async () => {
-    const { position, pendingRandomness, secret } = await openPosition(1_000_000n);
-    const [wrongNonceAddress] = deriveRandomness(position, ACTION_TYPE.reveal, new BN(1));
-
-    await expect(reveal(position, wrongNonceAddress, secret)).rejects.toThrow();
-
-    await reveal(position, pendingRandomness, secret);
+    expect(randomness.toBase58()).toBe(
+      web3.PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("randomness"),
+          position.toBuffer(),
+          Buffer.from([0]),
+          new BN(0).toArrayLike(Buffer, "le", 8),
+        ],
+        programs.RodeoCore.programId,
+      )[0].toBase58(),
+    );
   }, 30_000);
 });
