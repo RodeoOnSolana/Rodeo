@@ -350,6 +350,8 @@ pub enum RodeoError {
     ActiveFreezeAuthority,
     #[msg("Rejection sampling exhausted without an accepted candidate")]
     RejectionSamplingExhausted,
+    #[msg("Invalid BPS value")]
+    InvalidBps,
     #[msg("Invalid mint account")]
     InvalidMint,
     #[msg("RODEO mint supply does not match the expected total supply")]
@@ -358,8 +360,6 @@ pub enum RodeoError {
     InvalidVault,
     #[msg("Invalid decimals or atomic conversion failed")]
     InvalidDecimals,
-    #[msg("Unauthorized initializer")]
-    UnauthorizedInitializer,
     #[msg("Principal must be greater than zero")]
     ZeroPrincipal,
     #[msg("Randomness has already been settled")]
@@ -421,6 +421,8 @@ pub enum RodeoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probability;
+    use crate::state;
     use constants::*;
 
     fn pubkey_from_u64(n: u64) -> Pubkey {
