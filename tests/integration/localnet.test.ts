@@ -8,6 +8,7 @@ import {
   createAssociatedTokenAccount,
   createMint,
   getAccount,
+  getMint,
   mintTo,
   setAuthority,
 } from "@solana/spl-token";
@@ -154,7 +155,7 @@ async function createRevokedMint(
   payer: web3.Keypair,
   decimals: number,
 ): Promise<web3.PublicKey> {
-  const mint = await createMint(connection, payer, payer.publicKey, null, decimals);
+  const mint = await createMint(connection, payer, payer.publicKey, payer.publicKey, decimals);
   await setAuthority(connection, payer, mint, payer, AuthorityType.MintTokens, null);
   await setAuthority(connection, payer, mint, payer, AuthorityType.FreezeAccount, null);
   return mint;
@@ -166,7 +167,10 @@ async function revokeMintAuthorities(
   mint: web3.PublicKey,
 ) {
   await setAuthority(connection, payer, mint, payer, AuthorityType.MintTokens, null);
-  await setAuthority(connection, payer, mint, payer, AuthorityType.FreezeAccount, null);
+  const freezeAuthority = (await getMint(connection, mint)).freezeAuthority;
+  if (freezeAuthority !== null) {
+    await setAuthority(connection, payer, mint, payer, AuthorityType.FreezeAccount, null);
+  }
 }
 
 describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
