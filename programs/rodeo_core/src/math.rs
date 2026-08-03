@@ -4,19 +4,23 @@ use crate::constants::*;
 use crate::RodeoError;
 
 pub fn checked_add_u64(a: u64, b: u64) -> Result<u64> {
-    a.checked_add(b).ok_or(error!(RodeoError::ArithmeticOverflow))
+    a.checked_add(b)
+        .ok_or(error!(RodeoError::ArithmeticOverflow))
 }
 
 pub fn checked_sub_u64(a: u64, b: u64) -> Result<u64> {
-    a.checked_sub(b).ok_or(error!(RodeoError::ArithmeticOverflow))
+    a.checked_sub(b)
+        .ok_or(error!(RodeoError::ArithmeticOverflow))
 }
 
 pub fn checked_mul_u64(a: u64, b: u64) -> Result<u64> {
-    a.checked_mul(b).ok_or(error!(RodeoError::ArithmeticOverflow))
+    a.checked_mul(b)
+        .ok_or(error!(RodeoError::ArithmeticOverflow))
 }
 
 pub fn checked_mul_u128(a: u128, b: u128) -> Result<u128> {
-    a.checked_mul(b).ok_or(error!(RodeoError::ArithmeticOverflow))
+    a.checked_mul(b)
+        .ok_or(error!(RodeoError::ArithmeticOverflow))
 }
 
 pub fn floor_mul_div_u128(a: u128, b: u128, c: u128) -> Result<u128> {

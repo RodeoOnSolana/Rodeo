@@ -28,7 +28,8 @@ pub mod rodeo_core {
             .checked_pow(decimals as u32)
             .ok_or(RodeoError::InvalidDecimals)?;
 
-        let stake_amount_atomic = math::checked_mul_u64(STAKE_AMOUNT_WHOLE_RODEO, atomic_multiplier)?;
+        let stake_amount_atomic =
+            math::checked_mul_u64(STAKE_AMOUNT_WHOLE_RODEO, atomic_multiplier)?;
         let expected_total_supply_atomic =
             math::checked_mul_u64(RODEO_TOTAL_SUPPLY_WHOLE, atomic_multiplier)?;
 
@@ -355,7 +356,10 @@ mod tests {
 
     #[test]
     fn whole_to_atomic_matches_typescript() {
-        assert_eq!(math::whole_to_atomic(100_000, 6).unwrap(), 100_000_000_000u64);
+        assert_eq!(
+            math::whole_to_atomic(100_000, 6).unwrap(),
+            100_000_000_000u64
+        );
         assert_eq!(
             math::whole_to_atomic(1_000_000_000, 6).unwrap(),
             1_000_000_000_000_000u64
@@ -387,14 +391,9 @@ mod tests {
 
     #[test]
     fn cowboy_index_increment_with_carry() {
-        let (new_index, new_remainder) = math::increment_cowboy_index(
-            0,
-            0,
-            2_000_000,
-            20_000,
-            COWBOY_REWARD_INDEX_SCALE,
-        )
-        .unwrap();
+        let (new_index, new_remainder) =
+            math::increment_cowboy_index(0, 0, 2_000_000, 20_000, COWBOY_REWARD_INDEX_SCALE)
+                .unwrap();
         let expected_numerator = 2_000_000u128 * COWBOY_REWARD_INDEX_SCALE;
         assert_eq!(new_index, expected_numerator / 20_000);
         assert_eq!(new_remainder, expected_numerator % 20_000);

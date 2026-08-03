@@ -12,14 +12,7 @@ pub const ROLE_TABLE: ProbabilityTable = ProbabilityTable {
 pub const COWBOY_RANK_TABLE: ProbabilityTable = ProbabilityTable {
     denominator: 9_000_000,
     weights: &[
-        4_047_750,
-        2_248_750,
-        1_169_350,
-        719_600,
-        449_750,
-        269_850,
-        89_950,
-        5_000,
+        4_047_750, 2_248_750, 1_169_350, 719_600, 449_750, 269_850, 89_950, 5_000,
     ],
 };
 
