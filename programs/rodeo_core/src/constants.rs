@@ -1,5 +1,3 @@
-use anchor_lang::prelude::*;
-
 pub const RODEO_DECIMALS_MAX: u8 = 9;
 pub const RODEO_TOTAL_SUPPLY_WHOLE: u64 = 1_000_000_000;
 pub const STAKE_AMOUNT_WHOLE_RODEO: u64 = 100_000;

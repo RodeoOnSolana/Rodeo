@@ -139,7 +139,7 @@ pub struct InitializeProtocol<'info> {
     pub ansem_mint: Account<'info, Mint>,
 
     #[account(
-        init_if_needed,
+        init,
         payer = payer,
         space = 8 + GlobalConfig::INIT_SPACE,
         seeds = [b"global-config"],
@@ -148,7 +148,7 @@ pub struct InitializeProtocol<'info> {
     pub global_config: Account<'info, GlobalConfig>,
 
     #[account(
-        init_if_needed,
+        init,
         payer = payer,
         space = 8 + RewardState::INIT_SPACE,
         seeds = [b"reward-state", global_config.key().as_ref()],
@@ -157,7 +157,7 @@ pub struct InitializeProtocol<'info> {
     pub reward_state: Account<'info, RewardState>,
 
     #[account(
-        init_if_needed,
+        init,
         payer = payer,
         space = 8 + GlobalGameState::INIT_SPACE,
         seeds = [b"global-game-state", global_config.key().as_ref()],
@@ -166,7 +166,7 @@ pub struct InitializeProtocol<'info> {
     pub global_game_state: Account<'info, GlobalGameState>,
 
     #[account(
-        init_if_needed,
+        init,
         payer = payer,
         space = 8 + BullAccumulator::INIT_SPACE,
         seeds = [b"bull-accumulator", global_config.key().as_ref()],
@@ -175,7 +175,7 @@ pub struct InitializeProtocol<'info> {
     pub bull_accumulator: Account<'info, BullAccumulator>,
 
     #[account(
-        init_if_needed,
+        init,
         payer = payer,
         seeds = [b"principal-vault"],
         bump,
@@ -185,7 +185,7 @@ pub struct InitializeProtocol<'info> {
     pub principal_vault: Account<'info, TokenAccount>,
 
     #[account(
-        init_if_needed,
+        init,
         payer = payer,
         seeds = [b"reward-vault"],
         bump,
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn cowboy_rank_mapping_boundaries() {
         let mut buf = [0u8; 32];
-        let check = |draw: u64, expected: state::CowboyKind| {
+        let mut check = |draw: u64, expected: state::CowboyKind| {
             buf[0..8].copy_from_slice(&draw.to_le_bytes());
             assert_eq!(probability::map_cowboy_kind(buf), expected);
         };
