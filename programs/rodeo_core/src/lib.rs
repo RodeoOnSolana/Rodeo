@@ -217,7 +217,7 @@ pub struct InitializeProtocol<'info> {
 
     /// The BPF Upgradeable Loader program-data account for this program.
     #[account(
-        constraint = program_data.key() == anchor_lang::solana_program::bpf_loader_upgradeable::programdata_address(&crate::ID) @ RodeoError::InvalidProgramData,
+        constraint = program_data.key() == anchor_lang::solana_program::bpf_loader_upgradeable::get_program_data_address(&crate::ID) @ RodeoError::InvalidProgramData,
         constraint = program_data.owner == &anchor_lang::solana_program::bpf_loader_upgradeable::id() @ RodeoError::InvalidProgramData,
     )]
     pub program_data: AccountInfo<'info>,
@@ -606,7 +606,7 @@ mod tests {
     #[test]
     fn outcome_index_draw_validation() {
         assert!(probability::ROLE_TABLE
-            .outcome_index_for_draw(ROLE_TABLE.denominator)
+            .outcome_index_for_draw(probability::ROLE_TABLE.denominator)
             .is_err());
         assert!(probability::ROLE_TABLE.outcome_index_for_draw(0).is_ok());
     }
