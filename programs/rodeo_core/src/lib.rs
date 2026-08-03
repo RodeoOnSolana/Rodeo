@@ -208,14 +208,16 @@ pub struct InitializeProtocol<'info> {
     /// The upgrade authority of the deployed rodeo_core program.
     pub initializer: Signer<'info>,
 
-    /// The deployed rodeo_core program account.
+    /// CHECK: The deployed rodeo_core program account is verified against the
+    /// hardcoded program ID and confirmed executable.
     #[account(
         constraint = program.key() == crate::ID @ RodeoError::InvalidProgramAccount,
         constraint = program.executable @ RodeoError::InvalidProgramAccount,
     )]
     pub program: AccountInfo<'info>,
 
-    /// The BPF Upgradeable Loader program-data account for this program.
+    /// CHECK: The BPF Upgradeable Loader program-data account is verified to
+    /// be the program-data PDA of this program and owned by the upgrade loader.
     #[account(
         constraint = program_data.key() == anchor_lang::solana_program::bpf_loader_upgradeable::get_program_data_address(&crate::ID) @ RodeoError::InvalidProgramData,
         constraint = program_data.owner == &anchor_lang::solana_program::bpf_loader_upgradeable::id() @ RodeoError::InvalidProgramData,
