@@ -307,7 +307,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     expect(typeNames.has("PauseFlag")).toBe(true);
     expect(typeNames.has("OwnershipChangeReason")).toBe(true);
 
-    expect(idl.instructions?.some((ix: { name: string }) => ix.name === "initializeProtocol")).toBe(
+    expect(idl.instructions?.some((ix: { name: string }) => ix.name === "initialize_protocol")).toBe(
       true,
     );
     expect(idl.events?.some((event: { name: string }) => event.name === "ProtocolInitialized")).toBe(
