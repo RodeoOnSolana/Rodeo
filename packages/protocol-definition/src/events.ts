@@ -5,6 +5,26 @@ export interface ProtocolEventEnvelope<Name extends string, Data> {
   readonly data: Data;
 }
 
+export type ProtocolInitializedEvent = {
+  readonly name: "protocolInitialized";
+  readonly globalConfig: string;
+  readonly rewardState: string;
+  readonly globalGameState: string;
+  readonly bullAccumulator: string;
+  readonly rodeoMint: string;
+  readonly ansemMint: string;
+  readonly rodeoDecimals: number;
+  readonly ansemDecimals: number;
+  readonly stakeAmountAtomic: bigint;
+  readonly expectedTotalSupplyAtomic: bigint;
+  readonly launchTimestamp: bigint;
+  readonly principalVault: string;
+  readonly rewardVault: string;
+  readonly upgradeCouncil: string;
+  readonly treasuryCouncil: string;
+  readonly emergencyGuardians: string;
+};
+
 export type PositionStakedEvent = ProtocolEventEnvelope<"positionStaked", {
   readonly position: string;
   readonly owner: string;
@@ -120,6 +140,7 @@ export type OrphanedRewardReleasedEvent = ProtocolEventEnvelope<"orphanedRewardR
 }>;
 
 export type RodeoProtocolEvent =
+  | ProtocolInitializedEvent
   | PositionStakedEvent
   | MockRandomnessRevealedEvent
   | PositionRevealedEvent

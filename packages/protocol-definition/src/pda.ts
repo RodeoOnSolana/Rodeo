@@ -1,4 +1,4 @@
-// Mirrors the PDA seed prefixes declared in programs/rodeo_core/src/lib.rs.
+// Mirrors the PDA seed prefixes declared in programs/rodeo_core/src/constants.rs.
 // Position identity is derived only from `globalConfig` and `positionId`, so
 // ownership changes (marketplace sale, gift, mint theft) never move the
 // Position account. Randomness requests are additionally scoped by an
@@ -6,9 +6,13 @@
 // settle the exact position, action, and nonce it was opened for.
 export const PDA_SEEDS = {
   globalConfig: "global-config",
+  rewardState: "reward-state",
+  globalGameState: "global-game-state",
+  bullAccumulator: "bull-accumulator",
   principalVault: "principal-vault",
   rewardVault: "reward-vault",
   position: "position",
+  claimCooldown: "claim-cooldown",
   randomness: "randomness",
 } as const;
 

@@ -1,7 +1,7 @@
 [package]
 name = "rodeo_core"
 version = "0.1.0"
-description = "Rodeo Phase 0 core accounts and local-only mock randomness"
+description = "Rodeo Phase 2A core foundation: accounts, constants, probability, and initialization"
 edition = "2021"
 rust-version.workspace = true
 

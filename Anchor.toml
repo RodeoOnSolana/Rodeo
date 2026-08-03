@@ -15,5 +15,8 @@ rodeo_router = "CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD"
 cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
+[test]
+upgradeable = true
+
 [scripts]
 test = "pnpm --filter @rodeo/integration test"
