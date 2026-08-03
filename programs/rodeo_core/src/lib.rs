@@ -25,26 +25,19 @@ pub mod rodeo_core {
         emergency_guardians: Pubkey,
     ) -> Result<()> {
         let program_data = ctx.accounts.program_data.try_borrow_data()?;
+        let program_data_state = anchor_lang::solana_program::program_utils::limited_deserialize::<
+            anchor_lang::solana_program::bpf_loader_upgradeable::UpgradeableLoaderState,
+        >(&program_data, program_data.len() as u64)
+        .map_err(|_| error!(RodeoError::InvalidProgramData))?;
+        let upgrade_authority_address = match program_data_state {
+            anchor_lang::solana_program::bpf_loader_upgradeable::UpgradeableLoaderState::ProgramData {
+                upgrade_authority_address,
+                ..
+            } => upgrade_authority_address,
+            _ => return err!(RodeoError::InvalidProgramData),
+        };
         require!(
-            program_data.len() >= 4 + 8 + 1 + 32,
-            RodeoError::InvalidProgramData
-        );
-        // BPF Upgradeable Loader serializes the ProgramData variant index as a u32.
-        require!(
-            program_data[0..4] == [3, 0, 0, 0],
-            RodeoError::InvalidProgramData
-        );
-        let authority_option_tag = program_data[12];
-        require!(
-            authority_option_tag == 1,
-            RodeoError::UnauthorizedInitializer
-        );
-        let mut upgrade_authority_bytes = [0u8; 32];
-        upgrade_authority_bytes.copy_from_slice(&program_data[13..45]);
-        let upgrade_authority = Pubkey::new_from_array(upgrade_authority_bytes);
-        require_eq!(
-            upgrade_authority,
-            ctx.accounts.initializer.key(),
+            upgrade_authority_address == Some(ctx.accounts.initializer.key()),
             RodeoError::UnauthorizedInitializer
         );
 
