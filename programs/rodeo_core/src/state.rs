@@ -190,3 +190,11 @@ pub enum OwnershipChangeReason {
     Gift,
     MintTheft,
 }
+
+/// Placeholder account so the `OwnershipChangeReason` enum is emitted into
+/// the generated IDL before it is referenced by a later instruction.
+#[account]
+#[derive(InitSpace)]
+pub struct IdlTypeHolder {
+    pub ownership_change_reason: OwnershipChangeReason,
+}

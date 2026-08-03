@@ -203,6 +203,7 @@ pub struct EnsureIdlAccounts<'info> {
     pub position: Account<'info, Position>,
     pub wallet_claim_cooldown: Account<'info, WalletClaimCooldown>,
     pub pending_randomness: Account<'info, PendingRandomness>,
+    pub idl_type_holder: Account<'info, IdlTypeHolder>,
 }
 
 #[derive(Accounts)]
