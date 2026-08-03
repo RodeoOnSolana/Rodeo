@@ -323,8 +323,8 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const sdkPath = resolve(root, "packages/sdk/src/generated/rodeo_core.ts");
     const sdkSource = readFileSync(sdkPath, "utf8");
     expect(sdkSource).toContain("rodeoCoreIdl");
-    expect(sdkSource).toContain("initializeProtocol");
-    expect(sdkSource).not.toContain("ensureIdlAccounts");
+    expect(sdkSource).toContain("initialize_protocol");
+    expect(sdkSource).not.toContain("ensure_idl_accounts");
   }, 30_000);
 
   it("only allows the program upgrade authority to initialize", async () => {
