@@ -282,34 +282,40 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     }
   }, 30_000);
 
-  it("includes every Phase 2A account and enum in the generated IDL and SDK", async () => {
+  it("exports only the real Phase 2A instruction and referenced ABI entries", async () => {
     const idl = loadIdl("rodeo_core");
+    const instructionNames = idl.instructions?.map((ix: { name: string }) => ix.name) ?? [];
     const accountNames = new Set(idl.accounts?.map((account: { name: string }) => account.name));
-    const typeNames = new Set(
-      idl.types
-        ?.filter((type: { type?: { kind?: string } }) => type.type?.kind === "enum")
-        .map((type: { name: string }) => type.name),
-    );
 
-    expect(accountNames.has("GlobalConfig")).toBe(true);
-    expect(accountNames.has("RewardState")).toBe(true);
-    expect(accountNames.has("GlobalGameState")).toBe(true);
-    expect(accountNames.has("BullAccumulator")).toBe(true);
-    expect(accountNames.has("Position")).toBe(true);
-    expect(accountNames.has("WalletClaimCooldown")).toBe(true);
-    expect(accountNames.has("PendingRandomness")).toBe(true);
+    expect(instructionNames).toEqual(["initialize_protocol"]);
+    expect(instructionNames.filter((name: string) => name === "initialize_protocol").length).toBe(1);
+    expect(instructionNames).not.toContain("ensure_idl_accounts");
 
-    expect(typeNames.has("Role")).toBe(true);
-    expect(typeNames.has("PositionStatus")).toBe(true);
-    expect(typeNames.has("ActionType")).toBe(true);
-    expect(typeNames.has("Suit")).toBe(true);
-    expect(typeNames.has("CowboyKind")).toBe(true);
-    expect(typeNames.has("PauseFlag")).toBe(true);
-    expect(typeNames.has("OwnershipChangeReason")).toBe(true);
+    const outOfScopeInstructions = [
+      "stake",
+      "reveal",
+      "claim",
+      "close_epoch",
+      "unstake",
+      "transfer",
+      "list",
+      "buy",
+      "sell",
+      "router",
+      "provide_randomness",
+      "settle_randomness",
+    ];
+    for (const name of outOfScopeInstructions) {
+      expect(instructionNames).not.toContain(name);
+    }
 
-    expect(idl.instructions?.some((ix: { name: string }) => ix.name === "initialize_protocol")).toBe(
-      true,
-    );
+    const expectedAccounts = ["GlobalConfig", "RewardState", "GlobalGameState", "BullAccumulator"];
+    expect([...accountNames].sort()).toEqual(expectedAccounts.sort());
+    expect(accountNames).not.toContain("Position");
+    expect(accountNames).not.toContain("WalletClaimCooldown");
+    expect(accountNames).not.toContain("PendingRandomness");
+    expect(accountNames).not.toContain("IdlTypeHolder");
+
     expect(idl.events?.some((event: { name: string }) => event.name === "ProtocolInitialized")).toBe(
       true,
     );
@@ -317,6 +323,8 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const sdkPath = resolve(root, "packages/sdk/src/generated/rodeo_core.ts");
     const sdkSource = readFileSync(sdkPath, "utf8");
     expect(sdkSource).toContain("rodeoCoreIdl");
+    expect(sdkSource).toContain("initializeProtocol");
+    expect(sdkSource).not.toContain("ensureIdlAccounts");
   }, 30_000);
 
   it("only allows the program upgrade authority to initialize", async () => {

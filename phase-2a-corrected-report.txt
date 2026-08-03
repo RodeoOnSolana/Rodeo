@@ -1,0 +1,65 @@
+Rodeo Phase 2A Corrected Review Report
+=======================================
+
+1. Branch & Commit
+------------------
+Branch: phase-2/core-foundation
+Head commit: 0dd1b5c32d17a45ab7f285fcf4e38fe3af1f1fa7
+"fix: match IDL instruction name assertion to Anchor snake_case output"
+
+2. CI Verification
+------------------
+GitHub Actions run: https://github.com/RodeoOnSolana/Rodeo/actions/runs/30789121398
+Conclusion: success
+Workflow: Phase 0 verification
+All required checks passed, including TypeScript build/typecheck/tests,
+Rust formatting/checks, Anchor build, IDL/SDK generation, program ID
+validation, and Anchor localnet integration tests.
+
+3. Program IDs
+--------------
+rodeo_core:   EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z
+rodeo_market: 9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n
+rodeo_router: CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD
+
+4. Generated Artifacts Included
+---------------------------------
+- target/idl/rodeo_core.json
+- target/idl/rodeo_market.json
+- target/idl/rodeo_router.json
+- packages/sdk/src/generated/index.ts
+- packages/sdk/src/generated/rodeo_core.ts
+- packages/sdk/src/generated/rodeo_market.ts
+- packages/sdk/src/generated/rodeo_router.ts
+
+These files were downloaded from the passing GitHub Actions artifact
+"phase-0-generated-artifacts" produced by run 30789121398.
+
+5. Summary of Corrections Applied
+---------------------------------
+- Anchor 0.31 compatibility: added safety comments for AccountInfo fields
+  and removed doc comments from an Anchor constant that caused IDL
+  generation errors.
+- Localnet test mints: create test mints with freeze authority so it can
+  be revoked, resolving custom program error 0x10.
+- Program initializer validation: robustly parse the BPF Upgradeable
+  Loader program-data account and compare its upgrade authority to the
+  initializer.
+- Upgradeable test deploys: enabled upgradeable = true in Anchor.toml
+  for localnet tests.
+- IDL completeness: added placeholder accounts/instructions so that
+  Position, WalletClaimCooldown, PendingRandomness, and the
+  OwnershipChangeReason / PauseFlag enums are emitted into the IDL and
+  generated SDK.
+- Test assertion fix: aligned the IDL instruction-name check with
+  Anchor's snake_case output ("initialize_protocol").
+
+6. Notes
+--------
+The generated artifact directory is now ignored in .gitignore
+(generated-artifacts/) to prevent accidental commits of CI outputs.
+
+7. Archive SHA-256
+------------------
+rodeo-phase-2a-corrected-review.zip
+a6aaeacb9dc6e820366b0dbcd7e57f95dbe3dafe93c685bf6497c582831dff94

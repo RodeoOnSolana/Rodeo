@@ -189,21 +189,6 @@ pub mod rodeo_core {
 
         Ok(())
     }
-
-    /// Placeholder instruction so Anchor includes the remaining Phase-2A account
-    /// definitions in the generated IDL even though they are not used by the
-    /// initialization flow.
-    pub fn ensure_idl_accounts(_ctx: Context<EnsureIdlAccounts>) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Accounts)]
-pub struct EnsureIdlAccounts<'info> {
-    pub position: Account<'info, Position>,
-    pub wallet_claim_cooldown: Account<'info, WalletClaimCooldown>,
-    pub pending_randomness: Account<'info, PendingRandomness>,
-    pub idl_type_holder: Account<'info, IdlTypeHolder>,
 }
 
 #[derive(Accounts)]
@@ -339,8 +324,6 @@ pub enum RodeoError {
     ArithmeticUnderflow,
     #[msg("Division by zero")]
     DivisionByZero,
-    #[msg("Protocol has already been initialized")]
-    AlreadyInitialized,
     #[msg("Invalid program account")]
     InvalidProgramAccount,
     #[msg("Invalid program data account")]

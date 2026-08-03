@@ -190,12 +190,3 @@ pub enum OwnershipChangeReason {
     Gift,
     MintTheft,
 }
-
-/// Placeholder account so `OwnershipChangeReason` and `PauseFlag` are emitted
-/// into the generated IDL before they are referenced by later instructions.
-#[account]
-#[derive(InitSpace)]
-pub struct IdlTypeHolder {
-    pub ownership_change_reason: OwnershipChangeReason,
-    pub pause_flag: PauseFlag,
-}
