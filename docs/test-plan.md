@@ -127,6 +127,14 @@ Every state transition, economic rule, rounding direction, and security invarian
 - [ ] Unstake moves the closing position's per-position accrual remainder into the matching global orphaned-remainder field (`cowboy_orphaned_accrual_remainder_scaled` or `bull_orphaned_accrual_remainder_scaled`) before the account closes.
 - [ ] Reveal-timeout refund decreases `accounted_principal_atomic` by `principal_amount` and decrements `live_position_count`.
 
+### Orphaned remainder materialization
+
+- [ ] Cowboy-orphaned accrual remainder reaching `COWBOY_REWARD_INDEX_SCALE` materializes by reducing `cowboy_unmaterialized_liability_atomic` and `total_ansem_liability_atomic` by the whole-atomic amount; no Bull-pool liability is created and `recognized_reward_balance_atomic` is unchanged.
+- [ ] Bull-orphaned accrual remainder reaching `REWARD_PER_WEIGHT_SCALE` materializes by reducing `bull_pool_liability_atomic` and `total_ansem_liability_atomic` by the whole-atomic amount; no suit-vault liability is created and `recognized_reward_balance_atomic` is unchanged.
+- [ ] Materialization of either source increments `orphaned_reward_released_atomic` by `whole_amount` and emits `OrphanedRewardReleased` with `reward_source`, `amount_atomic`, `remaining_remainder_scaled`, and `total_ansem_liability_atomic_after`.
+- [ ] Materialization fails with an underflow error when the matching liability bucket is smaller than `whole_amount`.
+- [ ] Released orphaned ANSEM becomes free balance that may fund future epochs.
+
 ### Mint theft
 
 - [ ] Theft activates only after 50 reveals and 3 eligible Bulls.

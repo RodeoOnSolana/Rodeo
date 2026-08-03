@@ -120,6 +120,7 @@ export interface SimulationState {
   bullRewardPerWeightScaled: bigint;
   bullIndexRemainderScaled: bigint;
   bullOrphanedAccrualRemainderScaled: bigint;
+  orphanedRewardReleasedAtomic: bigint;
   suitEpoch: bigint;
   // Game counters
   totalCompletedReveals: bigint;
@@ -226,6 +227,7 @@ export class EconomicSimulator {
       bullRewardPerWeightScaled: 0n,
       bullIndexRemainderScaled: 0n,
       bullOrphanedAccrualRemainderScaled: 0n,
+      orphanedRewardReleasedAtomic: 0n,
       suitEpoch: 0n,
       totalCompletedReveals: 0n,
       livePositionCount: 0n,
@@ -807,25 +809,27 @@ export class EconomicSimulator {
     const cowboyWhole = this.state.cowboyOrphanedAccrualRemainderScaled / cowboyScale;
     if (cowboyWhole > 0n) {
       if (cowboyWhole > this.state.cowboyUnmaterializedLiabilityAtomic) {
-        throw new Error("Cowboy orphaned conversion exceeds unmaterialized liability");
+        throw new Error("Cowboy orphaned conversion would underflow unmaterialized liability");
       }
       this.state.cowboyUnmaterializedLiabilityAtomic = checkedSub(
         this.state.cowboyUnmaterializedLiabilityAtomic,
         cowboyWhole
       );
+      this.state.totalAnsemLiabilityAtomic = checkedSub(this.state.totalAnsemLiabilityAtomic, cowboyWhole);
       this.state.cowboyOrphanedAccrualRemainderScaled -= cowboyWhole * cowboyScale;
-      this.distributeToBullPool(cowboyWhole);
+      this.state.orphanedRewardReleasedAtomic = checkedAdd(this.state.orphanedRewardReleasedAtomic, cowboyWhole);
     }
 
     const bullScale = REWARD_PER_WEIGHT_SCALE;
     const bullWhole = this.state.bullOrphanedAccrualRemainderScaled / bullScale;
     if (bullWhole > 0n) {
       if (bullWhole > this.state.bullPoolLiabilityAtomic) {
-        throw new Error("Bull orphaned conversion exceeds bull pool liability");
+        throw new Error("Bull orphaned conversion would underflow bull pool liability");
       }
       this.state.bullPoolLiabilityAtomic = checkedSub(this.state.bullPoolLiabilityAtomic, bullWhole);
+      this.state.totalAnsemLiabilityAtomic = checkedSub(this.state.totalAnsemLiabilityAtomic, bullWhole);
       this.state.bullOrphanedAccrualRemainderScaled -= bullWhole * bullScale;
-      this.state.suitVaultLiabilityAtomic = checkedAdd(this.state.suitVaultLiabilityAtomic, bullWhole);
+      this.state.orphanedRewardReleasedAtomic = checkedAdd(this.state.orphanedRewardReleasedAtomic, bullWhole);
     }
   }
 

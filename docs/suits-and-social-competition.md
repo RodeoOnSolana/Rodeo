@@ -136,7 +136,7 @@ The social oracle is a multisignature authority that attests competition results
 - publish a complete result file off-chain;
 - include the Merkle root and content hash of the result file in the on-chain attestation;
 - require a threshold of signer signatures;
-- emit a `SocialResultAttested` event.
+- emit a `SuitCompetitionResultAttested` event.
 
 The oracle does not custody tokens. It only authorizes the on-chain distribution of the already-allocated suit vault.
 

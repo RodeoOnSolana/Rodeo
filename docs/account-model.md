@@ -20,10 +20,12 @@ All program addresses are deterministic PDAs. Seed arrays use raw byte literals 
 | `BullRegistryNode` | `[b"bull-node", registry.key().as_ref(), &node_id.to_le_bytes()]` | Pages of the two-level sum tree. |
 | `PendingRandomness` | `[b"randomness", position.key().as_ref(), &[action_type as u8], &action_nonce.to_le_bytes()]` | One per outstanding randomness action. |
 | `PendingBatch` (per source mint) | `[b"pending-batch", global_config.key().as_ref(), source_mint.key().as_ref()]` | Accumulated source-token revenue awaiting routing. |
-| `SocialResult` (per suit epoch) | `[b"social-result", global_config.key().as_ref(), &suit_epoch.to_le_bytes()]` | Attested suit-competition result. |
+| `SocialResult` (per competition epoch) | `[b"social-result", global_config.key().as_ref(), &competition_epoch.to_le_bytes()]` | Attested suit-competition result account. |
 | `SuitClaimReceipt` | `[b"suit-claim", social_result.key().as_ref(), &leaf_nonce.to_le_bytes()]` | Prevents replay of a suit-competition Merkle leaf claim. |
 
 ## Account schemas
+
+`SocialResult` and `SuitClaimReceipt` are protocol account/type schemas with deterministic PDAs; they are not emitted-event payloads. The corresponding emitted events are `SuitCompetitionResultAttested` and `SuitRewardClaimed`.
 
 ### `GlobalConfig`
 
@@ -77,6 +79,7 @@ pub struct RewardState {
     // ANSEM flows
     pub ansem_emitted_atomic: u64,
     pub ansem_claimed_atomic: u64,
+    pub orphaned_reward_released_atomic: u64, // cumulative ANSEM released by orphaned-remainder materialization; transparency counter (event-derived)
     // Scaled global accumulators. RewardState is the sole owner of the Cowboy production index and its rounding carry.
     pub cowboy_reward_index: u128,                    // scaled by COWBOY_REWARD_INDEX_SCALE
     pub cowboy_index_remainder_scaled: u128,          // exact-rounding carry for the Cowboy index, scaled by COWBOY_REWARD_INDEX_SCALE
@@ -90,7 +93,7 @@ pub struct RewardState {
 
 `unrecognized_reward_surplus_atomic` is not a stored field. It is always computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`, so it can never drift from the actual vault balance.
 
-`cowboy_orphaned_accrual_remainder_scaled` collects the Cowboy sub-atomic carry (`Position.cowboy_accrual_remainder_scaled`) left behind when a position closes through unstake, so no dust is silently dropped. When this field reaches `COWBOY_REWARD_INDEX_SCALE`, the whole-atomic portion is converted, `cowboy_unmaterialized_liability_atomic` is reduced by that amount, the amount is routed to the Bull pool under the same active/unallocated rule as other Bull-pool contributions, and the fractional remainder is retained. See [economic-model.md](./economic-model.md) for the full rule.
+`cowboy_orphaned_accrual_remainder_scaled` collects the Cowboy sub-atomic carry (`Position.cowboy_accrual_remainder_scaled`) left behind when a position closes through unstake, so no dust is silently dropped. When this field reaches `COWBOY_REWARD_INDEX_SCALE`, the whole-atomic portion is materialized: `cowboy_unmaterialized_liability_atomic` and `total_ansem_liability_atomic` are reduced by that amount, the released ANSEM becomes free balance that may fund future epochs, and the fractional remainder is retained. `recognized_reward_balance_atomic` is unchanged, no ANSEM token transfer occurs, and no Bull-pool or suit-vault liability is created. The cumulative `orphaned_reward_released_atomic` counter is increased by the released amount and an `OrphanedRewardReleased` event is emitted. See [economic-model.md](./economic-model.md) for the full rule.
 
 ### Exact accumulator rounding
 
@@ -220,7 +223,7 @@ pub struct BullAccumulator {
 
 `BullAccumulator` is the sole owner of `reward_per_weight_scaled` and `bull_index_remainder_scaled`. It does not store `cowboy_reward_index`; that field lives only in `RewardState`.
 
-`bull_orphaned_accrual_remainder_scaled` collects the Bull sub-atomic carry (`Position.bull_accrual_remainder_scaled`) left behind when a position closes through unstake. When this field reaches `REWARD_PER_WEIGHT_SCALE`, the whole-atomic portion is converted, `bull_pool_liability_atomic` (or `bull_pool_unallocated_liability_atomic` if no Bull is active) is reduced by that amount, the amount is routed to the suit-competition vault, and the fractional remainder is retained. See [economic-model.md](./economic-model.md) for the full rule.
+`bull_orphaned_accrual_remainder_scaled` collects the Bull sub-atomic carry (`Position.bull_accrual_remainder_scaled`) left behind when a position closes through unstake. When this field reaches `REWARD_PER_WEIGHT_SCALE`, the whole-atomic portion is materialized: `bull_pool_liability_atomic` and `total_ansem_liability_atomic` are reduced by that amount, the released ANSEM becomes free balance that may fund future epochs, and the fractional remainder is retained. `recognized_reward_balance_atomic` is unchanged, no ANSEM token transfer occurs, and no Bull-pool or suit-vault liability is created. The cumulative `orphaned_reward_released_atomic` counter is increased by the released amount and an `OrphanedRewardReleased` event is emitted. See [economic-model.md](./economic-model.md) for the full rule.
 
 ### `BullRegistry` — design proposal
 
@@ -349,7 +352,7 @@ Current account versions (from `packages/protocol-definition/src/accounts.ts`):
 | Account | Version | Reason |
 | --- | --- | --- |
 | globalConfig | 1 | Initial definition. |
-| rewardState | 3 | v2 added `last_closed_epoch_timestamp` (sole owner) and `cowboy_index_remainder_scaled`; removed `unrecognized_reward_surplus_atomic` (now computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`). v3 (1.3.2) added `cowboy_orphaned_accrual_remainder_scaled`. |
+| rewardState | 3 | v2 added `last_closed_epoch_timestamp` (sole owner) and `cowboy_index_remainder_scaled`; removed `unrecognized_reward_surplus_atomic` (now computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`). v3 (1.3.2) added `cowboy_orphaned_accrual_remainder_scaled`; v1.3.3 adds `orphaned_reward_released_atomic` as a cumulative transparency counter. |
 | position | 3 | Added `bull_tier`, `cowboy_accrual_remainder_scaled`, `bull_accrual_remainder_scaled`; removed `rank_or_tier` sentinel. |
 | globalGameState | 3 | Removed `launch_timestamp`, `current_epoch`, `last_closed_epoch_timestamp` (now sole-owned by `GlobalConfig`/`RewardState`); account holds only population, power, and accounted-principal counters. |
 | bullAccumulator | 3 | v2 removed `cowboy_reward_index` (sole-owned by `RewardState`); added `bull_index_remainder_scaled` exact-rounding carry. v3 (1.3.2) added `bull_orphaned_accrual_remainder_scaled`. |

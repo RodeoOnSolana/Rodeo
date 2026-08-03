@@ -614,4 +614,66 @@ describe("Protocol v1.3 simulator invariants", () => {
     simulator.apply({ type: "settleUnstake", settlementId: "u2", positionId: "p1", fate: { ansemToBullPool: false } });
     expect(simulator.state.accountedPrincipalAtomic).toBe(0n);
   });
+
+  it("materializes Cowboy orphaned remainder by reducing liability, not by routing to Bulls", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.state.rewardVaultAnsemAtomic = 1_000n;
+    simulator.state.recognizedRewardBalanceAtomic = 1_000n;
+    simulator.state.totalAnsemLiabilityAtomic = 100n;
+    simulator.state.cowboyUnmaterializedLiabilityAtomic = 100n;
+    simulator.state.cowboyOrphanedAccrualRemainderScaled = 2n * COWBOY_REWARD_INDEX_SCALE + 500n;
+    const beforeFree = simulator.state.recognizedRewardBalanceAtomic - simulator.state.totalAnsemLiabilityAtomic;
+    const beforeBull = simulator.state.bullPoolLiabilityAtomic;
+    const beforeSuit = simulator.state.suitVaultLiabilityAtomic;
+
+    simulator.apply({ type: "directRewardTransfer", settlementId: "dr1", ansemAtomic: 1n });
+
+    expect(simulator.state.cowboyOrphanedAccrualRemainderScaled).toBe(500n);
+    expect(simulator.state.cowboyUnmaterializedLiabilityAtomic).toBe(98n);
+    expect(simulator.state.totalAnsemLiabilityAtomic).toBe(98n);
+    expect(simulator.state.orphanedRewardReleasedAtomic).toBe(2n);
+    expect(simulator.state.recognizedRewardBalanceAtomic).toBe(1_000n);
+    expect(simulator.state.bullPoolLiabilityAtomic).toBe(beforeBull);
+    expect(simulator.state.suitVaultLiabilityAtomic).toBe(beforeSuit);
+    const recognizedAfterCowboy = simulator.state.recognizedRewardBalanceAtomic < simulator.state.rewardVaultAnsemAtomic
+      ? simulator.state.recognizedRewardBalanceAtomic
+      : simulator.state.rewardVaultAnsemAtomic;
+    expect(recognizedAfterCowboy - simulator.state.totalAnsemLiabilityAtomic).toBe(beforeFree + 2n);
+  });
+
+  it("materializes Bull orphaned remainder by reducing liability, not by routing to suits", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.state.rewardVaultAnsemAtomic = 1_000n;
+    simulator.state.recognizedRewardBalanceAtomic = 1_000n;
+    simulator.state.totalAnsemLiabilityAtomic = 100n;
+    simulator.state.bullPoolLiabilityAtomic = 100n;
+    simulator.state.bullOrphanedAccrualRemainderScaled = 3n * REWARD_PER_WEIGHT_SCALE + 700n;
+    const beforeFree = simulator.state.recognizedRewardBalanceAtomic - simulator.state.totalAnsemLiabilityAtomic;
+    const beforeCowboyUnmat = simulator.state.cowboyUnmaterializedLiabilityAtomic;
+    const beforeSuit = simulator.state.suitVaultLiabilityAtomic;
+
+    simulator.apply({ type: "directRewardTransfer", settlementId: "dr1", ansemAtomic: 1n });
+
+    expect(simulator.state.bullOrphanedAccrualRemainderScaled).toBe(700n);
+    expect(simulator.state.bullPoolLiabilityAtomic).toBe(97n);
+    expect(simulator.state.totalAnsemLiabilityAtomic).toBe(97n);
+    expect(simulator.state.orphanedRewardReleasedAtomic).toBe(3n);
+    expect(simulator.state.recognizedRewardBalanceAtomic).toBe(1_000n);
+    expect(simulator.state.cowboyUnmaterializedLiabilityAtomic).toBe(beforeCowboyUnmat);
+    expect(simulator.state.suitVaultLiabilityAtomic).toBe(beforeSuit);
+    const recognizedAfterBull = simulator.state.recognizedRewardBalanceAtomic < simulator.state.rewardVaultAnsemAtomic
+      ? simulator.state.recognizedRewardBalanceAtomic
+      : simulator.state.rewardVaultAnsemAtomic;
+    expect(recognizedAfterBull - simulator.state.totalAnsemLiabilityAtomic).toBe(beforeFree + 3n);
+  });
+
+  it("rejects orphaned remainder materialization that would underflow a liability bucket", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.state.rewardVaultAnsemAtomic = 1_000n;
+    simulator.state.recognizedRewardBalanceAtomic = 1_000n;
+    simulator.state.totalAnsemLiabilityAtomic = 0n;
+    simulator.state.cowboyUnmaterializedLiabilityAtomic = 0n;
+    simulator.state.cowboyOrphanedAccrualRemainderScaled = COWBOY_REWARD_INDEX_SCALE;
+    expect(() => simulator.apply({ type: "directRewardTransfer", settlementId: "dr1", ansemAtomic: 1n })).toThrow("underflow");
+  });
 });

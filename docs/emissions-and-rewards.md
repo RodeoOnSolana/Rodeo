@@ -113,7 +113,7 @@ When the first eligible Bull activates while `bull_pool_unallocated_liability_at
 
 ### Orphaned accrual remainders
 
-When a position closes through unstake, its per-position sub-atomic carry (`cowboy_accrual_remainder_scaled` or `bull_accrual_remainder_scaled`) moves into the matching global orphaned field (`RewardState.cowboy_orphaned_accrual_remainder_scaled` or `BullAccumulator.bull_orphaned_accrual_remainder_scaled`) rather than being dropped. Sale and gift instead preserve the carry on the `Position`, which follows it to the new owner. See [account-model.md](./account-model.md) and [economic-model.md](./economic-model.md) for the full materialization rule.
+When a position closes through unstake, its per-position sub-atomic carry (`cowboy_accrual_remainder_scaled` or `bull_accrual_remainder_scaled`) moves into the matching global orphaned field (`RewardState.cowboy_orphaned_accrual_remainder_scaled` or `BullAccumulator.bull_orphaned_accrual_remainder_scaled`) rather than being dropped. Sale and gift instead preserve the carry on the `Position`, which follows it to the new owner. When an orphaned-remainder field reaches its scale, the whole-atomic portion is materialized by reducing the matching unmaterialized liability bucket and `total_ansem_liability_atomic`; the released ANSEM becomes free balance and may fund future epochs. `recognized_reward_balance_atomic` is unchanged, no ANSEM transfer occurs, no Bull-pool or suit-vault liability is created, and the operation must fail on liability underflow. See [account-model.md](./account-model.md) and [economic-model.md](./economic-model.md) for the full materialization rule.
 
 ## Bull reward pool
 

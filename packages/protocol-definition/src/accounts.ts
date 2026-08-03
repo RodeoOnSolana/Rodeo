@@ -20,3 +20,27 @@ export const ACCOUNT_VERSIONS = {
 } as const;
 
 export type AccountName = keyof typeof ACCOUNT_VERSIONS;
+
+// Account schemas (not emitted events)
+
+/** SocialResult PDA: [b"social-result", global_config, competition_epoch] */
+export interface SocialResult {
+  readonly version: number;
+  readonly globalConfig: string;
+  readonly competitionEpoch: bigint;
+  readonly winningSuitsMask: number;
+  readonly totalAmount: bigint;
+  readonly merkleRoot: Uint8Array;
+  readonly contentHash: Uint8Array;
+  readonly attestedAt: bigint;
+  readonly bump: number;
+}
+
+/** SuitClaimReceipt PDA: [b"suit-claim", social_result, leaf_nonce] */
+export interface SuitClaimReceipt {
+  readonly version: number;
+  readonly socialResult: string;
+  readonly leafNonce: bigint;
+  readonly claimed: boolean;
+  readonly bump: number;
+}

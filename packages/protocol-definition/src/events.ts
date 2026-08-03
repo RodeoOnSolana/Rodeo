@@ -112,18 +112,11 @@ export type RandomnessRequestedEvent = ProtocolEventEnvelope<"randomnessRequeste
   readonly commitment: Uint8Array;
 }>;
 
-export type SocialResultEvent = ProtocolEventEnvelope<"socialResultAttested", {
-  readonly competitionEpoch: bigint;
-  readonly winningSuitsMask: number;
-  readonly totalAmount: bigint;
-  readonly merkleRoot: Uint8Array;
-  readonly contentHash: Uint8Array;
-}>;
-
-export type SuitClaimReceiptEvent = ProtocolEventEnvelope<"suitClaimReceiptCreated", {
-  readonly socialResult: string;
-  readonly leafNonce: bigint;
-  readonly claimed: boolean;
+export type OrphanedRewardReleasedEvent = ProtocolEventEnvelope<"orphanedRewardReleased", {
+  readonly rewardSource: "cowboy" | "bull";
+  readonly amountAtomic: bigint;
+  readonly remainingRemainderScaled: bigint;
+  readonly totalAnsemLiabilityAtomicAfter: bigint;
 }>;
 
 export type RodeoProtocolEvent =
@@ -141,5 +134,4 @@ export type RodeoProtocolEvent =
   | ListingCreatedEvent
   | ListingCancelledEvent
   | RandomnessRequestedEvent
-  | SocialResultEvent
-  | SuitClaimReceiptEvent;
+  | OrphanedRewardReleasedEvent;

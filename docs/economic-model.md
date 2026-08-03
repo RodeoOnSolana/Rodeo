@@ -230,13 +230,21 @@ Sub-atomic per-position rounding carries (`Position.cowboy_accrual_remainder_sca
 
 - **Sale/gift:** the whole-atomic rewards are synchronized as usual; the role-appropriate sub-atomic carry is preserved on the `Position` and follows it to the new owner, whose global checkpoint (`last_cowboy_reward_index` or `last_bull_reward_per_weight`) is reset to the current index.
 - **Unstake/closure:** the role-appropriate per-position carry is moved into the matching global orphaned-remainder field — `RewardState.cowboy_orphaned_accrual_remainder_scaled` for Cowboys, `BullAccumulator.bull_orphaned_accrual_remainder_scaled` for Bulls — before the `Position` account closes.
-- **Materialization:** when an orphaned-remainder field reaches its scale (`COWBOY_REWARD_INDEX_SCALE` or `REWARD_PER_WEIGHT_SCALE`), the whole-atomic portion is converted:
-  - the matching unmaterialized liability bucket is reduced by the converted amount (`cowboy_unmaterialized_liability_atomic` for Cowboy-orphaned atoms; `bull_pool_liability_atomic`, or `bull_pool_unallocated_liability_atomic` if no Bull is active, for Bull-orphaned atoms);
-  - Cowboy-orphaned atoms are routed to the Bull pool (using the same active/unallocated rule as any other Bull-pool contribution);
-  - Bull-orphaned atoms are routed to the suit-competition vault (`suit_vault_liability_atomic`);
-  - the fractional remainder below the scale is retained in the orphaned-remainder field.
+- **Materialization:** when an orphaned-remainder field reaches its scale (`COWBOY_REWARD_INDEX_SCALE` or `REWARD_PER_WEIGHT_SCALE`), the whole-atomic portion is materialized by reducing the matching unmaterialized liability bucket and `total_ansem_liability_atomic`. The released ANSEM becomes free balance in the reward vault and may fund future epochs; `recognized_reward_balance_atomic` is unchanged and no ANSEM token transfer occurs. No Bull-pool or suit-vault liability is created. The operation must fail if it would underflow the matching liability bucket. The cumulative `orphaned_reward_released_atomic` counter is increased by `whole_amount` and an `OrphanedRewardReleased` event is emitted.
 
-This is the conservative, documented rule for otherwise-unroutable dust: it guarantees the dust is never burned and never double-counted, while giving it an unambiguous, auditable destination.
+  Cowboy orphan materialization:
+  - `whole_amount = cowboy_orphaned_accrual_remainder_scaled / COWBOY_REWARD_INDEX_SCALE`
+  - `cowboy_orphaned_accrual_remainder_scaled %= COWBOY_REWARD_INDEX_SCALE`
+  - `cowboy_unmaterialized_liability_atomic -= whole_amount`
+  - `total_ansem_liability_atomic -= whole_amount`
+
+  Bull orphan materialization:
+  - `whole_amount = bull_orphaned_accrual_remainder_scaled / REWARD_PER_WEIGHT_SCALE`
+  - `bull_orphaned_accrual_remainder_scaled %= REWARD_PER_WEIGHT_SCALE`
+  - `bull_pool_liability_atomic -= whole_amount`
+  - `total_ansem_liability_atomic -= whole_amount`
+
+This is the conservative, documented rule for otherwise-unroutable dust: it guarantees the dust is never burned and never double-counted, while giving it an unambiguous, auditable destination as free ANSEM.
 
 ## Marketplace accounting
 

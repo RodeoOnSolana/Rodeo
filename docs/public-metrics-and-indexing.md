@@ -130,6 +130,7 @@ The following metrics must be publicly queryable or displayed:
 | Runway (epochs) | `covered_epochs` from runway formula in [emissions-and-rewards.md](./emissions-and-rewards.md) |
 | Suit vault balance | `RewardState.suit_vault_liability_atomic` |
 | Bull reward pool balance | `RewardState.bull_pool_liability_atomic + bull_pool_unallocated_liability_atomic` |
+| Orphaned reward released | `RewardState.orphaned_reward_released_atomic` (cumulative transparency counter; also emitted by `OrphanedRewardReleased`) |
 | Marketplace volume | sum of `PositionSold` sale prices |
 | RODEO burned (unstake tax + buybacks) | `rodeoBurnedAtomic` from router and unstake events |
 | Active mint-theft eligibility | `completed_reveals >= 50 && eligible_bulls >= 3` |

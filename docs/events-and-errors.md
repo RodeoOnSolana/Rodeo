@@ -238,6 +238,24 @@ pub enum RewardPaidReason {
 
 Emitted on every ANSEM transfer out of the reward vault. `recognized_reward_balance_atomic` decreases by `amount_atomic` for every occurrence of this event.
 
+### `OrphanedRewardReleased`
+
+```rust
+pub struct OrphanedRewardReleased {
+    pub reward_source: OrphanedRewardSource, // Cowboy | Bull
+    pub amount_atomic: u64,
+    pub remaining_remainder_scaled: u128,
+    pub total_ansem_liability_atomic_after: u64,
+}
+
+pub enum OrphanedRewardSource {
+    Cowboy,
+    Bull,
+}
+```
+
+Emitted when an orphaned-remainder field reaches its scale and the whole-atomic portion is materialized. `amount_atomic` is added to the cumulative `orphaned_reward_released_atomic` counter; the matching unmaterialized liability bucket and `total_ansem_liability_atomic` are reduced by the same amount. `recognized_reward_balance_atomic` is unchanged and no ANSEM token transfer occurs.
+
 ### `BullRewardDistributed`
 
 ```rust
