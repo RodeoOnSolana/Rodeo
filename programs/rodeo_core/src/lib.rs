@@ -15,7 +15,6 @@ use state::*;
 pub mod rodeo_core {
     use super::*;
 
-    /// Anchor constant used to expose the PauseFlag enum in the generated IDL.
     #[constant]
     pub const DEFAULT_PAUSE_FLAG: state::PauseFlag = state::PauseFlag::NewStakes;
 
