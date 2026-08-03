@@ -1,3 +1,16 @@
+import { createHash } from "node:crypto";
+import { PROBABILITY_DENOMINATOR } from "./constants.js";
+
+const TWO_POW_256 = 1n << 256n;
+
+function bytesToBigInt(bytes: Uint8Array): bigint {
+  let value = 0n;
+  for (let i = 0; i < bytes.length; i++) {
+    value = (value << 8n) | BigInt(bytes[i]);
+  }
+  return value;
+}
+
 export interface ProbabilityEntry<Outcome extends string = string> {
   readonly outcome: Outcome;
   readonly weight: bigint;
@@ -21,4 +34,144 @@ export function isNormalized<Outcome extends string>(
     table.entries.length > 0 &&
     table.entries.every(({ weight }) => weight >= 0n) &&
     probabilityWeight(table) === table.denominator;
+}
+
+export type RoleOutcome = "cowboy" | "bull";
+export type CowboyRankOutcome = "rank4" | "rank5" | "rank6" | "rank7" | "rank8" | "rank9" | "rank10" | "desperado";
+export type BullTierOutcome = "tier1" | "tier2" | "tier3" | "tier4";
+export type SuitOutcome = "hearts" | "diamonds" | "clubs" | "spades";
+export type TheftFlagOutcome = "stolen" | "safe";
+
+export const ROLE_TABLE: ProbabilityTable<RoleOutcome> = {
+  denominator: PROBABILITY_DENOMINATOR,
+  entries: [
+    { outcome: "cowboy", weight: 9_000_000n },
+    { outcome: "bull", weight: 1_000_000n },
+  ],
+};
+
+export const COWBOY_RANK_TABLE: ProbabilityTable<CowboyRankOutcome> = {
+  denominator: 9_000_000n,
+  entries: [
+    { outcome: "rank4", weight: 4_047_750n },
+    { outcome: "rank5", weight: 2_248_750n },
+    { outcome: "rank6", weight: 1_169_350n },
+    { outcome: "rank7", weight: 719_600n },
+    { outcome: "rank8", weight: 449_750n },
+    { outcome: "rank9", weight: 269_850n },
+    { outcome: "rank10", weight: 89_950n },
+    { outcome: "desperado", weight: 5_000n },
+  ],
+};
+
+export const BULL_TIER_TABLE: ProbabilityTable<BullTierOutcome> = {
+  denominator: 1_000_000n,
+  entries: [
+    { outcome: "tier1", weight: 600_000n },
+    { outcome: "tier2", weight: 250_000n },
+    { outcome: "tier3", weight: 100_000n },
+    { outcome: "tier4", weight: 50_000n },
+  ],
+};
+
+export const SUIT_TABLE: ProbabilityTable<SuitOutcome> = {
+  denominator: PROBABILITY_DENOMINATOR,
+  entries: [
+    { outcome: "hearts", weight: 2_500_000n },
+    { outcome: "diamonds", weight: 2_500_000n },
+    { outcome: "clubs", weight: 2_500_000n },
+    { outcome: "spades", weight: 2_500_000n },
+  ],
+};
+
+export const THEFT_FLAG_TABLE: ProbabilityTable<TheftFlagOutcome> = {
+  denominator: PROBABILITY_DENOMINATOR,
+  entries: [
+    { outcome: "stolen", weight: 500_000n },
+    { outcome: "safe", weight: 9_500_000n },
+  ],
+};
+
+export const UNSTAKE_THEFT_FLAG_TABLE: ProbabilityTable<TheftFlagOutcome> = THEFT_FLAG_TABLE;
+
+export type AccrualWeight = bigint;
+export type BuckPower = number;
+
+export const COWBOY_ACCRUAL_WEIGHTS: Record<CowboyRankOutcome, AccrualWeight> = {
+  rank4: 10_000n,
+  rank5: 10_500n,
+  rank6: 11_000n,
+  rank7: 11_800n,
+  rank8: 12_800n,
+  rank9: 14_000n,
+  rank10: 15_500n,
+  desperado: 10_000n,
+};
+
+export const DESPERADO_ACCRUAL_WEIGHT = COWBOY_ACCRUAL_WEIGHTS.desperado;
+
+export const BULL_BUCK_POWER: Record<BullTierOutcome, BuckPower> = {
+  tier1: 4,
+  tier2: 6,
+  tier3: 8,
+  tier4: 10,
+};
+
+export function sampleOutcome<Outcome extends string>(
+  table: ProbabilityTable<Outcome>,
+  draw: bigint,
+): Outcome {
+  if (draw < 0n || draw >= table.denominator) {
+    throw new RangeError("Probability draw out of range");
+  }
+  let cumulative = 0n;
+  for (const entry of table.entries) {
+    cumulative += entry.weight;
+    if (draw < cumulative) return entry.outcome;
+  }
+  throw new Error("Probability table is not normalized");
+}
+
+export interface RejectionSampleContext {
+  readonly randomOutput: Uint8Array; // provider output, e.g. 32 bytes
+  readonly domain: string;
+  readonly position: string;
+  readonly actionNonce: bigint;
+}
+
+/**
+ * Deterministic rejection sampling that returns an exactly uniform integer
+ * in [0, denominator - 1] for the given table. The output is bound to the
+ * domain, position, and action nonce so the same random bytes cannot be reused
+ * across domains. The retry counter increments deterministically until an
+ * accepted candidate is found.
+ */
+export function rejectionSample<Outcome extends string>(
+  table: ProbabilityTable<Outcome>,
+  context: RejectionSampleContext,
+): Outcome {
+  if (!isNormalized(table)) {
+    throw new Error("Probability table is not normalized");
+  }
+  const d = table.denominator;
+  const limit = TWO_POW_256 - (TWO_POW_256 % d);
+  let retry = 0n;
+  while (true) {
+    const hash = createHash("sha256")
+      .update(context.randomOutput)
+      .update(context.domain)
+      .update(context.position)
+      .update(context.actionNonce.toString())
+      .update(retry.toString())
+      .digest();
+    const candidate = bytesToBigInt(hash);
+    if (candidate < limit) {
+      const draw = candidate % d;
+      return sampleOutcome(table, draw);
+    }
+    retry += 1n;
+    if (retry > 1_000_000n) {
+      throw new Error("Rejection sampling exceeded safety limit");
+    }
+  }
 }
