@@ -11,6 +11,9 @@ pub const SUIT_EPOCHS: u64 = SUIT_EPOCH_DAYS * 24 * 60 * 60 / (EPOCH_DURATION_SE
 
 pub const MIN_STAKE_SECONDS: i64 = 24 * 60 * 60;
 pub const CLAIM_COOLDOWN_SECONDS: i64 = 60 * 60;
+#[cfg(feature = "test-short-timeout")]
+pub const RANDOMNESS_TIMEOUT_SECONDS: i64 = 2;
+#[cfg(not(feature = "test-short-timeout"))]
 pub const RANDOMNESS_TIMEOUT_SECONDS: i64 = 30 * 60;
 pub const CLOSE_EPOCH_BATCH_MAX: u8 = 8;
 

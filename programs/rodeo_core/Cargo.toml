@@ -10,15 +10,21 @@ crate-type = ["cdylib", "lib"]
 name = "rodeo_core"
 
 [features]
-default = []
+default = ["mock-randomness", "test-short-timeout"]
 cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
 idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+# The mock-randomness feature enables a deterministic, test-only reveal path.
+# Production builds should use --no-default-features to disable it.
+mock-randomness = []
+# The test-short-timeout feature reduces the reveal timeout for local tests.
+# Production builds should disable it via --no-default-features.
+test-short-timeout = []
 
 [dependencies]
-anchor-lang = "0.31.1"
+anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
 anchor-spl = { version = "0.31.1", default-features = false, features = ["token", "token_2022"] }
 solana-program = "=2.1.0"
 solana-zk-sdk = "=2.1.0"

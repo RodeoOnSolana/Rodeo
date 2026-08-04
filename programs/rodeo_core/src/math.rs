@@ -23,6 +23,16 @@ pub fn checked_mul_u128(a: u128, b: u128) -> Result<u128> {
         .ok_or(error!(RodeoError::ArithmeticOverflow))
 }
 
+pub fn checked_add_u128(a: u128, b: u128) -> Result<u128> {
+    a.checked_add(b)
+        .ok_or(error!(RodeoError::ArithmeticOverflow))
+}
+
+pub fn checked_sub_u128(a: u128, b: u128) -> Result<u128> {
+    a.checked_sub(b)
+        .ok_or(error!(RodeoError::ArithmeticUnderflow))
+}
+
 pub fn floor_mul_div_u128(a: u128, b: u128, c: u128) -> Result<u128> {
     require!(c != 0, RodeoError::DivisionByZero);
     let product = checked_mul_u128(a, b)?;
@@ -110,6 +120,25 @@ pub fn increment_bull_index(
         .checked_add(increment)
         .ok_or(error!(RodeoError::ArithmeticOverflow))?;
     Ok((new_index, new_remainder))
+}
+
+/// Distribute an unallocated Bull liability through the accumulator after a new
+/// Bull has been added to the active power set. Returns the updated accumulator
+/// index and remainder.
+pub fn distribute_bull_unallocated_liability(
+    reward_per_weight_scaled: u128,
+    index_remainder_scaled: u128,
+    unallocated_atomic: u64,
+    total_active_bull_power: u128,
+    scale: u128,
+) -> Result<(u128, u128)> {
+    increment_bull_index(
+        reward_per_weight_scaled,
+        index_remainder_scaled,
+        unallocated_atomic,
+        total_active_bull_power,
+        scale,
+    )
 }
 
 /// Compute per-position Cowboy accrual and updated per-position remainder.
