@@ -141,5 +141,8 @@ jobs:
           solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
           solana config set --url localhost
 
+      - name: Build test program binary
+        run: anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-fixtures
+
       - name: Anchor localnet integration tests
-        run: anchor test --skip-build
+        run: anchor test --skip-build --no-idl

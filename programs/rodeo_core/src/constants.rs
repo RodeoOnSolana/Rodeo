@@ -11,7 +11,21 @@ pub const SUIT_EPOCHS: u64 = SUIT_EPOCH_DAYS * 24 * 60 * 60 / (EPOCH_DURATION_SE
 
 pub const MIN_STAKE_SECONDS: i64 = 24 * 60 * 60;
 pub const CLAIM_COOLDOWN_SECONDS: i64 = 60 * 60;
+#[cfg(feature = "test-short-timeout")]
+pub const RANDOMNESS_TIMEOUT_SECONDS: i64 = 2;
+#[cfg(not(feature = "test-short-timeout"))]
 pub const RANDOMNESS_TIMEOUT_SECONDS: i64 = 30 * 60;
+
+#[cfg(feature = "mock-randomness")]
+pub const USE_MOCK_RANDOMNESS: bool = true;
+#[cfg(not(feature = "mock-randomness"))]
+pub const USE_MOCK_RANDOMNESS: bool = false;
+
+#[cfg(feature = "test-fixtures")]
+pub const USE_TEST_FIXTURES: bool = true;
+#[cfg(not(feature = "test-fixtures"))]
+pub const USE_TEST_FIXTURES: bool = false;
+
 pub const CLOSE_EPOCH_BATCH_MAX: u8 = 8;
 
 pub const BPS_DENOMINATOR: u64 = 10_000;
@@ -64,3 +78,20 @@ pub const ACCOUNT_VERSION_BULL_ACCUMULATOR: u8 = 3;
 pub const ACCOUNT_VERSION_POSITION: u8 = 3;
 pub const ACCOUNT_VERSION_WALLET_CLAIM_COOLDOWN: u8 = 1;
 pub const ACCOUNT_VERSION_PENDING_RANDOMNESS: u8 = 3;
+
+// Compile-time guards for the production-safe default configuration. These are
+// always checked when the crate is compiled with the corresponding features.
+#[cfg(not(feature = "test-short-timeout"))]
+const _: () = assert!(RANDOMNESS_TIMEOUT_SECONDS == 30 * 60);
+#[cfg(feature = "test-short-timeout")]
+const _: () = assert!(RANDOMNESS_TIMEOUT_SECONDS == 2);
+
+#[cfg(not(feature = "mock-randomness"))]
+const _: () = assert!(!USE_MOCK_RANDOMNESS);
+#[cfg(feature = "mock-randomness")]
+const _: () = assert!(USE_MOCK_RANDOMNESS);
+
+#[cfg(not(feature = "test-fixtures"))]
+const _: () = assert!(!USE_TEST_FIXTURES);
+#[cfg(feature = "test-fixtures")]
+const _: () = assert!(USE_TEST_FIXTURES);

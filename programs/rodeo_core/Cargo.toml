@@ -16,9 +16,16 @@ no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
 idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+# Enables the deterministic, test-only reveal path. Never enable in production.
+mock-randomness = []
+# Reduces the reveal timeout for local tests. Never enable in production.
+test-short-timeout = []
+# Compiles test-only fixtures used to exercise pause states in local tests.
+# Never enable in production.
+test-fixtures = []
 
 [dependencies]
-anchor-lang = "0.31.1"
+anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
 anchor-spl = { version = "0.31.1", default-features = false, features = ["token", "token_2022"] }
 solana-program = "=2.1.0"
 solana-zk-sdk = "=2.1.0"

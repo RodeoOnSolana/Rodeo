@@ -189,6 +189,281 @@ pub mod rodeo_core {
 
         Ok(())
     }
+
+    pub fn stake_and_commit(
+        ctx: Context<StakeAndCommit>,
+        position_id: u64,
+        principal_amount: u64,
+    ) -> Result<()> {
+        require!(
+            !ctx.accounts.global_config.pause_new_stakes,
+            RodeoError::PausedNewStakes
+        );
+        require!(
+            !ctx.accounts.global_config.pause_new_reveal_requests,
+            RodeoError::PausedNewRevealRequests
+        );
+
+        let stake_amount = ctx.accounts.global_config.stake_amount_atomic;
+        require_eq!(
+            principal_amount,
+            stake_amount,
+            RodeoError::StakeAmountMismatch
+        );
+
+        let clock = Clock::get()?;
+        let now = clock.unix_timestamp;
+        let action_nonce = ctx.accounts.position.next_action_nonce;
+        require!(
+            ctx.accounts.position.version == 0,
+            RodeoError::PositionAlreadyExists
+        );
+        require!(
+            !ctx.accounts.position.pending_action_active,
+            RodeoError::PendingActionConflict
+        );
+
+        let commitment = derive_commitment(
+            ctx.accounts.position.key(),
+            ActionType::Reveal,
+            action_nonce,
+            ctx.accounts.reward_state.current_epoch,
+        );
+
+        // Transfer the configured stake into the principal vault.
+        let transfer_ctx = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            anchor_spl::token::Transfer {
+                from: ctx.accounts.owner_rodeo_token_account.to_account_info(),
+                to: ctx.accounts.principal_vault.to_account_info(),
+                authority: ctx.accounts.owner.to_account_info(),
+            },
+        );
+        anchor_spl::token::transfer(transfer_ctx, principal_amount)?;
+
+        // Initialize the Position.
+        let position = &mut ctx.accounts.position;
+        position.version = ACCOUNT_VERSION_POSITION;
+        position.owner = ctx.accounts.owner.key();
+        position.position_id = position_id;
+        position.principal_amount = principal_amount;
+        position.role = Role::Unassigned;
+        position.status = PositionStatus::RevealPending;
+        position.cowboy_kind = CowboyKind::Unassigned;
+        position.bull_tier = 0;
+        position.suit = Suit::Unassigned;
+        position.opened_at = now;
+        position.active_since = 0;
+        position.unstake_eligible_at = 0;
+        position.accrual_weight = 0;
+        position.buck_power = 0;
+        position.last_cowboy_reward_index = 0;
+        position.cowboy_accrual_remainder_scaled = 0;
+        position.last_bull_reward_per_weight = 0;
+        position.bull_accrual_remainder_scaled = 0;
+        position.claimable_ansem_atomic = 0;
+        position.settlement_nonce = 0;
+        position.state_version = 0;
+        position.listing_nonce = 0;
+        position.receipt_asset = Pubkey::default();
+        position.pending_action_active = true;
+        position.pending_action_type = ActionType::Reveal;
+        position.pending_action_nonce = action_nonce;
+        position.next_action_nonce = math::checked_add_u64(action_nonce, 1)?;
+        position.bump = ctx.bumps.position;
+
+        // Initialize the reveal PendingRandomness account.
+        let pending_randomness = &mut ctx.accounts.pending_randomness;
+        pending_randomness.version = ACCOUNT_VERSION_PENDING_RANDOMNESS;
+        pending_randomness.position = position.key();
+        pending_randomness.action_type = ActionType::Reveal;
+        pending_randomness.action_nonce = action_nonce;
+        pending_randomness.provider_program = Pubkey::default();
+        pending_randomness.provider_randomness_account = Pubkey::default();
+        pending_randomness.commitment = commitment;
+        pending_randomness.committed_slot = clock.slot;
+        pending_randomness.committed_protocol_epoch = ctx.accounts.reward_state.current_epoch;
+        pending_randomness.timeout_timestamp = now
+            .checked_add(RANDOMNESS_TIMEOUT_SECONDS)
+            .ok_or(RodeoError::ArithmeticOverflow)?;
+        pending_randomness.registry_root_snapshot = [0u8; 32];
+        pending_randomness.registry_version_snapshot = 0;
+        pending_randomness.settled = false;
+        pending_randomness.bump = ctx.bumps.pending_randomness;
+
+        // Update global counters.
+        let game_state = &mut ctx.accounts.global_game_state;
+        game_state.live_position_count = math::checked_add_u64(game_state.live_position_count, 1)?;
+        game_state.accounted_principal_atomic =
+            math::checked_add_u64(game_state.accounted_principal_atomic, principal_amount)?;
+
+        emit!(PositionStaked {
+            position: position.key(),
+            owner: position.owner,
+            position_id,
+            principal_amount,
+            commitment,
+            global_game_state: game_state.key(),
+        });
+        emit!(RandomnessRequested {
+            position: position.key(),
+            action_type: ActionType::Reveal,
+            action_nonce,
+            committed_slot: clock.slot,
+            committed_protocol_epoch: ctx.accounts.reward_state.current_epoch,
+            timeout_timestamp: pending_randomness.timeout_timestamp,
+            provider_program: Pubkey::default(),
+            provider_randomness_account: Pubkey::default(),
+            vrf_key: None,
+            callback_id: None,
+            registry_root_snapshot: [0u8; 32],
+            registry_version_snapshot: 0,
+            commitment,
+        });
+
+        Ok(())
+    }
+
+    pub fn settle_reveal(mut ctx: Context<SettleReveal>) -> Result<()> {
+        let position = &ctx.accounts.position;
+        let pending_randomness = &ctx.accounts.pending_randomness;
+
+        require!(
+            position.pending_action_active,
+            RodeoError::PendingActionConflict
+        );
+        require!(
+            position.pending_action_type == ActionType::Reveal,
+            RodeoError::WrongActionType
+        );
+        require!(
+            pending_randomness.position == position.key(),
+            RodeoError::InvalidPendingRandomness
+        );
+        require!(
+            pending_randomness.action_type == ActionType::Reveal,
+            RodeoError::WrongActionType
+        );
+        require!(
+            pending_randomness.action_nonce == position.pending_action_nonce,
+            RodeoError::InvalidPendingRandomness
+        );
+        require!(
+            !pending_randomness.settled,
+            RodeoError::RandomnessAlreadyAvailable
+        );
+
+        #[cfg(feature = "mock-randomness")]
+        return settle_reveal_mock(&mut ctx);
+
+        #[cfg(not(feature = "mock-randomness"))]
+        {
+            // Production builds require a verified Switchboard randomness proof.
+            // That adapter is intentionally not implemented in Phase 2B, so
+            // settlement is disabled in production.
+            err!(RodeoError::RandomnessNotReady)
+        }
+    }
+
+    pub fn recover_reveal_timeout(ctx: Context<RecoverRevealTimeout>) -> Result<()> {
+        let position = &ctx.accounts.position;
+        let pending_randomness = &ctx.accounts.pending_randomness;
+        let now = Clock::get()?.unix_timestamp;
+
+        require!(
+            position.status == PositionStatus::RevealPending,
+            RodeoError::InvalidPendingRandomness
+        );
+        require!(
+            position.pending_action_active,
+            RodeoError::InvalidPendingRandomness
+        );
+        require!(
+            position.pending_action_type == ActionType::Reveal,
+            RodeoError::WrongActionType
+        );
+        require!(
+            pending_randomness.position == position.key(),
+            RodeoError::InvalidPendingRandomness
+        );
+        require!(
+            pending_randomness.action_type == ActionType::Reveal,
+            RodeoError::WrongActionType
+        );
+        require!(
+            pending_randomness.action_nonce == position.pending_action_nonce,
+            RodeoError::InvalidPendingRandomness
+        );
+        require!(
+            !pending_randomness.settled,
+            RodeoError::RandomnessAlreadyAvailable
+        );
+        require!(
+            now >= pending_randomness.timeout_timestamp,
+            RodeoError::RandomnessTimeoutNotReached
+        );
+
+        // Refund the full principal to the owner.
+        let principal_amount = position.principal_amount;
+        let global_config = &ctx.accounts.global_config;
+        let seeds: &[&[u8]] = &[SEED_GLOBAL_CONFIG, &[global_config.bump]];
+        let signer: &[&[&[u8]]] = &[seeds];
+
+        let transfer_ctx = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            anchor_spl::token::Transfer {
+                from: ctx.accounts.principal_vault.to_account_info(),
+                to: ctx.accounts.owner_rodeo_account.to_account_info(),
+                authority: global_config.to_account_info(),
+            },
+            signer,
+        );
+        anchor_spl::token::transfer(transfer_ctx, principal_amount)?;
+
+        // Update global counters before closing accounts.
+        let game_state = &mut ctx.accounts.global_game_state;
+        game_state.live_position_count = math::checked_sub_u64(game_state.live_position_count, 1)?;
+        game_state.accounted_principal_atomic =
+            math::checked_sub_u64(game_state.accounted_principal_atomic, principal_amount)?;
+
+        emit!(RandomnessTimeoutRecovered {
+            position: position.key(),
+            action_type: ActionType::Reveal,
+            action_nonce: pending_randomness.action_nonce,
+            recovery_action: TimeoutRecoveryAction::CloseAndRefundPrincipal,
+        });
+
+        Ok(())
+    }
+
+    /// Test-only fixture to set pause flags for localnet/CI coverage. It is
+    /// compiled only when the `test-fixtures` feature is enabled and is never
+    /// part of the production ABI.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_set_pause_flags(
+        ctx: Context<TestSetPauseFlags>,
+        pause_new_stakes: bool,
+        pause_new_reveal_requests: bool,
+    ) -> Result<()> {
+        let global_config = &mut ctx.accounts.global_config;
+        global_config.pause_new_stakes = pause_new_stakes;
+        global_config.pause_new_reveal_requests = pause_new_reveal_requests;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(pause_new_stakes: bool, pause_new_reveal_requests: bool)]
+pub struct TestSetPauseFlags<'info> {
+    pub authority: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
 }
 
 #[derive(Accounts)]
@@ -280,6 +555,204 @@ pub struct InitializeProtocol<'info> {
     pub rent: Sysvar<'info, Rent>,
 }
 
+#[derive(Accounts)]
+#[instruction(position_id: u64, principal_amount: u64)]
+pub struct StakeAndCommit<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(
+        mut,
+        constraint = owner_rodeo_token_account.mint == global_config.rodeo_mint @ RodeoError::InvalidTokenAccount,
+        constraint = owner_rodeo_token_account.owner == owner.key() @ RodeoError::InvalidTokenAccount,
+    )]
+    pub owner_rodeo_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    #[account(
+        mut,
+        seeds = [SEED_PRINCIPAL_VAULT],
+        bump = global_config.principal_vault_bump,
+        constraint = principal_vault.mint == global_config.rodeo_mint @ RodeoError::InvalidPrincipalVault,
+        constraint = principal_vault.owner == global_config.key() @ RodeoError::InvalidPrincipalVault,
+    )]
+    pub principal_vault: Account<'info, TokenAccount>,
+
+    #[account(
+        init_if_needed,
+        payer = owner,
+        space = 8 + Position::INIT_SPACE,
+        seeds = [SEED_POSITION, global_config.key().as_ref(), &position_id.to_le_bytes()],
+        bump
+    )]
+    pub position: Account<'info, Position>,
+
+    #[account(
+        init,
+        payer = owner,
+        space = 8 + PendingRandomness::INIT_SPACE,
+        seeds = [
+            SEED_RANDOMNESS,
+            position.key().as_ref(),
+            &[ActionType::Reveal as u8],
+            &[0, 0, 0, 0, 0, 0, 0, 0],
+        ],
+        bump
+    )]
+    pub pending_randomness: Account<'info, PendingRandomness>,
+
+    #[account(
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Account<'info, RewardState>,
+
+    #[account(
+        mut,
+        seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
+        bump = global_game_state.bump,
+    )]
+    pub global_game_state: Account<'info, GlobalGameState>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+    pub clock: Sysvar<'info, Clock>,
+}
+
+#[derive(Accounts)]
+pub struct SettleReveal<'info> {
+    #[account(mut)]
+    pub settler: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    #[account(
+        mut,
+        seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
+        bump = global_game_state.bump,
+    )]
+    pub global_game_state: Account<'info, GlobalGameState>,
+
+    #[account(
+        mut,
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Account<'info, RewardState>,
+
+    #[account(
+        mut,
+        seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
+        bump = bull_accumulator.bump,
+    )]
+    pub bull_accumulator: Account<'info, BullAccumulator>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
+        bump = position.bump,
+        constraint = position.pending_action_active @ RodeoError::PendingActionConflict,
+        constraint = position.pending_action_type == ActionType::Reveal @ RodeoError::WrongActionType,
+    )]
+    pub position: Account<'info, Position>,
+
+    #[account(
+        mut,
+        seeds = [
+            SEED_RANDOMNESS,
+            position.key().as_ref(),
+            &[ActionType::Reveal as u8],
+            &position.pending_action_nonce.to_le_bytes(),
+        ],
+        bump = pending_randomness.bump,
+        constraint = pending_randomness.position == position.key() @ RodeoError::InvalidPendingRandomness,
+        constraint = pending_randomness.action_type == ActionType::Reveal @ RodeoError::WrongActionType,
+        constraint = pending_randomness.action_nonce == position.pending_action_nonce @ RodeoError::InvalidPendingRandomness,
+    )]
+    pub pending_randomness: Account<'info, PendingRandomness>,
+
+    pub clock: Sysvar<'info, Clock>,
+}
+
+#[derive(Accounts)]
+pub struct RecoverRevealTimeout<'info> {
+    #[account(mut)]
+    pub caller: Signer<'info>,
+
+    #[account(
+        mut,
+        close = owner,
+        seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
+        bump = position.bump,
+        constraint = position.status == PositionStatus::RevealPending @ RodeoError::InvalidPendingRandomness,
+        constraint = position.pending_action_active @ RodeoError::InvalidPendingRandomness,
+        constraint = position.pending_action_type == ActionType::Reveal @ RodeoError::WrongActionType,
+    )]
+    pub position: Account<'info, Position>,
+
+    #[account(
+        mut,
+        close = owner,
+        seeds = [
+            SEED_RANDOMNESS,
+            position.key().as_ref(),
+            &[ActionType::Reveal as u8],
+            &position.pending_action_nonce.to_le_bytes(),
+        ],
+        bump = pending_randomness.bump,
+        constraint = pending_randomness.position == position.key() @ RodeoError::InvalidPendingRandomness,
+        constraint = pending_randomness.action_type == ActionType::Reveal @ RodeoError::WrongActionType,
+        constraint = pending_randomness.action_nonce == position.pending_action_nonce @ RodeoError::InvalidPendingRandomness,
+    )]
+    pub pending_randomness: Account<'info, PendingRandomness>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    #[account(
+        mut,
+        seeds = [SEED_PRINCIPAL_VAULT],
+        bump = global_config.principal_vault_bump,
+        constraint = principal_vault.mint == global_config.rodeo_mint @ RodeoError::InvalidPrincipalVault,
+    )]
+    pub principal_vault: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = owner_rodeo_account.mint == global_config.rodeo_mint @ RodeoError::InvalidTokenAccount,
+        constraint = owner_rodeo_account.owner == position.owner @ RodeoError::InvalidTokenAccount,
+    )]
+    pub owner_rodeo_account: Account<'info, TokenAccount>,
+
+    /// CHECK: Account receives reclaimed rent and is validated against the position owner.
+    #[account(mut)]
+    pub owner: AccountInfo<'info>,
+
+    #[account(
+        mut,
+        seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
+        bump = global_game_state.bump,
+    )]
+    pub global_game_state: Account<'info, GlobalGameState>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub clock: Sysvar<'info, Clock>,
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -310,6 +783,72 @@ pub struct PositionOwnerChanged {
     pub previous_owner: Pubkey,
     pub new_owner: Pubkey,
     pub reason: state::OwnershipChangeReason,
+}
+
+#[event]
+pub struct PositionStaked {
+    pub position: Pubkey,
+    pub owner: Pubkey,
+    pub position_id: u64,
+    pub principal_amount: u64,
+    pub commitment: [u8; 32],
+    pub global_game_state: Pubkey,
+}
+
+#[event]
+pub struct RandomnessRequested {
+    pub position: Pubkey,
+    pub action_type: ActionType,
+    pub action_nonce: u64,
+    pub committed_slot: u64,
+    pub committed_protocol_epoch: u64,
+    pub timeout_timestamp: i64,
+    pub provider_program: Pubkey,
+    pub provider_randomness_account: Pubkey,
+    pub vrf_key: Option<Pubkey>,
+    pub callback_id: Option<[u8; 32]>,
+    pub registry_root_snapshot: [u8; 32],
+    pub registry_version_snapshot: u64,
+    pub commitment: [u8; 32],
+}
+
+#[event]
+pub struct PositionRevealed {
+    pub position: Pubkey,
+    pub role: Role,
+    pub cowboy_kind: CowboyKind,
+    pub bull_tier: u8,
+    pub suit: Suit,
+    pub final_owner: Pubkey,
+    pub previous_owner: Option<Pubkey>,
+    pub stolen: bool,
+    pub receipt_asset: Pubkey,
+    pub active_since: i64,
+    pub unstake_eligible_at: i64,
+    pub settlement_nonce: u64,
+}
+
+#[event]
+pub struct RandomnessSettled {
+    pub position: Pubkey,
+    pub action_type: ActionType,
+    pub action_nonce: u64,
+    pub settlement_nonce: u64,
+}
+
+#[event]
+pub struct RandomnessTimeoutRecovered {
+    pub position: Pubkey,
+    pub action_type: ActionType,
+    pub action_nonce: u64,
+    pub recovery_action: TimeoutRecoveryAction,
+}
+
+#[allow(dead_code)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
+pub enum TimeoutRecoveryAction {
+    CloseAndRefundPrincipal,
+    CancelUnstake,
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +943,218 @@ pub enum RodeoError {
     PausedNewMarketplaceListings,
     #[msg("Router swaps are paused")]
     PausedRouterSwaps,
+    #[msg("Position already exists for the chosen position_id")]
+    PositionAlreadyExists,
+    #[msg("Principal vault is invalid for the configured mint or authority")]
+    InvalidPrincipalVault,
+    #[msg("Owner token account is invalid for the configured mint or signer")]
+    InvalidTokenAccount,
+    #[msg("Position already has a conflicting pending action")]
+    PendingActionConflict,
+    #[msg("Pending action type does not match the requested operation")]
+    WrongActionType,
+    #[msg("Pending randomness account does not match the position and nonce")]
+    InvalidPendingRandomness,
+    #[msg("Randomness result is not yet available")]
+    RandomnessNotReady,
+    #[msg("Randomness timeout has not been reached")]
+    RandomnessTimeoutNotReached,
+    #[msg("Randomness has already been settled for this action")]
+    RandomnessAlreadyAvailable,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn derive_commitment(
+    position: Pubkey,
+    action_type: ActionType,
+    action_nonce: u64,
+    protocol_epoch: u64,
+) -> [u8; 32] {
+    let mut preimage = [0u8; 32 + 1 + 8 + 8];
+    preimage[0..32].copy_from_slice(position.as_ref());
+    preimage[32] = action_type as u8;
+    preimage[33..41].copy_from_slice(&action_nonce.to_le_bytes());
+    preimage[41..49].copy_from_slice(&protocol_epoch.to_le_bytes());
+    anchor_lang::solana_program::hash::hash(&preimage).to_bytes()
+}
+
+#[cfg(feature = "mock-randomness")]
+fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
+    use crate::probability;
+
+    let position_key = ctx.accounts.position.key();
+    let action_type = ctx.accounts.pending_randomness.action_type;
+    let action_nonce = ctx.accounts.pending_randomness.action_nonce;
+    let protocol_epoch = ctx.accounts.pending_randomness.committed_protocol_epoch;
+
+    // Deterministic random bytes that are domain-separated and bound to the
+    // position, action type, action nonce, and protocol epoch.
+    let random_output = derive_commitment(position_key, action_type, action_nonce, protocol_epoch);
+
+    let role = probability::map_role(probability::RandomnessSampleContext {
+        random_output,
+        domain: probability::RandomnessDomain::Role,
+        position: position_key,
+        action_nonce,
+    })?;
+
+    let suit = probability::map_suit(probability::RandomnessSampleContext {
+        random_output,
+        domain: probability::RandomnessDomain::Suit,
+        position: position_key,
+        action_nonce,
+    })?;
+
+    let position = &mut ctx.accounts.position;
+    let pending_randomness = &mut ctx.accounts.pending_randomness;
+    let now = Clock::get()?.unix_timestamp;
+
+    position.status = PositionStatus::Active;
+    position.active_since = now;
+    position.unstake_eligible_at = now
+        .checked_add(MIN_STAKE_SECONDS)
+        .ok_or(RodeoError::ArithmeticOverflow)?;
+    position.suit = suit;
+    position.pending_action_active = false;
+    position.settlement_nonce = position
+        .settlement_nonce
+        .checked_add(1)
+        .ok_or(RodeoError::ArithmeticOverflow)?;
+
+    pending_randomness.settled = true;
+
+    let game_state = &mut ctx.accounts.global_game_state;
+    game_state.total_completed_reveals =
+        math::checked_add_u64(game_state.total_completed_reveals, 1)?;
+
+    let active_since = position.active_since;
+    let unstake_eligible_at = position.unstake_eligible_at;
+    let settlement_nonce = position.settlement_nonce;
+    let final_owner = position.owner;
+
+    match role {
+        Role::Cowboy => {
+            let kind = probability::map_cowboy_kind(probability::RandomnessSampleContext {
+                random_output,
+                domain: probability::RandomnessDomain::CowboyKind,
+                position: position_key,
+                action_nonce,
+            })?;
+            let weight = match kind {
+                CowboyKind::Rank(rank) => probability::accrual_weight_for_rank(rank),
+                CowboyKind::Desperado => probability::accrual_weight_for_rank(10),
+                CowboyKind::Unassigned => 0,
+            };
+
+            position.role = Role::Cowboy;
+            position.cowboy_kind = kind;
+            position.accrual_weight = weight;
+            position.last_cowboy_reward_index = ctx.accounts.reward_state.cowboy_reward_index;
+            position.cowboy_accrual_remainder_scaled = 0;
+            position.last_bull_reward_per_weight = 0;
+            position.bull_accrual_remainder_scaled = 0;
+
+            game_state.active_cowboy_count =
+                math::checked_add_u64(game_state.active_cowboy_count, 1)?;
+            game_state.total_active_cowboy_weight =
+                math::checked_add_u128(game_state.total_active_cowboy_weight, weight as u128)?;
+
+            emit!(PositionRevealed {
+                position: position_key,
+                role: Role::Cowboy,
+                cowboy_kind: kind,
+                bull_tier: 0,
+                suit,
+                final_owner,
+                previous_owner: None,
+                stolen: false,
+                receipt_asset: Pubkey::default(),
+                active_since,
+                unstake_eligible_at,
+                settlement_nonce,
+            });
+        }
+        Role::Bull => {
+            let tier = probability::map_bull_tier(probability::RandomnessSampleContext {
+                random_output,
+                domain: probability::RandomnessDomain::BullTier,
+                position: position_key,
+                action_nonce,
+            })?;
+            let power = probability::buck_power_for_tier(tier);
+
+            position.role = Role::Bull;
+            position.bull_tier = tier;
+            position.buck_power = power;
+            position.last_cowboy_reward_index = 0;
+            position.cowboy_accrual_remainder_scaled = 0;
+            position.last_bull_reward_per_weight =
+                ctx.accounts.bull_accumulator.reward_per_weight_scaled;
+            position.bull_accrual_remainder_scaled = 0;
+
+            let was_first_bull = game_state.active_bull_count == 0;
+            game_state.active_bull_count = math::checked_add_u64(game_state.active_bull_count, 1)?;
+            game_state.total_active_bull_power =
+                math::checked_add_u64(game_state.total_active_bull_power, power as u64)?;
+
+            // If this is the first eligible Bull and unallocated liability exists,
+            // distribute it through the accumulator before moving it to the pool.
+            if was_first_bull {
+                let unallocated = ctx
+                    .accounts
+                    .reward_state
+                    .bull_pool_unallocated_liability_atomic;
+                if unallocated > 0 {
+                    let (new_index, new_remainder) = math::distribute_bull_unallocated_liability(
+                        ctx.accounts.bull_accumulator.reward_per_weight_scaled,
+                        ctx.accounts.bull_accumulator.bull_index_remainder_scaled,
+                        unallocated,
+                        game_state.total_active_bull_power as u128,
+                        REWARD_PER_WEIGHT_SCALE,
+                    )?;
+                    ctx.accounts.bull_accumulator.reward_per_weight_scaled = new_index;
+                    ctx.accounts.bull_accumulator.bull_index_remainder_scaled = new_remainder;
+                    ctx.accounts.reward_state.bull_pool_liability_atomic = math::checked_add_u64(
+                        ctx.accounts.reward_state.bull_pool_liability_atomic,
+                        unallocated,
+                    )?;
+                    ctx.accounts
+                        .reward_state
+                        .bull_pool_unallocated_liability_atomic = 0;
+                }
+            }
+
+            emit!(PositionRevealed {
+                position: position_key,
+                role: Role::Bull,
+                cowboy_kind: CowboyKind::Unassigned,
+                bull_tier: tier,
+                suit,
+                final_owner,
+                previous_owner: None,
+                stolen: false,
+                receipt_asset: Pubkey::default(),
+                active_since,
+                unstake_eligible_at,
+                settlement_nonce,
+            });
+        }
+        Role::Unassigned => {
+            return Err(error!(RodeoError::InvalidProbabilityOutcome));
+        }
+    }
+
+    emit!(RandomnessSettled {
+        position: position_key,
+        action_type,
+        action_nonce,
+        settlement_nonce,
+    });
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -828,6 +1579,46 @@ mod tests {
     }
 
     #[test]
+    fn first_bull_unallocated_liability_distribution_order() {
+        let unallocated = 1_000_000u64;
+        let total_power = 10u128; // e.g., a tier-4 bull has power 10
+        let scale = REWARD_PER_WEIGHT_SCALE;
+        let (new_index, new_remainder) =
+            math::distribute_bull_unallocated_liability(0, 0, unallocated, total_power, scale)
+                .unwrap();
+
+        let expected_index = (unallocated as u128) * scale / total_power;
+        let expected_remainder = (unallocated as u128) * scale % total_power;
+        assert_eq!(new_index, expected_index);
+        assert_eq!(new_remainder, expected_remainder);
+        assert_eq!(new_index, 100_000_000_000_000_000u128);
+        assert_eq!(new_remainder, 0u128);
+    }
+
+    #[test]
+    fn first_bull_unallocated_liability_preserves_total_liability() {
+        // The distribution moves the exact unallocated amount into the bull pool
+        // without changing total_ansem_liability_atomic.
+        let unallocated = 555_555u64;
+        let total_power = 7u128;
+        let scale = REWARD_PER_WEIGHT_SCALE;
+        let (index, remainder) = math::distribute_bull_unallocated_liability(
+            123_456u128,
+            7u128,
+            unallocated,
+            total_power,
+            scale,
+        )
+        .unwrap();
+        assert!(index >= 123_456u128);
+        assert!(remainder < total_power);
+        // Verify exact formula relationship.
+        let contribution_scaled = (unallocated as u128) * scale;
+        assert_eq!(index, 123_456u128 + (contribution_scaled + 7) / total_power);
+        assert_eq!(remainder, (contribution_scaled + 7) % total_power);
+    }
+
+    #[test]
     fn seed_constants_match_protocol_definition() {
         assert_eq!(SEED_GLOBAL_CONFIG, b"global-config");
         assert_eq!(SEED_REWARD_STATE, b"reward-state");
@@ -838,5 +1629,41 @@ mod tests {
         assert_eq!(SEED_POSITION, b"position");
         assert_eq!(SEED_CLAIM_COOLDOWN, b"claim-cooldown");
         assert_eq!(SEED_RANDOMNESS, b"randomness");
+    }
+
+    #[test]
+    #[cfg(not(feature = "test-short-timeout"))]
+    fn production_randomness_timeout_is_30_minutes() {
+        assert_eq!(RANDOMNESS_TIMEOUT_SECONDS, 30 * 60);
+    }
+
+    #[test]
+    #[cfg(feature = "test-short-timeout")]
+    fn test_randomness_timeout_is_short() {
+        assert_eq!(RANDOMNESS_TIMEOUT_SECONDS, 2);
+    }
+
+    #[test]
+    #[cfg(not(feature = "mock-randomness"))]
+    fn production_has_no_mock_randomness() {
+        assert!(!USE_MOCK_RANDOMNESS);
+    }
+
+    #[test]
+    #[cfg(feature = "mock-randomness")]
+    fn test_build_uses_mock_randomness() {
+        let _ = settle_reveal_mock as fn(&mut Context<SettleReveal>) -> Result<()>;
+    }
+
+    #[test]
+    #[cfg(not(feature = "test-fixtures"))]
+    fn production_has_no_test_fixtures() {
+        assert!(!USE_TEST_FIXTURES);
+    }
+
+    #[test]
+    #[cfg(feature = "test-fixtures")]
+    fn test_build_has_test_fixtures() {
+        let _ = test_set_pause_flags as fn(Context<TestSetPauseFlags>, bool, bool) -> Result<()>;
     }
 }
