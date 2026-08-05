@@ -436,39 +436,26 @@ pub mod rodeo_core {
         Ok(())
     }
 
-    /// Governance: emergency guardians may update the protocol pause flags.
-    pub fn set_pause_flags(
-        ctx: Context<SetPauseFlags>,
+    /// Test-only fixture to set pause flags for localnet/CI coverage. It is
+    /// compiled only when the `test-fixtures` feature is enabled and is never
+    /// part of the production ABI.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_set_pause_flags(
+        ctx: Context<TestSetPauseFlags>,
         pause_new_stakes: bool,
         pause_new_reveal_requests: bool,
-        pause_new_marketplace_listings: bool,
-        pause_router_swaps: bool,
     ) -> Result<()> {
         let global_config = &mut ctx.accounts.global_config;
         global_config.pause_new_stakes = pause_new_stakes;
         global_config.pause_new_reveal_requests = pause_new_reveal_requests;
-        global_config.pause_new_marketplace_listings = pause_new_marketplace_listings;
-        global_config.pause_router_swaps = pause_router_swaps;
-
-        emit!(PauseFlagsSet {
-            authority: ctx.accounts.authority.key(),
-            pause_new_stakes,
-            pause_new_reveal_requests,
-            pause_new_marketplace_listings,
-            pause_router_swaps,
-        });
-
         Ok(())
     }
 }
 
+#[cfg(feature = "test-fixtures")]
 #[derive(Accounts)]
-#[instruction(pause_new_stakes: bool, pause_new_reveal_requests: bool, pause_new_marketplace_listings: bool, pause_router_swaps: bool)]
-pub struct SetPauseFlags<'info> {
-    #[account(
-        mut,
-        constraint = authority.key() == global_config.emergency_guardians @ RodeoError::UnauthorizedGovernanceAction,
-    )]
+#[instruction(pause_new_stakes: bool, pause_new_reveal_requests: bool)]
+pub struct TestSetPauseFlags<'info> {
     pub authority: Signer<'info>,
 
     #[account(
@@ -857,15 +844,6 @@ pub struct RandomnessTimeoutRecovered {
     pub recovery_action: TimeoutRecoveryAction,
 }
 
-#[event]
-pub struct PauseFlagsSet {
-    pub authority: Pubkey,
-    pub pause_new_stakes: bool,
-    pub pause_new_reveal_requests: bool,
-    pub pause_new_marketplace_listings: bool,
-    pub pause_router_swaps: bool,
-}
-
 #[allow(dead_code)]
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
 pub enum TimeoutRecoveryAction {
@@ -895,8 +873,6 @@ pub enum RodeoError {
     InvalidGovernanceAuthority,
     #[msg("Governance authorities must be pairwise distinct")]
     GovernanceAuthoritiesNotDistinct,
-    #[msg("Signer is not authorized to perform this governance action")]
-    UnauthorizedGovernanceAction,
     #[msg("RODEO and ANSEM mints must be different")]
     IdenticalTokenMints,
     #[msg("Mint authority must be revoked")]
@@ -1653,5 +1629,41 @@ mod tests {
         assert_eq!(SEED_POSITION, b"position");
         assert_eq!(SEED_CLAIM_COOLDOWN, b"claim-cooldown");
         assert_eq!(SEED_RANDOMNESS, b"randomness");
+    }
+
+    #[test]
+    #[cfg(not(feature = "test-short-timeout"))]
+    fn production_randomness_timeout_is_30_minutes() {
+        assert_eq!(RANDOMNESS_TIMEOUT_SECONDS, 30 * 60);
+    }
+
+    #[test]
+    #[cfg(feature = "test-short-timeout")]
+    fn test_randomness_timeout_is_short() {
+        assert_eq!(RANDOMNESS_TIMEOUT_SECONDS, 2);
+    }
+
+    #[test]
+    #[cfg(not(feature = "mock-randomness"))]
+    fn production_has_no_mock_randomness() {
+        assert!(!USE_MOCK_RANDOMNESS);
+    }
+
+    #[test]
+    #[cfg(feature = "mock-randomness")]
+    fn test_build_uses_mock_randomness() {
+        let _ = settle_reveal_mock as fn(&mut Context<SettleReveal>) -> Result<()>;
+    }
+
+    #[test]
+    #[cfg(not(feature = "test-fixtures"))]
+    fn production_has_no_test_fixtures() {
+        assert!(!USE_TEST_FIXTURES);
+    }
+
+    #[test]
+    #[cfg(feature = "test-fixtures")]
+    fn test_build_has_test_fixtures() {
+        let _ = test_set_pause_flags as fn(Context<TestSetPauseFlags>, bool, bool) -> Result<()>;
     }
 }

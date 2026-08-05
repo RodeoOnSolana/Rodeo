@@ -338,13 +338,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const accountNames = new Set(idl.accounts?.map((account: { name: string }) => account.name));
 
     expect(instructionNames.sort()).toEqual(
-      [
-        "initialize_protocol",
-        "set_pause_flags",
-        "stake_and_commit",
-        "settle_reveal",
-        "recover_reveal_timeout",
-      ].sort(),
+      ["initialize_protocol", "stake_and_commit", "settle_reveal", "recover_reveal_timeout"].sort(),
     );
     expect(instructionNames).not.toContain("ensure_idl_accounts");
 
@@ -872,14 +866,26 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     pauseNewStakes: boolean,
     pauseNewRevealRequests: boolean,
   ) {
-    await rodeoCoreProgram.methods
-      .setPauseFlags(pauseNewStakes, pauseNewRevealRequests, false, false)
-      .accounts({
-        authority: emergencyGuardians.publicKey,
-        globalConfig,
-      })
-      .signers([emergencyGuardians])
-      .rpc();
+    // The `test_set_pause_flags` fixture is compiled only for local tests via
+    // the `test-fixtures` feature, so it is not exported in the production IDL.
+    const authority = emergencyGuardians;
+    // Anchor 8-byte instruction discriminator: sha256("global:test_set_pause_flags")[0..8]
+    const discriminator = Buffer.from("303c7a4c1fda4642", "hex");
+    const data = Buffer.concat([
+      discriminator,
+      Buffer.from([pauseNewStakes ? 1 : 0]),
+      Buffer.from([pauseNewRevealRequests ? 1 : 0]),
+    ]);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: authority.publicKey, isSigner: true, isWritable: false },
+        { pubkey: globalConfig, isSigner: false, isWritable: true },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [authority]);
   }
 
   it("rejects new stakes when paused", async () => {

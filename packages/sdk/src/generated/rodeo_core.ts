@@ -418,73 +418,6 @@ export const rodeoCoreIdl = {
       "args": []
     },
     {
-      "name": "set_pause_flags",
-      "docs": [
-        "Governance: emergency guardians may update the protocol pause flags."
-      ],
-      "discriminator": [
-        205,
-        167,
-        85,
-        237,
-        144,
-        202,
-        248,
-        175
-      ],
-      "accounts": [
-        {
-          "name": "authority",
-          "writable": true,
-          "signer": true
-        },
-        {
-          "name": "global_config",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  103,
-                  108,
-                  111,
-                  98,
-                  97,
-                  108,
-                  45,
-                  99,
-                  111,
-                  110,
-                  102,
-                  105,
-                  103
-                ]
-              }
-            ]
-          }
-        }
-      ],
-      "args": [
-        {
-          "name": "pause_new_stakes",
-          "type": "bool"
-        },
-        {
-          "name": "pause_new_reveal_requests",
-          "type": "bool"
-        },
-        {
-          "name": "pause_new_marketplace_listings",
-          "type": "bool"
-        },
-        {
-          "name": "pause_router_swaps",
-          "type": "bool"
-        }
-      ]
-    },
-    {
       "name": "settle_reveal",
       "discriminator": [
         160,
@@ -945,19 +878,6 @@ export const rodeoCoreIdl = {
   ],
   "events": [
     {
-      "name": "PauseFlagsSet",
-      "discriminator": [
-        67,
-        234,
-        75,
-        170,
-        161,
-        26,
-        210,
-        36
-      ]
-    },
-    {
       "name": "PositionOwnerChanged",
       "discriminator": [
         56,
@@ -1092,226 +1012,221 @@ export const rodeoCoreIdl = {
     },
     {
       "code": 6008,
-      "name": "UnauthorizedGovernanceAction",
-      "msg": "Signer is not authorized to perform this governance action"
-    },
-    {
-      "code": 6009,
       "name": "IdenticalTokenMints",
       "msg": "RODEO and ANSEM mints must be different"
     },
     {
-      "code": 6010,
+      "code": 6009,
       "name": "ActiveMintAuthority",
       "msg": "Mint authority must be revoked"
     },
     {
-      "code": 6011,
+      "code": 6010,
       "name": "ActiveFreezeAuthority",
       "msg": "Freeze authority must be revoked"
     },
     {
-      "code": 6012,
+      "code": 6011,
       "name": "RejectionSamplingExhausted",
       "msg": "Rejection sampling exhausted without an accepted candidate"
     },
     {
-      "code": 6013,
+      "code": 6012,
       "name": "InvalidBps",
       "msg": "Invalid BPS value"
     },
     {
-      "code": 6014,
+      "code": 6013,
       "name": "InvalidMint",
       "msg": "Invalid mint account"
     },
     {
-      "code": 6015,
+      "code": 6014,
       "name": "UnexpectedRodeoSupply",
       "msg": "RODEO mint supply does not match the expected total supply"
     },
     {
-      "code": 6016,
+      "code": 6015,
       "name": "InvalidVault",
       "msg": "Invalid vault account"
     },
     {
-      "code": 6017,
+      "code": 6016,
       "name": "InvalidDecimals",
       "msg": "Invalid decimals or atomic conversion failed"
     },
     {
-      "code": 6018,
+      "code": 6017,
       "name": "ZeroPrincipal",
       "msg": "Principal must be greater than zero"
     },
     {
-      "code": 6019,
+      "code": 6018,
       "name": "AlreadySettled",
       "msg": "Randomness has already been settled"
     },
     {
-      "code": 6020,
+      "code": 6019,
       "name": "InvalidReveal",
       "msg": "Reveal does not match the commitment"
     },
     {
-      "code": 6021,
+      "code": 6020,
       "name": "InvalidOwner",
       "msg": "Position owner does not match the signer"
     },
     {
-      "code": 6022,
+      "code": 6021,
       "name": "NoPendingRevealAction",
       "msg": "No reveal action is pending for this position"
     },
     {
-      "code": 6023,
+      "code": 6022,
       "name": "PositionLocked",
       "msg": "Position has a pending action and cannot be transferred"
     },
     {
-      "code": 6024,
+      "code": 6023,
       "name": "StakeAmountMismatch",
       "msg": "Stake amount must equal the configured requirement"
     },
     {
-      "code": 6025,
+      "code": 6024,
       "name": "MinimumStakePeriodNotMet",
       "msg": "Position has not been active long enough"
     },
     {
-      "code": 6026,
+      "code": 6025,
       "name": "ClaimCooldownNotMet",
       "msg": "Wallet claim cooldown has not elapsed"
     },
     {
-      "code": 6027,
+      "code": 6026,
       "name": "NoClaimableRewards",
       "msg": "Position has no claimable ANSEM after synchronization"
     },
     {
-      "code": 6028,
+      "code": 6027,
       "name": "EpochsNotClosed",
       "msg": "All elapsed epochs must be closed before this operation"
     },
     {
-      "code": 6029,
+      "code": 6028,
       "name": "InvalidProbabilityOutcome",
       "msg": "Randomness outcome does not map to a valid role/cowboy_kind/bull_tier/suit"
     },
     {
-      "code": 6030,
+      "code": 6029,
       "name": "InvalidProbabilityTable",
       "msg": "Probability table weights do not sum to denominator"
     },
     {
-      "code": 6031,
+      "code": 6030,
       "name": "PendingActionBlocksTransfer",
       "msg": "Cannot change owner while a randomness action is pending"
     },
     {
-      "code": 6032,
+      "code": 6031,
       "name": "PendingActionBlocksClaim",
       "msg": "Cannot claim while a randomness action is pending"
     },
     {
-      "code": 6033,
+      "code": 6032,
       "name": "StaleListing",
       "msg": "Listing no longer matches the position state"
     },
     {
-      "code": 6034,
+      "code": 6033,
       "name": "InvalidMarketReceipt",
       "msg": "Receipt asset does not match the position"
     },
     {
-      "code": 6035,
+      "code": 6034,
       "name": "InvalidSocialAttestation",
       "msg": "Social oracle attestation signatures are invalid"
     },
     {
-      "code": 6036,
+      "code": 6035,
       "name": "SuitCompetitionNotEnded",
       "msg": "Social competition epoch has not ended"
     },
     {
-      "code": 6037,
+      "code": 6036,
       "name": "UnrecognizedRewardFunding",
       "msg": "ANSEM in the vault is not yet recognized for liability accounting"
     },
     {
-      "code": 6038,
+      "code": 6037,
       "name": "UnauthorizedSwapVenue",
       "msg": "Unauthorized swap venue"
     },
     {
-      "code": 6039,
+      "code": 6038,
       "name": "SlippageExceeded",
       "msg": "Swap output below minimum"
     },
     {
-      "code": 6040,
+      "code": 6039,
       "name": "PausedNewStakes",
       "msg": "New stakes are paused"
     },
     {
-      "code": 6041,
+      "code": 6040,
       "name": "PausedNewRevealRequests",
       "msg": "New reveal requests are paused"
     },
     {
-      "code": 6042,
+      "code": 6041,
       "name": "PausedNewMarketplaceListings",
       "msg": "New marketplace listings are paused"
     },
     {
-      "code": 6043,
+      "code": 6042,
       "name": "PausedRouterSwaps",
       "msg": "Router swaps are paused"
     },
     {
-      "code": 6044,
+      "code": 6043,
       "name": "PositionAlreadyExists",
       "msg": "Position already exists for the chosen position_id"
     },
     {
-      "code": 6045,
+      "code": 6044,
       "name": "InvalidPrincipalVault",
       "msg": "Principal vault is invalid for the configured mint or authority"
     },
     {
-      "code": 6046,
+      "code": 6045,
       "name": "InvalidTokenAccount",
       "msg": "Owner token account is invalid for the configured mint or signer"
     },
     {
-      "code": 6047,
+      "code": 6046,
       "name": "PendingActionConflict",
       "msg": "Position already has a conflicting pending action"
     },
     {
-      "code": 6048,
+      "code": 6047,
       "name": "WrongActionType",
       "msg": "Pending action type does not match the requested operation"
     },
     {
-      "code": 6049,
+      "code": 6048,
       "name": "InvalidPendingRandomness",
       "msg": "Pending randomness account does not match the position and nonce"
     },
     {
-      "code": 6050,
+      "code": 6049,
       "name": "RandomnessNotReady",
       "msg": "Randomness result is not yet available"
     },
     {
-      "code": 6051,
+      "code": 6050,
       "name": "RandomnessTimeoutNotReached",
       "msg": "Randomness timeout has not been reached"
     },
     {
-      "code": 6052,
+      "code": 6051,
       "name": "RandomnessAlreadyAvailable",
       "msg": "Randomness has already been settled for this action"
     }
@@ -1537,34 +1452,6 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "MintTheft"
-          }
-        ]
-      }
-    },
-    {
-      "name": "PauseFlagsSet",
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "authority",
-            "type": "pubkey"
-          },
-          {
-            "name": "pause_new_stakes",
-            "type": "bool"
-          },
-          {
-            "name": "pause_new_reveal_requests",
-            "type": "bool"
-          },
-          {
-            "name": "pause_new_marketplace_listings",
-            "type": "bool"
-          },
-          {
-            "name": "pause_router_swaps",
-            "type": "bool"
           }
         ]
       }

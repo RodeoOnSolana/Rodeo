@@ -10,18 +10,19 @@ crate-type = ["cdylib", "lib"]
 name = "rodeo_core"
 
 [features]
-default = ["mock-randomness", "test-short-timeout"]
+default = []
 cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
 idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
-# The mock-randomness feature enables a deterministic, test-only reveal path.
-# Production builds should use --no-default-features to disable it.
+# Enables the deterministic, test-only reveal path. Never enable in production.
 mock-randomness = []
-# The test-short-timeout feature reduces the reveal timeout for local tests.
-# Production builds should disable it via --no-default-features.
+# Reduces the reveal timeout for local tests. Never enable in production.
 test-short-timeout = []
+# Compiles test-only fixtures used to exercise pause states in local tests.
+# Never enable in production.
+test-fixtures = []
 
 [dependencies]
 anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
