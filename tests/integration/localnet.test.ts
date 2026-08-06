@@ -888,6 +888,9 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   }
 
   async function claimPosition(positionId: BN, owner = payer, ownerAnsem = payerAnsemAccount) {
+    // Always catch up epochs first so tests are not flaked by clock drift between
+    // the last close and the claim transaction.
+    await closeEpochs(8);
     const { position } = await deriveStakeAccounts(positionId);
     const [walletCooldown] = deriveWalletCooldown(
       rodeoCoreProgram.programId,
@@ -1328,7 +1331,33 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await stakeAndCommit(positionId);
     await settleReveal(positionId);
     await fundRewardVault(new BN(1_000_000_000));
-    await expect(claimPosition(positionId)).rejects.toThrow();
+
+    const { position } = await deriveStakeAccounts(positionId);
+    const [walletCooldown] = deriveWalletCooldown(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      payer.publicKey,
+    );
+    await expect(
+      rodeoCoreProgram.methods
+        .claimPosition()
+        .accounts({
+          owner: payer.publicKey,
+          globalConfig,
+          rewardState,
+          globalGameState,
+          bullAccumulator,
+          position,
+          walletClaimCooldown: walletCooldown,
+          rewardVault,
+          ownerAnsemAccount: payerAnsemAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([payer])
+        .rpc(),
+    ).rejects.toThrow();
   }, 60_000);
 
   it("rejects claim by a non-owner", async () => {
