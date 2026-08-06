@@ -332,13 +332,21 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     }
   }, 30_000);
 
-  it("exports only the Phase 2B instructions and referenced ABI entries", async () => {
+  it("exports only the Phase 2C1 instructions and referenced ABI entries", async () => {
     const idl = loadIdl("rodeo_core");
     const instructionNames = idl.instructions?.map((ix: { name: string }) => ix.name) ?? [];
     const accountNames = new Set(idl.accounts?.map((account: { name: string }) => account.name));
 
     expect(instructionNames.sort()).toEqual(
-      ["initialize_protocol", "stake_and_commit", "settle_reveal", "recover_reveal_timeout"].sort(),
+      [
+        "initialize_protocol",
+        "stake_and_commit",
+        "settle_reveal",
+        "recover_reveal_timeout",
+        "close_epochs",
+        "recognize_rewards",
+        "claim_position",
+      ].sort(),
     );
     expect(instructionNames).not.toContain("ensure_idl_accounts");
 
@@ -367,9 +375,9 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       "BullAccumulator",
       "Position",
       "PendingRandomness",
+      "WalletClaimCooldown",
     ];
     expect([...accountNames].sort()).toEqual(expectedAccounts.sort());
-    expect(accountNames).not.toContain("WalletClaimCooldown");
     expect(accountNames).not.toContain("IdlTypeHolder");
 
     expect(idl.events?.some((event: { name: string }) => event.name === "ProtocolInitialized")).toBe(
@@ -383,6 +391,9 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     expect(sdkSource).toContain("stake_and_commit");
     expect(sdkSource).toContain("settle_reveal");
     expect(sdkSource).toContain("recover_reveal_timeout");
+    expect(sdkSource).toContain("close_epochs");
+    expect(sdkSource).toContain("recognize_rewards");
+    expect(sdkSource).toContain("claim_position");
     expect(sdkSource).not.toContain("ensure_idl_accounts");
   }, 30_000);
 
