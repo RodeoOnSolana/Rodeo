@@ -225,7 +225,13 @@ async function revokeMintAuthorities(
   }
 }
 
-describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
+// This suite must run against a program binary built with `test-short-epoch`
+// (2-second epochs) so that epoch-closure behavior is exercised quickly. It
+// must NOT be run against the claim-profile binary, since production-length
+// epochs there would make `close_epochs`/`EpochsClosed` assertions time out.
+const skipEpochSuite = !localnetAvailable || process.env.RODEO_TEST_SUITE === "claim";
+
+describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () => {
   let provider: AnchorProvider;
   let payer: web3.Keypair;
   let rodeoCoreProgram: Program<Idl>;
@@ -1221,6 +1227,71 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await provider.sendAndConfirm(tx, [authority]);
   }
 
+  // The `test_fixture_*` instructions are compiled only for local tests via
+  // the `test-fixtures` feature, so they are not exported in the production
+  // IDL. They are invoked here as raw instructions using their Anchor
+  // discriminators (sha256("global:<name>")[0..8]).
+  async function fixtureRecognizeRewards(amount: BN) {
+    const discriminator = Buffer.from("4424b34139b3bde5", "hex");
+    const data = Buffer.concat([discriminator, amount.toArrayLike(Buffer, "le", 8)]);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: false },
+        { pubkey: rewardState, isSigner: false, isWritable: true },
+        { pubkey: rewardVault, isSigner: false, isWritable: true },
+        { pubkey: payerAnsemAccount, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
+  }
+
+  async function fixturePreparePosition(
+    positionId: BN,
+    args: {
+      roleCode: number;
+      cowboyKindCode: number;
+      accrualWeight: number;
+      buckPower: number;
+      claimable: BN;
+      positionClaimableLiabilityDelta: BN;
+    },
+  ) {
+    const discriminator = Buffer.from("4135c65e78462efa", "hex");
+    const data = Buffer.concat([
+      discriminator,
+      positionId.toArrayLike(Buffer, "le", 8),
+      Buffer.from([args.roleCode]),
+      Buffer.from([args.cowboyKindCode]),
+      new BN(args.accrualWeight).toArrayLike(Buffer, "le", 4),
+      Buffer.from([args.buckPower]),
+      args.claimable.toArrayLike(Buffer, "le", 8),
+      args.positionClaimableLiabilityDelta.toArrayLike(Buffer, "le", 8),
+    ]);
+    const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: false },
+        { pubkey: rewardState, isSigner: false, isWritable: true },
+        { pubkey: bullAccumulator, isSigner: false, isWritable: true },
+        { pubkey: position, isSigner: false, isWritable: true },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
+  }
+
+  function errorCode(err: unknown): string | undefined {
+    return (err as { error?: { errorCode?: { code?: string } } }).error?.errorCode?.code;
+  }
+
   it("rejects new stakes when paused", async () => {
     const before = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
     expect(before.pauseNewStakes).toBe(false);
@@ -1357,11 +1428,28 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     );
   }, 60_000);
 
-  it("rejects claim when epochs are not caught up", async () => {
+  it("rejects claim_position with EpochsNotClosed once an epoch elapses, then succeeds after catch-up", async () => {
+    // Use the test-only fixture to make the position deterministically
+    // claim-ready without depending on organic Cowboy-index accrual, so this
+    // test isolates the `require_elapsed_epochs_closed` guard.
     const positionId = new BN(nextPositionId++);
     await stakeAndCommit(positionId);
     await settleReveal(positionId);
+    await ensureEpochsClosed();
     await fundRewardVault(new BN(1_000_000_000));
+    await ensureEpochsClosed();
+    await fixtureRecognizeRewards(new BN(1_000_000_000));
+    await ensureEpochsClosed();
+
+    const claimable = new BN(500_000_000);
+    await fixturePreparePosition(positionId, {
+      roleCode: 1, // Cowboy
+      cowboyKindCode: 5,
+      accrualWeight: 0,
+      buckPower: 0,
+      claimable,
+      positionClaimableLiabilityDelta: claimable,
+    });
 
     const { position } = await deriveStakeAccounts(positionId);
     const [walletCooldown] = deriveWalletCooldown(
@@ -1369,8 +1457,9 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       globalConfig,
       payer.publicKey,
     );
-    await expect(
-      rodeoCoreProgram.methods
+
+    async function attemptClaim() {
+      return rodeoCoreProgram.methods
         .claimPosition()
         .accounts({
           owner: payer.publicKey,
@@ -1387,8 +1476,92 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
           clock: web3.SYSVAR_CLOCK_PUBKEY,
         })
         .signers([payer])
-        .rpc(),
-    ).rejects.toThrow();
+        .rpc();
+    }
+
+    // Let an epoch elapse without closing it.
+    await sleep(2_500);
+
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+    const ownerBefore = await getAccount(provider.connection, payerAnsemAccount);
+
+    const err = await attemptClaim().catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(errorCode(err)).toBe("EpochsNotClosed");
+
+    const posAfterFailure = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const rewardAfterFailure = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultAfterFailure = await getAccount(provider.connection, rewardVault);
+    const ownerAfterFailure = await getAccount(provider.connection, payerAnsemAccount);
+
+    expect(posAfterFailure.claimableAnsemAtomic.toString()).toBe(claimable.toString());
+    expect(rewardAfterFailure.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBefore.positionClaimableLiabilityAtomic.toString(),
+    );
+    expect(rewardAfterFailure.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.toString(),
+    );
+    expect(vaultAfterFailure.amount.toString()).toBe(vaultBefore.amount.toString());
+    expect(ownerAfterFailure.amount.toString()).toBe(ownerBefore.amount.toString());
+
+    // Catch up epochs, then the same claim must succeed.
+    await ensureEpochsClosed();
+    await attemptClaim();
+
+    const posAfterSuccess = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const ownerAfterSuccess = await getAccount(provider.connection, payerAnsemAccount);
+    expect(posAfterSuccess.claimableAnsemAtomic.toString()).toBe("0");
+    expect(
+      new BN(ownerAfterSuccess.amount.toString())
+        .sub(new BN(ownerAfterFailure.amount.toString()))
+        .gtn(0),
+    ).toBe(true);
+  }, 60_000);
+
+  it("rejects recognize_rewards with EpochsNotClosed once an epoch elapses, then succeeds after catch-up", async () => {
+    await ensureEpochsClosed();
+    const fundAmount = new BN(1_000_000_000);
+    await fundRewardVault(fundAmount);
+
+    async function attemptRecognize() {
+      return rodeoCoreProgram.methods
+        .recognizeRewards(fundAmount)
+        .accounts({
+          caller: payer.publicKey,
+          globalConfig,
+          rewardState,
+          rewardVault,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .rpc();
+    }
+
+    // Let an epoch elapse without closing it.
+    await sleep(2_500);
+
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+
+    const err = await attemptRecognize().catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(errorCode(err)).toBe("EpochsNotClosed");
+
+    const rewardAfterFailure = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultAfterFailure = await getAccount(provider.connection, rewardVault);
+    expect(rewardAfterFailure.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.toString(),
+    );
+    expect(vaultAfterFailure.amount.toString()).toBe(vaultBefore.amount.toString());
+
+    // Catch up epochs, then the same recognition must succeed.
+    await ensureEpochsClosed();
+    await attemptRecognize();
+
+    const rewardAfterSuccess = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    expect(rewardAfterSuccess.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.add(fundAmount).toString(),
+    );
   }, 60_000);
 
   it("rejects claim by a non-owner", async () => {

@@ -565,11 +565,8 @@ pub mod rodeo_core {
     }
 
     pub fn recognize_rewards(ctx: Context<RecognizeRewards>, amount: u64) -> Result<()> {
-        #[cfg(not(feature = "test-skip-epochs-closed-check"))]
-        {
-            let now = Clock::get()?.unix_timestamp;
-            require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
-        }
+        let now = Clock::get()?.unix_timestamp;
+        require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
         let reward_state = &mut ctx.accounts.reward_state;
         let reward_vault = &ctx.accounts.reward_vault;
@@ -615,7 +612,6 @@ pub mod rodeo_core {
 
     pub fn claim_position(ctx: Context<ClaimPosition>) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
-        #[cfg(not(feature = "test-skip-epochs-closed-check"))]
         require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
         let owner = ctx.accounts.owner.key();
@@ -841,6 +837,83 @@ pub mod rodeo_core {
         global_config.pause_new_reveal_requests = pause_new_reveal_requests;
         Ok(())
     }
+
+    /// Test-only fixture to fund the reward vault and mark those funds as
+    /// recognized, bypassing the production recognition rules. This gives the
+    /// claim-profile tests a deterministic reserve to pay out.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_recognize_rewards(
+        ctx: Context<TestFixtureRecognizeRewards>,
+        amount: u64,
+    ) -> Result<()> {
+        let cpi = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            anchor_spl::token::Transfer {
+                from: ctx.accounts.payer_ansem_account.to_account_info(),
+                to: ctx.accounts.reward_vault.to_account_info(),
+                authority: ctx.accounts.authority.to_account_info(),
+            },
+        );
+        anchor_spl::token::transfer(cpi, amount)?;
+
+        let reward_state = &mut ctx.accounts.reward_state;
+        reward_state.recognized_reward_balance_atomic =
+            math::checked_add_u64(reward_state.recognized_reward_balance_atomic, amount)?;
+        Ok(())
+    }
+
+    /// Test-only fixture to put a position into a deterministic, claim-ready
+    /// state and to credit the matching liability bucket. This removes the need
+    /// for real epoch closures in the claim-profile suite while leaving the
+    /// production claim/recognize guards untouched.
+    #[cfg(feature = "test-fixtures")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn test_fixture_prepare_position(
+        ctx: Context<TestFixturePreparePosition>,
+        position_id: u64,
+        role_code: u8,
+        cowboy_kind_code: u8,
+        accrual_weight: u32,
+        buck_power: u8,
+        claimable: u64,
+        position_claimable_liability_delta: u64,
+    ) -> Result<()> {
+        let _ = position_id;
+
+        let position = &mut ctx.accounts.position;
+        position.role = match role_code {
+            1 => Role::Cowboy,
+            2 => Role::Bull,
+            _ => Role::Unassigned,
+        };
+        position.cowboy_kind = match cowboy_kind_code {
+            0..=10 => CowboyKind::Rank(cowboy_kind_code),
+            254 => CowboyKind::Desperado,
+            _ => CowboyKind::Unassigned,
+        };
+        position.accrual_weight = accrual_weight;
+        position.buck_power = buck_power;
+        position.status = PositionStatus::Active;
+        position.pending_action_active = false;
+        position.claimable_ansem_atomic = claimable;
+        position.last_cowboy_reward_index = ctx.accounts.reward_state.cowboy_reward_index;
+        position.cowboy_accrual_remainder_scaled = 0;
+        position.last_bull_reward_per_weight =
+            ctx.accounts.bull_accumulator.reward_per_weight_scaled;
+        position.bull_accrual_remainder_scaled = 0;
+
+        let reward_state = &mut ctx.accounts.reward_state;
+        reward_state.position_claimable_liability_atomic = math::checked_add_u64(
+            reward_state.position_claimable_liability_atomic,
+            position_claimable_liability_delta,
+        )?;
+        reward_state.total_ansem_liability_atomic = math::checked_add_u64(
+            reward_state.total_ansem_liability_atomic,
+            position_claimable_liability_delta,
+        )?;
+
+        Ok(())
+    }
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -855,6 +928,77 @@ pub struct TestSetPauseFlags<'info> {
         bump = global_config.bump,
     )]
     pub global_config: Account<'info, GlobalConfig>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct TestFixtureRecognizeRewards<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    #[account(
+        mut,
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Account<'info, RewardState>,
+
+    #[account(
+        mut,
+        token::mint = global_config.ansem_mint,
+        token::authority = global_config,
+    )]
+    pub reward_vault: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        token::mint = global_config.ansem_mint,
+        token::authority = authority,
+    )]
+    pub payer_ansem_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(position_id: u64)]
+pub struct TestFixturePreparePosition<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    #[account(
+        mut,
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Account<'info, RewardState>,
+
+    #[account(
+        mut,
+        seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
+        bump = bull_accumulator.bump,
+    )]
+    pub bull_accumulator: Account<'info, BullAccumulator>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POSITION, global_config.key().as_ref(), &position_id.to_le_bytes()],
+        bump = position.bump,
+    )]
+    pub position: Account<'info, Position>,
 }
 
 #[derive(Accounts)]
@@ -2435,6 +2579,19 @@ mod tests {
     #[cfg(feature = "test-fixtures")]
     fn test_build_has_test_fixtures() {
         let _ = test_set_pause_flags as fn(Context<TestSetPauseFlags>, bool, bool) -> Result<()>;
+        let _ = test_fixture_recognize_rewards
+            as fn(Context<TestFixtureRecognizeRewards>, u64) -> Result<()>;
+        let _ = test_fixture_prepare_position
+            as fn(
+                Context<TestFixturePreparePosition>,
+                u64,
+                u8,
+                u8,
+                u32,
+                u8,
+                u64,
+                u64,
+            ) -> Result<()>;
     }
 
     fn dummy_position() -> state::Position {
