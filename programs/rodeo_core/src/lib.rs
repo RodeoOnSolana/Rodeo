@@ -542,7 +542,7 @@ pub mod rodeo_core {
             emit!(EpochClosed {
                 epoch: reward_state.current_epoch,
                 cowboy_emission,
-                suit_vault_contribution,
+                suit_vault_contribution: suit_contribution,
                 free_ansem,
                 total_cowboy_weight: snapshot_cowboy_weight,
                 total_bull_power: snapshot_bull_power,
