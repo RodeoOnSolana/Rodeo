@@ -80,7 +80,7 @@ pub const SEED_BULL_ACCUMULATOR: &[u8] = b"bull-accumulator";
 pub const SEED_PRINCIPAL_VAULT: &[u8] = b"principal-vault";
 pub const SEED_REWARD_VAULT: &[u8] = b"reward-vault";
 pub const SEED_POSITION: &[u8] = b"position";
-pub const SEED_CLAIM_COOLDOWN: &[u8] = b"claim-cooldown";
+pub const SEED_CLAIM_COOLDOWN: &[u8] = b"claim_cooldown";
 pub const SEED_RANDOMNESS: &[u8] = b"randomness";
 
 pub const ACCOUNT_VERSION_GLOBAL_CONFIG: u8 = 1;

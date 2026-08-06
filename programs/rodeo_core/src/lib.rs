@@ -453,6 +453,7 @@ pub mod rodeo_core {
         );
 
         let actual_reward_vault_balance = reward_vault.amount;
+        let start_epoch = reward_state.current_epoch;
         let mut processed: u64 = 0;
 
         for _ in 0..to_process {
@@ -464,13 +465,24 @@ pub mod rodeo_core {
                 break;
             }
 
+            // Snapshot values at the epoch boundary before applying emission.
+            let snapshot_recognized = reward_state.recognized_reward_balance_atomic;
+            let snapshot_total_liability = reward_state.total_ansem_liability_atomic;
+            let snapshot_cowboy_weight = global_game_state.total_active_cowboy_weight;
+            let snapshot_bull_power = global_game_state.total_active_bull_power;
+            let snapshot_timestamp = reward_state.epoch_started_at;
+
             let mut epoch_emission: u64 = 0;
+            let mut free_ansem: u64 = 0;
+            let mut cowboy_emission: u64 = 0;
+            let mut suit_contribution: u64 = 0;
+
             if now >= reward_state.epoch_started_at {
                 let backed_balance = std::cmp::min(
                     actual_reward_vault_balance,
                     reward_state.recognized_reward_balance_atomic,
                 );
-                let free_ansem = if backed_balance >= reward_state.total_ansem_liability_atomic {
+                free_ansem = if backed_balance >= reward_state.total_ansem_liability_atomic {
                     backed_balance - reward_state.total_ansem_liability_atomic
                 } else {
                     0
@@ -481,12 +493,12 @@ pub mod rodeo_core {
                 } else {
                     0
                 };
+
+                cowboy_emission = math::floor_bps(epoch_emission, EMISSION_COWBOY_BPS as u64)?;
+                suit_contribution = epoch_emission - cowboy_emission;
             }
 
             if epoch_emission > 0 {
-                let cowboy_emission = math::floor_bps(epoch_emission, EMISSION_COWBOY_BPS as u64)?;
-                let suit_contribution = epoch_emission - cowboy_emission;
-
                 if cowboy_emission > 0 && global_game_state.total_active_cowboy_weight > 0 {
                     let (new_index, new_remainder) = math::increment_cowboy_index(
                         reward_state.cowboy_reward_index,
@@ -529,17 +541,24 @@ pub mod rodeo_core {
 
             emit!(EpochClosed {
                 epoch: reward_state.current_epoch,
-                epoch_emission,
-                recognized_reward_balance_atomic: reward_state.recognized_reward_balance_atomic,
-                total_ansem_liability_atomic: reward_state.total_ansem_liability_atomic,
+                cowboy_emission,
+                suit_vault_contribution,
+                free_ansem,
+                total_cowboy_weight: snapshot_cowboy_weight,
+                total_bull_power: snapshot_bull_power,
+                recognized_reward_balance_atomic: snapshot_recognized,
+                total_ansem_liability_atomic: snapshot_total_liability,
+                snapshot_timestamp,
             });
         }
 
         require!(processed > 0, RodeoError::NoElapsedEpoch);
 
         emit!(EpochsClosed {
-            count: processed,
-            last_closed_epoch_timestamp: reward_state.last_closed_epoch_timestamp,
+            start_epoch,
+            end_epoch: reward_state.current_epoch,
+            epochs_processed: processed,
+            last_closed_timestamp: reward_state.last_closed_epoch_timestamp,
         });
 
         Ok(())
@@ -584,7 +603,8 @@ pub mod rodeo_core {
 
         emit!(RewardFundingRecognized {
             amount_atomic: to_recognize,
-            new_recognized_balance_atomic: new_recognized,
+            recognized_reward_balance_atomic: new_recognized,
+            actual_reward_vault_balance: actual_balance,
         });
 
         Ok(())
@@ -661,6 +681,9 @@ pub mod rodeo_core {
         let bull_accumulator = &mut ctx.accounts.bull_accumulator;
 
         // Pay according to role.
+        let owner_amount: u64;
+        let bull_pool_amount: u64;
+        let reward_paid_reason: RewardPaidReason;
         match position.role {
             Role::Cowboy => {
                 let (owner_bps, bull_pool_bps) = if position.cowboy_kind == CowboyKind::Desperado {
@@ -668,8 +691,13 @@ pub mod rodeo_core {
                 } else {
                     (CLAIM_OWNER_BPS, CLAIM_BULL_POOL_BPS)
                 };
-                let owner_amount = math::floor_bps(claimable, owner_bps)?;
-                let bull_pool_amount = math::checked_sub_u64(claimable, owner_amount)?;
+                owner_amount = math::floor_bps(claimable, owner_bps)?;
+                bull_pool_amount = math::checked_sub_u64(claimable, owner_amount)?;
+                reward_paid_reason = if position.cowboy_kind == CowboyKind::Desperado {
+                    RewardPaidReason::DesperadoClaim
+                } else {
+                    RewardPaidReason::CowboyClaim
+                };
 
                 require_gte!(
                     reward_state.position_claimable_liability_atomic,
@@ -709,9 +737,9 @@ pub mod rodeo_core {
                 )?;
 
                 let source = if position.cowboy_kind == CowboyKind::Desperado {
-                    BullPoolContributionSource::DesperadoClaimTax
+                    BullPoolSource::DesperadoClaimTax
                 } else {
-                    BullPoolContributionSource::CowboyClaimTax
+                    BullPoolSource::CowboyClaimTax
                 };
                 distribute_bull_pool_contribution(
                     source,
@@ -722,14 +750,18 @@ pub mod rodeo_core {
                 )?;
 
                 emit!(RewardPaid {
-                    position: Some(position.key()),
-                    recipient: owner,
+                    position: position.key(),
+                    owner,
                     amount_atomic: owner_amount,
-                    remaining_recognized_balance_atomic: reward_state
-                        .recognized_reward_balance_atomic,
+                    recognized_reward_balance_atomic: reward_state.recognized_reward_balance_atomic,
+                    reason: reward_paid_reason,
                 });
             }
             Role::Bull => {
+                owner_amount = claimable;
+                bull_pool_amount = 0;
+                reward_paid_reason = RewardPaidReason::BullClaim;
+
                 require_gte!(
                     reward_state.position_claimable_liability_atomic,
                     claimable,
@@ -768,11 +800,11 @@ pub mod rodeo_core {
                 )?;
 
                 emit!(RewardPaid {
-                    position: Some(position.key()),
-                    recipient: owner,
+                    position: position.key(),
+                    owner,
                     amount_atomic: claimable,
-                    remaining_recognized_balance_atomic: reward_state
-                        .recognized_reward_balance_atomic,
+                    recognized_reward_balance_atomic: reward_state.recognized_reward_balance_atomic,
+                    reason: reward_paid_reason,
                 });
             }
             _ => return err!(RodeoError::InvalidRole),
@@ -784,8 +816,8 @@ pub mod rodeo_core {
         emit!(PositionClaimed {
             position: position.key(),
             owner,
-            role: position.role,
-            amount_atomic: claimable,
+            owner_amount,
+            bull_pool_amount,
         });
 
         Ok(())
@@ -1339,45 +1371,69 @@ pub struct RandomnessTimeoutRecovered {
 #[event]
 pub struct EpochClosed {
     pub epoch: u64,
-    pub epoch_emission: u64,
+    pub cowboy_emission: u64,
+    pub suit_vault_contribution: u64,
+    pub free_ansem: u64,
+    pub total_cowboy_weight: u128,
+    pub total_bull_power: u64,
     pub recognized_reward_balance_atomic: u64,
     pub total_ansem_liability_atomic: u64,
+    pub snapshot_timestamp: i64,
 }
 
 #[event]
 pub struct EpochsClosed {
-    pub count: u64,
-    pub last_closed_epoch_timestamp: i64,
+    pub start_epoch: u64,
+    pub end_epoch: u64,
+    pub epochs_processed: u64,
+    pub last_closed_timestamp: i64,
 }
 
 #[event]
 pub struct RewardFundingRecognized {
     pub amount_atomic: u64,
-    pub new_recognized_balance_atomic: u64,
+    pub recognized_reward_balance_atomic: u64,
+    pub actual_reward_vault_balance: u64,
 }
 
 #[event]
 pub struct PositionClaimed {
     pub position: Pubkey,
     pub owner: Pubkey,
-    pub role: Role,
-    pub amount_atomic: u64,
+    pub owner_amount: u64,
+    pub bull_pool_amount: u64,
 }
 
 #[event]
 pub struct RewardPaid {
-    pub position: Option<Pubkey>,
-    pub recipient: Pubkey,
+    pub position: Pubkey,
+    pub owner: Pubkey,
     pub amount_atomic: u64,
-    pub remaining_recognized_balance_atomic: u64,
+    pub recognized_reward_balance_atomic: u64,
+    pub reason: RewardPaidReason,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
+pub enum RewardPaidReason {
+    CowboyClaim,
+    DesperadoClaim,
+    BullClaim,
+    UnstakeSettlement,
+    SuitReward,
 }
 
 #[event]
 pub struct BullPoolContribution {
-    pub source: BullPoolContributionSource,
+    pub epoch: u64,
     pub amount_atomic: u64,
-    pub total_active_bull_power: u64,
-    pub reward_per_weight_scaled_after: u128,
+    pub source: BullPoolSource,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
+pub enum BullPoolSource {
+    CowboyClaimTax,
+    DesperadoClaimTax,
+    UnstakeTheft,
 }
 
 #[allow(dead_code)]
@@ -1627,16 +1683,10 @@ fn sync_bull_rewards(
     Ok(())
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
-pub enum BullPoolContributionSource {
-    CowboyClaimTax,
-    DesperadoClaimTax,
-}
-
 /// Route a claim-tax contribution into the Bull reward pool, updating the
 /// accumulator when there is active Bull power.
 fn distribute_bull_pool_contribution(
-    source: BullPoolContributionSource,
+    source: BullPoolSource,
     contribution: u64,
     reward_state: &mut RewardState,
     bull_accumulator: &mut BullAccumulator,
@@ -1667,10 +1717,9 @@ fn distribute_bull_pool_contribution(
     }
 
     emit!(BullPoolContribution {
-        source,
+        epoch: reward_state.current_epoch,
         amount_atomic: contribution,
-        total_active_bull_power: game_state.total_active_bull_power,
-        reward_per_weight_scaled_after: bull_accumulator.reward_per_weight_scaled,
+        source,
     });
 
     Ok(())
