@@ -308,7 +308,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       ansemMint,
       payerAnsemAccount,
       payer,
-      2_000_000_000_000n,
+      2_000_000_000_000_000n,
     );
     await revokeMintAuthorities(provider.connection, payer, rodeoMint);
     await revokeMintAuthorities(provider.connection, payer, ansemMint);
@@ -667,10 +667,10 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     // Catch up to the cluster clock, then recognize a large initial reserve so
     // that all subsequent claim scenarios have non-zero emission.
     await ensureEpochsClosed();
-    await fundRewardVault(new BN(1_000_000_000_000));
+    await fundRewardVault(new BN(1_000_000_000_000_000));
     await runWhenCaughtUp(() =>
       rodeoCoreProgram.methods
-        .recognizeRewards(new BN(1_000_000_000_000))
+        .recognizeRewards(new BN(1_000_000_000_000_000))
         .accounts({
           caller: payer.publicKey,
           globalConfig,
