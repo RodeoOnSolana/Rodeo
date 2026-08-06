@@ -872,19 +872,32 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   }
 
   async function closeEpochs(maxEpochs: number) {
-    await rodeoCoreProgram.methods
-      .closeEpochs(maxEpochs)
-      .accounts({
-        caller: payer.publicKey,
-        globalConfig,
-        rewardState,
-        globalGameState,
-        bullAccumulator,
-        rewardVault,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
-      .rpc();
+    try {
+      await rodeoCoreProgram.methods
+        .closeEpochs(maxEpochs)
+        .accounts({
+          caller: payer.publicKey,
+          globalConfig,
+          rewardState,
+          globalGameState,
+          bullAccumulator,
+          rewardVault,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .rpc();
+    } catch (err) {
+      // If no epoch has elapsed, there is nothing to close and downstream
+      // operations are still allowed to proceed.
+      if (
+        typeof err === "object" &&
+        err !== null &&
+        (err as { error?: { errorCode?: { code?: string } } }).error?.errorCode?.code !==
+          "NoElapsedEpoch"
+      ) {
+        throw err;
+      }
+    }
   }
 
   async function claimPosition(positionId: BN, owner = payer, ownerAnsem = payerAnsemAccount) {
