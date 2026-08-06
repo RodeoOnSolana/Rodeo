@@ -2561,7 +2561,7 @@ mod tests {
             bump: 0,
         };
         distribute_bull_pool_contribution(
-            BullPoolContributionSource::CowboyClaimTax,
+            BullPoolSource::CowboyClaimTax,
             12,
             &mut reward,
             &mut acc,
