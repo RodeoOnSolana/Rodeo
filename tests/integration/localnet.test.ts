@@ -915,10 +915,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     }
   }
 
-  async function claimPosition(positionId: BN, owner = payer, ownerAnsem = payerAnsemAccount) {
-    // Always catch up epochs first so tests are not flaked by clock drift between
-    // the last close and the claim transaction.
-    await ensureEpochsClosed();
+  async function claimPositionRaw(positionId: BN, owner = payer, ownerAnsem = payerAnsemAccount) {
     const { position } = await deriveStakeAccounts(positionId);
     const [walletCooldown] = deriveWalletCooldown(
       rodeoCoreProgram.programId,
@@ -943,6 +940,13 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       })
       .signers([owner])
       .rpc();
+  }
+
+  async function claimPosition(positionId: BN, owner = payer, ownerAnsem = payerAnsemAccount) {
+    // Always catch up epochs first so tests are not flaked by clock drift between
+    // the last close and the claim transaction.
+    await ensureEpochsClosed();
+    await claimPositionRaw(positionId, owner, ownerAnsem);
   }
 
   function getRole(pos: PositionAccount): "cowboy" | "bull" | null {
@@ -1338,6 +1342,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await ensureEpochsClosed();
 
     const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    await ensureEpochsClosed();
     await rodeoCoreProgram.methods
       .recognizeRewards(fundAmount)
       .accounts({
@@ -1429,7 +1434,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const ownerAmount = claimable.muln(8_000).divn(10_000);
 
     const ownerBefore = await getAccount(provider.connection, payerAnsemAccount);
-    await claimPosition(positionId);
+    await claimPositionRaw(positionId);
     const ownerAfter = await getAccount(provider.connection, payerAnsemAccount);
 
     const posAfter = await rodeoAccounts(rodeoCoreProgram).position.fetch(
@@ -1450,7 +1455,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await ensureEpochsClosed();
 
     // Claim the Cowboy first so the 20% tax is routed into the Bull pool.
-    await claimPosition(cowboyId);
+    await claimPositionRaw(cowboyId);
 
     const ownerBefore = await getAccount(provider.connection, payerAnsemAccount);
     const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
@@ -1459,7 +1464,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     );
     expect(posBefore.claimableAnsemAtomic.gtn(0)).toBe(true);
 
-    await claimPosition(bullId);
+    await claimPositionRaw(bullId);
 
     const ownerAfter = await getAccount(provider.connection, payerAnsemAccount);
     const payout = new BN(ownerAfter.amount.toString()).sub(new BN(ownerBefore.amount.toString()));
@@ -1484,11 +1489,11 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await sleep(5_000);
     await ensureEpochsClosed();
 
-    await claimPosition(positionA);
-    await expect(claimPosition(positionB)).rejects.toThrow();
+    await claimPositionRaw(positionA);
+    await expect(claimPositionRaw(positionB)).rejects.toThrow();
 
     await new Promise((r) => setTimeout(r, 2_500));
-    await claimPosition(positionB);
+    await claimPositionRaw(positionB);
   }, 60_000);
 
   it("conserves ANSEM liabilities after a Cowboy claim", async () => {
@@ -1501,7 +1506,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const vaultBefore = await getAccount(provider.connection, rewardVault);
 
-    await claimPosition(positionId);
+    await claimPositionRaw(positionId);
 
     const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const vaultAfter = await getAccount(provider.connection, rewardVault);
