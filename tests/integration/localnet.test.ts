@@ -308,7 +308,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       ansemMint,
       payerAnsemAccount,
       payer,
-      1_000_000_000_000n,
+      2_000_000_000_000n,
     );
     await revokeMintAuthorities(provider.connection, payer, rodeoMint);
     await revokeMintAuthorities(provider.connection, payer, ansemMint);
@@ -624,13 +624,13 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       recognizedRewardBalanceAtomic: BN;
       totalAnsemLiabilityAtomic: BN;
       snapshotTimestamp: BN;
-    }>("EpochClosed");
+    }>("epochClosed");
     const epochsClosedPromise = collectOneEvent<{
       startEpoch: BN;
       endEpoch: BN;
       epochsProcessed: BN;
       lastClosedTimestamp: BN;
-    }>("EpochsClosed");
+    }>("epochsClosed");
 
     await closeEpochs(1);
 
@@ -1478,14 +1478,14 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       owner: string;
       ownerAmount: BN;
       bullPoolAmount: BN;
-    }>("PositionClaimed");
+    }>("positionClaimed");
     const rewardPaidPromise = collectOneEvent<{
       position: string;
       owner: string;
       amountAtomic: BN;
       recognizedRewardBalanceAtomic: BN;
       reason: unknown;
-    }>("RewardPaid");
+    }>("rewardPaid");
 
     await claimPosition(positionId);
 
@@ -1516,13 +1516,13 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       owner: string;
       ownerAmount: BN;
       bullPoolAmount: BN;
-    }>("PositionClaimed");
+    }>("positionClaimed");
     const rewardPaidPromise = collectOneEvent<{
       position: string;
       owner: string;
       amountAtomic: BN;
       reason: unknown;
-    }>("RewardPaid");
+    }>("rewardPaid");
 
     await claimPosition(positionId);
 
@@ -1546,7 +1546,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       epoch: BN;
       amountAtomic: BN;
       source: unknown;
-    }>("BullPoolContribution");
+    }>("bullPoolContribution");
 
     await claimPosition(cowboyId);
 
@@ -1573,7 +1573,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       amountAtomic: BN;
       recognizedRewardBalanceAtomic: BN;
       actualRewardVaultBalance: BN;
-    }>("RewardFundingRecognized");
+    }>("rewardFundingRecognized");
 
     await rodeoCoreProgram.methods
       .recognizeRewards(new BN(5_000_000_000))
@@ -1601,7 +1601,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       endEpoch: BN;
       epochsProcessed: BN;
       lastClosedTimestamp: BN;
-    }>("EpochsClosed");
+    }>("epochsClosed");
 
     await closeEpochs(8);
 
