@@ -417,75 +417,76 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
 
   it("IDL event schemas match the authoritative Protocol v1.3.3 definitions", async () => {
     const idl = loadIdl("rodeo_core");
-    const events = (idl.events ?? []) as unknown as Array<{ name: string; fields: { name: string }[] }>;
-    const findEvent = (name: string) => events.find((e) => e.name === name);
-    const fieldNames = (event: { fields: { name: string }[] }) =>
-      event.fields.map((f) => f.name);
+    const eventNames = new Set((idl.events ?? []).map((e: { name: string }) => e.name));
+    const definedTypes = (idl.types ?? []) as unknown as Array<{
+      name: string;
+      type: { kind: string; fields?: { name: string }[]; variants?: { name: string }[] };
+    }>;
+    const findType = (name: string) => definedTypes.find((t) => t.name === name);
+    const fieldNames = (typeDef: { type: { fields?: { name: string }[] } }) =>
+      (typeDef.type.fields ?? []).map((f) => f.name);
+    const enumVariants = (typeDef: { type: { variants?: { name: string }[] } }) =>
+      (typeDef.type.variants ?? []).map((v) => v.name);
 
-    expect(findEvent("EpochClosed")).toBeDefined();
-    expect(fieldNames(findEvent("EpochClosed")!).sort()).toEqual(
+    expect(eventNames).toContain("EpochClosed");
+    expect(fieldNames(findType("EpochClosed")!).sort()).toEqual(
       [
         "epoch",
-        "cowboyEmission",
-        "suitVaultContribution",
-        "freeAnsem",
-        "totalCowboyWeight",
-        "totalBullPower",
-        "recognizedRewardBalanceAtomic",
-        "totalAnsemLiabilityAtomic",
-        "snapshotTimestamp",
+        "cowboy_emission",
+        "suit_vault_contribution",
+        "free_ansem",
+        "total_cowboy_weight",
+        "total_bull_power",
+        "recognized_reward_balance_atomic",
+        "total_ansem_liability_atomic",
+        "snapshot_timestamp",
       ].sort(),
     );
 
-    expect(findEvent("EpochsClosed")).toBeDefined();
-    expect(fieldNames(findEvent("EpochsClosed")!).sort()).toEqual(
-      ["startEpoch", "endEpoch", "epochsProcessed", "lastClosedTimestamp"].sort(),
+    expect(eventNames).toContain("EpochsClosed");
+    expect(fieldNames(findType("EpochsClosed")!).sort()).toEqual(
+      ["start_epoch", "end_epoch", "epochs_processed", "last_closed_timestamp"].sort(),
     );
 
-    expect(findEvent("RewardFundingRecognized")).toBeDefined();
-    expect(fieldNames(findEvent("RewardFundingRecognized")!).sort()).toEqual(
+    expect(eventNames).toContain("RewardFundingRecognized");
+    expect(fieldNames(findType("RewardFundingRecognized")!).sort()).toEqual(
       [
-        "amountAtomic",
-        "recognizedRewardBalanceAtomic",
-        "actualRewardVaultBalance",
+        "amount_atomic",
+        "recognized_reward_balance_atomic",
+        "actual_reward_vault_balance",
       ].sort(),
     );
 
-    expect(findEvent("PositionClaimed")).toBeDefined();
-    expect(fieldNames(findEvent("PositionClaimed")!).sort()).toEqual(
-      ["position", "owner", "ownerAmount", "bullPoolAmount"].sort(),
+    expect(eventNames).toContain("PositionClaimed");
+    expect(fieldNames(findType("PositionClaimed")!).sort()).toEqual(
+      ["position", "owner", "owner_amount", "bull_pool_amount"].sort(),
     );
 
-    expect(findEvent("RewardPaid")).toBeDefined();
-    expect(fieldNames(findEvent("RewardPaid")!).sort()).toEqual(
+    expect(eventNames).toContain("RewardPaid");
+    expect(fieldNames(findType("RewardPaid")!).sort()).toEqual(
       [
         "position",
         "owner",
-        "amountAtomic",
-        "recognizedRewardBalanceAtomic",
+        "amount_atomic",
+        "recognized_reward_balance_atomic",
         "reason",
       ].sort(),
     );
 
-    expect(findEvent("BullPoolContribution")).toBeDefined();
-    expect(fieldNames(findEvent("BullPoolContribution")!).sort()).toEqual(
-      ["epoch", "amountAtomic", "source"].sort(),
+    expect(eventNames).toContain("BullPoolContribution");
+    expect(fieldNames(findType("BullPoolContribution")!).sort()).toEqual(
+      ["epoch", "amount_atomic", "source"].sort(),
     );
-
-    const definedTypes = idl.types ?? [];
-    const findType = (name: string) => definedTypes.find((t: { name: string }) => t.name === name);
-    const enumVariants = (typeDef: { type: { variants?: { name: string }[] } }) =>
-      typeDef.type.variants?.map((v) => v.name) ?? [];
 
     const rewardPaidReason = findType("RewardPaidReason");
     expect(rewardPaidReason).toBeDefined();
-    expect(enumVariants(rewardPaidReason as any).sort()).toEqual(
+    expect(enumVariants(rewardPaidReason!).sort()).toEqual(
       ["CowboyClaim", "DesperadoClaim", "BullClaim", "UnstakeSettlement", "SuitReward"].sort(),
     );
 
     const bullPoolSource = findType("BullPoolSource");
     expect(bullPoolSource).toBeDefined();
-    expect(enumVariants(bullPoolSource as any).sort()).toEqual(
+    expect(enumVariants(bullPoolSource!).sort()).toEqual(
       ["CowboyClaimTax", "DesperadoClaimTax", "UnstakeTheft"].sort(),
     );
   }, 30_000);
@@ -795,6 +796,24 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       BigInt(amount.toString()),
     );
     await provider.sendAndConfirm(new web3.Transaction().add(transferIx));
+  }
+
+  async function fundAndRecognizeRewardVault(amount: BN) {
+    // Close any elapsed epochs so recognition is legal, then recognize the
+    // newly transferred ANSEM as revenue backing.
+    await closeEpochs(8);
+    await fundRewardVault(amount);
+    await closeEpochs(8);
+    await rodeoCoreProgram.methods
+      .recognizeRewards(amount)
+      .accounts({
+        caller: payer.publicKey,
+        globalConfig,
+        rewardState,
+        rewardVault,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      })
+      .rpc();
   }
 
   async function closeEpochs(maxEpochs: number) {
@@ -1183,19 +1202,13 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await expect(closeEpochs(0)).rejects.toThrow();
   }, 30_000);
 
-  it("rejects close_epochs when already caught up", async () => {
-    // Catch up to the current cluster clock, then verify no further epoch is available.
-    await closeEpochs(8);
-    await expect(closeEpochs(1)).rejects.toThrow();
-  }, 30_000);
-
   it("closes one elapsed epoch and emits liabilities", async () => {
     const before = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const positionId = new BN(nextPositionId++);
     await stakeAndCommit(positionId);
     await settleReveal(positionId);
 
-    await fundRewardVault(new BN(10_000_000_000));
+    await fundAndRecognizeRewardVault(new BN(10_000_000_000));
     // Wait for the short pot-fill plus one epoch.
     await new Promise((r) => setTimeout(r, 2_500));
     await closeEpochs(1);
@@ -1259,7 +1272,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const positionId = new BN(nextPositionId++);
     await stakeAndCommit(positionId);
     await settleReveal(positionId);
-    await fundRewardVault(new BN(1_000_000_000));
+    await fundAndRecognizeRewardVault(new BN(1_000_000_000));
     await expect(claimPosition(positionId)).rejects.toThrow();
   }, 60_000);
 
@@ -1269,7 +1282,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const sig = await provider.connection.requestAirdrop(impostor.publicKey, 1_000_000_000);
     await provider.connection.confirmTransaction(sig);
 
-    await fundRewardVault(new BN(10_000_000_000));
+    await fundAndRecognizeRewardVault(new BN(10_000_000_000));
     await new Promise((r) => setTimeout(r, 2_500));
     await closeEpochs(1);
 
@@ -1281,7 +1294,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   it("rejects claim while a randomness action is pending", async () => {
     const positionId = new BN(nextPositionId++);
     await stakeAndCommit(positionId);
-    await fundRewardVault(new BN(1_000_000_000));
+    await fundAndRecognizeRewardVault(new BN(1_000_000_000));
     await new Promise((r) => setTimeout(r, 2_500));
     await closeEpochs(1);
     await expect(claimPosition(positionId)).rejects.toThrow();
@@ -1289,7 +1302,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
 
   it("synchronizes and pays a Cowboy claim with the 80/20 split", async () => {
     const positionId = await stakeAndSettleWithRole("cowboy");
-    await fundRewardVault(new BN(10_000_000_000));
+    await fundAndRecognizeRewardVault(new BN(10_000_000_000));
     await new Promise((r) => setTimeout(r, 2_500));
     await closeEpochs(1);
 
@@ -1316,7 +1329,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const cowboyId = await stakeAndSettleWithRole("cowboy");
     const bullId = await stakeAndSettleWithRole("bull");
 
-    await fundRewardVault(new BN(10_000_000_000));
+    await fundAndRecognizeRewardVault(new BN(10_000_000_000));
     await new Promise((r) => setTimeout(r, 2_500));
     await closeEpochs(1);
 
@@ -1351,7 +1364,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const positionA = await stakeAndSettleWithRole("cowboy");
     const positionB = await stakeAndSettleWithRole("cowboy");
 
-    await fundRewardVault(new BN(10_000_000_000));
+    await fundAndRecognizeRewardVault(new BN(10_000_000_000));
     await new Promise((r) => setTimeout(r, 2_500));
     await closeEpochs(1);
 
@@ -1365,7 +1378,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   it("conserves ANSEM liabilities after a Cowboy claim", async () => {
     const positionId = await stakeAndSettleWithRole("cowboy");
 
-    await fundRewardVault(new BN(10_000_000_000));
+    await fundAndRecognizeRewardVault(new BN(10_000_000_000));
     await new Promise((r) => setTimeout(r, 2_500));
     await closeEpochs(1);
 
@@ -1448,7 +1461,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
 
   it("emits PositionClaimed and RewardPaid with correct portions for a Cowboy claim", async () => {
     const positionId = await stakeAndSettleWithRole("cowboy");
-    await fundRewardVault(new BN(10_000_000_000));
+    await fundAndRecognizeRewardVault(new BN(10_000_000_000));
     await sleep(2_500);
     await closeEpochs(1);
 
@@ -1493,7 +1506,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
 
   it("emits PositionClaimed and RewardPaid for a Bull claim with zero Bull-pool amount", async () => {
     const positionId = await stakeAndSettleWithRole("bull");
-    await fundRewardVault(new BN(10_000_000_000));
+    await fundAndRecognizeRewardVault(new BN(10_000_000_000));
     await sleep(2_500);
     await closeEpochs(1);
 
@@ -1523,7 +1536,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   it("emits BullPoolContribution with the current epoch and source on Cowboy claim tax", async () => {
     const cowboyId = await stakeAndSettleWithRole("cowboy");
     const bullId = await stakeAndSettleWithRole("bull");
-    await fundRewardVault(new BN(10_000_000_000));
+    await fundAndRecognizeRewardVault(new BN(10_000_000_000));
     await sleep(2_500);
     await closeEpochs(1);
 
@@ -1600,6 +1613,12 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     );
     expect(epochsClosed.lastClosedTimestamp.gtn(startEpoch)).toBe(true);
   }, 60_000);
+
+  it("rejects close_epochs when already caught up", async () => {
+    // Catch up to the current cluster clock, then verify no further epoch is available.
+    await closeEpochs(8);
+    await expect(closeEpochs(1)).rejects.toThrow();
+  }, 30_000);
 });
 
 describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", () => {
