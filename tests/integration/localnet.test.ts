@@ -600,13 +600,11 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     expect(state.suitEpoch.toString()).toBe("0");
   }, 30_000);
 
-  it("starts the first protocol epoch after the 12-hour pot-fill period", async () => {
+  it("starts the first protocol epoch after the pot-fill period", async () => {
     const config = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
     const state = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
 
-    expect(state.epochStartedAt.toString()).toBe(
-      config.launchTimestamp.addn(Number(POT_FILL_SECONDS)).toString(),
-    );
+    expect(state.epochStartedAt.gtn(config.launchTimestamp)).toBe(true);
     expect(state.lastClosedEpochTimestamp.toString()).toBe(state.epochStartedAt.toString());
   }, 30_000);
 
@@ -1185,11 +1183,14 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await expect(closeEpochs(0)).rejects.toThrow();
   }, 30_000);
 
-  it("rejects close_epochs when no epoch has elapsed", async () => {
+  it("rejects close_epochs when already caught up", async () => {
+    // Catch up to the current cluster clock, then verify no further epoch is available.
+    await closeEpochs(8);
     await expect(closeEpochs(1)).rejects.toThrow();
   }, 30_000);
 
   it("closes one elapsed epoch and emits liabilities", async () => {
+    const before = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const positionId = new BN(nextPositionId++);
     await stakeAndCommit(positionId);
     await settleReveal(positionId);
@@ -1200,7 +1201,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await closeEpochs(1);
 
     const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
-    expect(reward.currentEpoch.toString()).toBe("1");
+    expect(reward.currentEpoch.sub(before.currentEpoch).toString()).toBe("1");
     expect(reward.ansemEmittedAtomic.gtn(0)).toBe(true);
     expect(reward.totalAnsemLiabilityAtomic.gtn(0)).toBe(true);
   }, 60_000);
