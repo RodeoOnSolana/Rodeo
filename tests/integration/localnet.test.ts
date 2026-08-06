@@ -666,7 +666,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   it("seeds the reward vault with recognized ANSEM for later claim tests", async () => {
     // Catch up to the cluster clock, then recognize a large initial reserve so
     // that all subsequent claim scenarios have non-zero emission.
-    await closeEpochs(8);
+    await ensureEpochsClosed();
     await fundRewardVault(new BN(1_000_000_000_000));
     await rodeoCoreProgram.methods
       .recognizeRewards(new BN(1_000_000_000_000))
@@ -871,30 +871,45 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await provider.sendAndConfirm(new web3.Transaction().add(transferIx));
   }
 
+  function isNoElapsedEpoch(err: unknown): boolean {
+    return (
+      typeof err === "object" &&
+      err !== null &&
+      (err as { error?: { errorCode?: { code?: string } } }).error?.errorCode?.code ===
+        "NoElapsedEpoch"
+    );
+  }
+
+  async function closeEpochsRaw(maxEpochs: number) {
+    await rodeoCoreProgram.methods
+      .closeEpochs(maxEpochs)
+      .accounts({
+        caller: payer.publicKey,
+        globalConfig,
+        rewardState,
+        globalGameState,
+        bullAccumulator,
+        rewardVault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      })
+      .rpc();
+  }
+
   async function closeEpochs(maxEpochs: number) {
     try {
-      await rodeoCoreProgram.methods
-        .closeEpochs(maxEpochs)
-        .accounts({
-          caller: payer.publicKey,
-          globalConfig,
-          rewardState,
-          globalGameState,
-          bullAccumulator,
-          rewardVault,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          clock: web3.SYSVAR_CLOCK_PUBKEY,
-        })
-        .rpc();
+      await closeEpochsRaw(maxEpochs);
     } catch (err) {
-      // If no epoch has elapsed, there is nothing to close and downstream
-      // operations are still allowed to proceed.
-      if (
-        typeof err === "object" &&
-        err !== null &&
-        (err as { error?: { errorCode?: { code?: string } } }).error?.errorCode?.code !==
-          "NoElapsedEpoch"
-      ) {
+      if (!isNoElapsedEpoch(err)) throw err;
+    }
+  }
+
+  async function ensureEpochsClosed() {
+    for (let i = 0; i < 20; i++) {
+      try {
+        await closeEpochsRaw(8);
+      } catch (err) {
+        if (isNoElapsedEpoch(err)) return;
         throw err;
       }
     }
@@ -903,7 +918,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   async function claimPosition(positionId: BN, owner = payer, ownerAnsem = payerAnsemAccount) {
     // Always catch up epochs first so tests are not flaked by clock drift between
     // the last close and the claim transaction.
-    await closeEpochs(8);
+    await ensureEpochsClosed();
     const { position } = await deriveStakeAccounts(positionId);
     const [walletCooldown] = deriveWalletCooldown(
       rodeoCoreProgram.programId,
@@ -1608,7 +1623,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   it("emits RewardFundingRecognized with recognized balance and actual vault balance", async () => {
     await fundRewardVault(new BN(5_000_000_000));
     await sleep(2_500);
-    await closeEpochs(8);
+    await ensureEpochsClosed();
 
     const vaultBefore = await getAccount(provider.connection, rewardVault);
     const recognizedPromise = collectOneEvent<{
