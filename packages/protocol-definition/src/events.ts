@@ -102,8 +102,28 @@ export type ReceiptBurnedEvent = ProtocolEventEnvelope<"receiptBurned", {
 
 export type EpochClosedEvent = ProtocolEventEnvelope<"epochClosed", {
   readonly epoch: bigint;
+  readonly epochEmission: bigint;
   readonly recognizedRewardBalanceAtomic: bigint;
   readonly totalAnsemLiabilityAtomic: bigint;
+}>;
+
+export type EpochsClosedEvent = ProtocolEventEnvelope<"epochsClosed", {
+  readonly count: bigint;
+  readonly lastClosedEpochTimestamp: bigint;
+}>;
+
+export type PositionClaimedEvent = ProtocolEventEnvelope<"positionClaimed", {
+  readonly position: string;
+  readonly owner: string;
+  readonly role: "cowboy" | "bull";
+  readonly amountAtomic: bigint;
+}>;
+
+export type BullPoolContributionEvent = ProtocolEventEnvelope<"bullPoolContribution", {
+  readonly source: "cowboyClaimTax" | "desperadoClaimTax";
+  readonly amountAtomic: bigint;
+  readonly totalActiveBullPower: bigint;
+  readonly rewardPerWeightScaledAfter: bigint;
 }>;
 
 export type ListingCreatedEvent = ProtocolEventEnvelope<"listingCreated", {
@@ -152,6 +172,9 @@ export type RodeoProtocolEvent =
   | ReceiptCreatedEvent
   | ReceiptBurnedEvent
   | EpochClosedEvent
+  | EpochsClosedEvent
+  | PositionClaimedEvent
+  | BullPoolContributionEvent
   | ListingCreatedEvent
   | ListingCancelledEvent
   | RandomnessRequestedEvent
