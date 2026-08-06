@@ -1,0 +1,14 @@
+## Summary
+- Permissionless epoch closure (`close_epochs`).
+- Reward-vault funding recognition (`recognize_rewards`).
+- Cowboy and Bull reward synchronization.
+- Normal Cowboy, Desperado, and Bull claims with wallet-level cooldown.
+- Associated events, errors, SDK types, and tests.
+
+Unstaking, marketplace, router, social competition, production randomness, mint theft, receipt creation, and governance execution remain out of scope.
+
+## Test plan
+- [ ] Rust unit tests
+- [ ] Simulator alignment tests
+- [ ] Anchor localnet integration tests
+- [ ] Full CI pipeline green

@@ -487,9 +487,7 @@ pub mod rodeo_core {
                 let cowboy_emission = math::floor_bps(epoch_emission, EMISSION_COWBOY_BPS as u64)?;
                 let suit_contribution = epoch_emission - cowboy_emission;
 
-                if cowboy_emission > 0
-                    && global_game_state.total_active_cowboy_weight > 0
-                {
+                if cowboy_emission > 0 && global_game_state.total_active_cowboy_weight > 0 {
                     let (new_index, new_remainder) = math::increment_cowboy_index(
                         reward_state.cowboy_reward_index,
                         reward_state.cowboy_index_remainder_scaled,
@@ -727,7 +725,8 @@ pub mod rodeo_core {
                     position: Some(position.key()),
                     recipient: owner,
                     amount_atomic: owner_amount,
-                    remaining_recognized_balance_atomic: reward_state.recognized_reward_balance_atomic,
+                    remaining_recognized_balance_atomic: reward_state
+                        .recognized_reward_balance_atomic,
                 });
             }
             Role::Bull => {
@@ -772,7 +771,8 @@ pub mod rodeo_core {
                     position: Some(position.key()),
                     recipient: owner,
                     amount_atomic: claimable,
-                    remaining_recognized_balance_atomic: reward_state.recognized_reward_balance_atomic,
+                    remaining_recognized_balance_atomic: reward_state
+                        .recognized_reward_balance_atomic,
                 });
             }
             _ => return err!(RodeoError::InvalidRole),
@@ -1575,14 +1575,10 @@ fn sync_cowboy_rewards(position: &mut Position, reward_state: &mut RewardState) 
         );
         position.claimable_ansem_atomic =
             math::checked_add_u64(position.claimable_ansem_atomic, accrued)?;
-        reward_state.cowboy_unmaterialized_liability_atomic = math::checked_sub_u64(
-            reward_state.cowboy_unmaterialized_liability_atomic,
-            accrued,
-        )?;
-        reward_state.position_claimable_liability_atomic = math::checked_add_u64(
-            reward_state.position_claimable_liability_atomic,
-            accrued,
-        )?;
+        reward_state.cowboy_unmaterialized_liability_atomic =
+            math::checked_sub_u64(reward_state.cowboy_unmaterialized_liability_atomic, accrued)?;
+        reward_state.position_claimable_liability_atomic =
+            math::checked_add_u64(reward_state.position_claimable_liability_atomic, accrued)?;
     }
 
     Ok(())
@@ -1624,10 +1620,8 @@ fn sync_bull_rewards(
             math::checked_add_u64(position.claimable_ansem_atomic, accrued)?;
         reward_state.bull_pool_liability_atomic =
             math::checked_sub_u64(reward_state.bull_pool_liability_atomic, accrued)?;
-        reward_state.position_claimable_liability_atomic = math::checked_add_u64(
-            reward_state.position_claimable_liability_atomic,
-            accrued,
-        )?;
+        reward_state.position_claimable_liability_atomic =
+            math::checked_add_u64(reward_state.position_claimable_liability_atomic, accrued)?;
     }
 
     Ok(())
@@ -1663,10 +1657,8 @@ fn distribute_bull_pool_contribution(
         )?;
         bull_accumulator.reward_per_weight_scaled = new_index;
         bull_accumulator.bull_index_remainder_scaled = new_remainder;
-        reward_state.bull_pool_liability_atomic = math::checked_add_u64(
-            reward_state.bull_pool_liability_atomic,
-            contribution,
-        )?;
+        reward_state.bull_pool_liability_atomic =
+            math::checked_add_u64(reward_state.bull_pool_liability_atomic, contribution)?;
     } else {
         reward_state.bull_pool_unallocated_liability_atomic = math::checked_add_u64(
             reward_state.bull_pool_unallocated_liability_atomic,
