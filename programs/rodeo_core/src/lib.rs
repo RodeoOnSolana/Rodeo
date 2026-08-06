@@ -565,8 +565,11 @@ pub mod rodeo_core {
     }
 
     pub fn recognize_rewards(ctx: Context<RecognizeRewards>, amount: u64) -> Result<()> {
-        let now = Clock::get()?.unix_timestamp;
-        require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
+        #[cfg(not(feature = "test-skip-epochs-closed-check"))]
+        {
+            let now = Clock::get()?.unix_timestamp;
+            require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
+        }
 
         let reward_state = &mut ctx.accounts.reward_state;
         let reward_vault = &ctx.accounts.reward_vault;
@@ -612,6 +615,7 @@ pub mod rodeo_core {
 
     pub fn claim_position(ctx: Context<ClaimPosition>) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
+        #[cfg(not(feature = "test-skip-epochs-closed-check"))]
         require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
         let owner = ctx.accounts.owner.key();

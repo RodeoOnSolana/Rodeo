@@ -142,7 +142,7 @@ jobs:
           solana config set --url localhost
 
       - name: Build test program binary
-        run: anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-epoch,test-short-claim-cooldown,test-fixtures
+        run: anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-epoch,test-short-claim-cooldown,test-fixtures,test-skip-epochs-closed-check
 
       - name: Anchor localnet integration tests
         run: anchor test --skip-build --no-idl

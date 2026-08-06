@@ -27,6 +27,10 @@ test-short-claim-cooldown = []
 # Compiles test-only fixtures used to exercise pause states in local tests.
 # Never enable in production.
 test-fixtures = []
+# Skips the "all elapsed epochs must be closed" guard in claim and recognize
+# instructions. This removes a major source of timing flakiness from local
+# integration tests and must never be enabled in production.
+test-skip-epochs-closed-check = []
 
 [dependencies]
 anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }

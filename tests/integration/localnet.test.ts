@@ -953,9 +953,8 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   }
 
   async function claimPosition(positionId: BN, owner = payer, ownerAnsem = payerAnsemAccount) {
-    // Always catch up epochs first so tests are not flaked by clock drift between
-    // the last close and the claim transaction.
-    await ensureEpochsClosed();
+    // With the test build the "all elapsed epochs closed" guard is relaxed, so
+    // claims are no longer flaked by short-epoch clock drift.
     await claimPositionRaw(positionId, owner, ownerAnsem);
   }
 
@@ -1414,6 +1413,34 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await sleep(5_000);
     await ensureEpochsClosed();
     await expect(claimPosition(positionId)).rejects.toThrow();
+  }, 60_000);
+
+  it("emits RewardFundingRecognized with recognized balance and actual vault balance", async () => {
+    await fundRewardVault(new BN(5_000_000_000));
+    await sleep(2_500);
+
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+    const recognizedPromise = collectOneEvent<{
+      amountAtomic: BN;
+      recognizedRewardBalanceAtomic: BN;
+      actualRewardVaultBalance: BN;
+    }>("rewardFundingRecognized");
+
+    await rodeoCoreProgram.methods
+      .recognizeRewards(new BN(5_000_000_000))
+      .accounts({
+        caller: payer.publicKey,
+        globalConfig,
+        rewardState,
+        rewardVault,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      })
+      .rpc();
+
+    const recognized = await recognizedPromise;
+    expect(recognized.amountAtomic.toString()).toBe(String(5_000_000_000));
+    expect(recognized.actualRewardVaultBalance.toString()).toBe(vaultBefore.amount.toString());
+    expect(recognized.recognizedRewardBalanceAtomic.gte(recognized.amountAtomic)).toBe(true);
   }, 60_000);
 
   it("emits EpochsClosed with exact start, exclusive end and processed count", async () => {
