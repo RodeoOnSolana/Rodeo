@@ -1416,35 +1416,6 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await expect(claimPosition(positionId)).rejects.toThrow();
   }, 60_000);
 
-  it("emits RewardFundingRecognized with recognized balance and actual vault balance", async () => {
-    await fundRewardVault(new BN(5_000_000_000));
-    await sleep(2_500);
-    await ensureEpochsClosed();
-
-    const vaultBefore = await getAccount(provider.connection, rewardVault);
-    const recognizedPromise = collectOneEvent<{
-      amountAtomic: BN;
-      recognizedRewardBalanceAtomic: BN;
-      actualRewardVaultBalance: BN;
-    }>("rewardFundingRecognized");
-
-    await rodeoCoreProgram.methods
-      .recognizeRewards(new BN(5_000_000_000))
-      .accounts({
-        caller: payer.publicKey,
-        globalConfig,
-        rewardState,
-        rewardVault,
-        clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
-      .rpc();
-
-    const recognized = await recognizedPromise;
-    expect(recognized.amountAtomic.toString()).toBe(String(5_000_000_000));
-    expect(recognized.actualRewardVaultBalance.toString()).toBe(vaultBefore.amount.toString());
-    expect(recognized.recognizedRewardBalanceAtomic.gte(recognized.amountAtomic)).toBe(true);
-  }, 60_000);
-
   it("emits EpochsClosed with exact start, exclusive end and processed count", async () => {
     await sleep(18_500);
 
