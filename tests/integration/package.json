@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@coral-xyz/anchor": "0.31.1",
+    "@rodeo/protocol-definition": "workspace:*",
     "@rodeo/sdk": "workspace:*",
     "@solana/spl-token": "0.4.13"
   }
