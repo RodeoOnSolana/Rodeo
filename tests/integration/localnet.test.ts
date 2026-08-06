@@ -968,6 +968,10 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     return new Promise((r) => setTimeout(r, ms));
   }
 
+  function toBase58(value: string | { toBase58(): string }): string {
+    return typeof value === "string" ? value : value.toBase58();
+  }
+
   function collectEvents<T>(eventName: string, expectedCount: number, timeoutMs = 10_000): Promise<T[]> {
     return new Promise((resolve) => {
       const events: T[] = [];
@@ -1295,9 +1299,9 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await settleReveal(positionId);
 
     await fundRewardVault(new BN(10_000_000_000));
-    // Wait for the short pot-fill plus one epoch.
-    await new Promise((r) => setTimeout(r, 2_500));
-    await closeEpochs(8);
+    // Wait for at least one short epoch to elapse.
+    await sleep(5_000);
+    await ensureEpochsClosed();
 
     const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     expect(reward.currentEpoch.gtn(before.currentEpoch)).toBe(true);
@@ -1330,8 +1334,8 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await fundRewardVault(fundAmount);
 
     // Elapse an epoch before recognition.
-    await new Promise((r) => setTimeout(r, 2_500));
-    await closeEpochs(8);
+    await sleep(5_000);
+    await ensureEpochsClosed();
 
     const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     await rodeoCoreProgram.methods
@@ -1395,8 +1399,8 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await provider.connection.confirmTransaction(sig);
 
     await fundRewardVault(new BN(10_000_000_000));
-    await new Promise((r) => setTimeout(r, 2_500));
-    await closeEpochs(8);
+    await sleep(5_000);
+    await ensureEpochsClosed();
 
     await expect(
       claimPosition(positionId, impostor, payerAnsemAccount),
@@ -1407,16 +1411,16 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const positionId = new BN(nextPositionId++);
     await stakeAndCommit(positionId);
     await fundRewardVault(new BN(1_000_000_000));
-    await new Promise((r) => setTimeout(r, 2_500));
-    await closeEpochs(8);
+    await sleep(5_000);
+    await ensureEpochsClosed();
     await expect(claimPosition(positionId)).rejects.toThrow();
   }, 60_000);
 
   it("synchronizes and pays a Cowboy claim with the 80/20 split", async () => {
     const positionId = await stakeAndSettleWithRole("cowboy");
     await fundRewardVault(new BN(10_000_000_000));
-    await new Promise((r) => setTimeout(r, 2_500));
-    await closeEpochs(8);
+    await sleep(5_000);
+    await ensureEpochsClosed();
 
     const posBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(
       derivePosition(rodeoCoreProgram.programId, globalConfig, positionId)[0],
@@ -1442,8 +1446,8 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const bullId = await stakeAndSettleWithRole("bull");
 
     await fundRewardVault(new BN(10_000_000_000));
-    await new Promise((r) => setTimeout(r, 2_500));
-    await closeEpochs(8);
+    await sleep(5_000);
+    await ensureEpochsClosed();
 
     // Claim the Cowboy first so the 20% tax is routed into the Bull pool.
     await claimPosition(cowboyId);
@@ -1477,8 +1481,8 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const positionB = await stakeAndSettleWithRole("cowboy");
 
     await fundRewardVault(new BN(10_000_000_000));
-    await new Promise((r) => setTimeout(r, 2_500));
-    await closeEpochs(8);
+    await sleep(5_000);
+    await ensureEpochsClosed();
 
     await claimPosition(positionA);
     await expect(claimPosition(positionB)).rejects.toThrow();
@@ -1491,8 +1495,8 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const positionId = await stakeAndSettleWithRole("cowboy");
 
     await fundRewardVault(new BN(10_000_000_000));
-    await new Promise((r) => setTimeout(r, 2_500));
-    await closeEpochs(8);
+    await sleep(5_000);
+    await ensureEpochsClosed();
 
     const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const vaultBefore = await getAccount(provider.connection, rewardVault);
@@ -1520,8 +1524,8 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   it("emits PositionClaimed and RewardPaid with correct portions for a Cowboy claim", async () => {
     const positionId = await stakeAndSettleWithRole("cowboy");
     await fundRewardVault(new BN(10_000_000_000));
-    await sleep(2_500);
-    await closeEpochs(8);
+    await sleep(5_000);
+    await ensureEpochsClosed();
 
     const posBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(
       derivePosition(rodeoCoreProgram.programId, globalConfig, positionId)[0],
@@ -1549,15 +1553,15 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const positionClaimed = await positionClaimedPromise;
     const rewardPaid = await rewardPaidPromise;
 
-    expect(positionClaimed.position).toBe(
+    expect(toBase58(positionClaimed.position)).toBe(
       derivePosition(rodeoCoreProgram.programId, globalConfig, positionId)[0].toBase58(),
     );
-    expect(positionClaimed.owner).toBe(payer.publicKey.toBase58());
+    expect(toBase58(positionClaimed.owner)).toBe(payer.publicKey.toBase58());
     expect(positionClaimed.ownerAmount.toString()).toBe(expectedOwner.toString());
     expect(positionClaimed.bullPoolAmount.toString()).toBe(expectedBull.toString());
 
-    expect(rewardPaid.position).toBe(positionClaimed.position);
-    expect(rewardPaid.owner).toBe(payer.publicKey.toBase58());
+    expect(toBase58(rewardPaid.position)).toBe(toBase58(positionClaimed.position));
+    expect(toBase58(rewardPaid.owner)).toBe(payer.publicKey.toBase58());
     expect(rewardPaid.amountAtomic.toString()).toBe(expectedOwner.toString());
     eventReason(rewardPaid, "cowboyClaim");
   }, 60_000);
@@ -1565,8 +1569,8 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   it("emits PositionClaimed and RewardPaid for a Bull claim with zero Bull-pool amount", async () => {
     const positionId = await stakeAndSettleWithRole("bull");
     await fundRewardVault(new BN(10_000_000_000));
-    await sleep(2_500);
-    await closeEpochs(8);
+    await sleep(5_000);
+    await ensureEpochsClosed();
 
     const positionClaimedPromise = collectOneEvent<{
       position: string;
@@ -1595,8 +1599,8 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const cowboyId = await stakeAndSettleWithRole("cowboy");
     const bullId = await stakeAndSettleWithRole("bull");
     await fundRewardVault(new BN(10_000_000_000));
-    await sleep(2_500);
-    await closeEpochs(8);
+    await sleep(5_000);
+    await ensureEpochsClosed();
 
     const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const bullPoolPromise = collectOneEvent<{
