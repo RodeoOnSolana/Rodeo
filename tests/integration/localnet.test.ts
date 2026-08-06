@@ -668,16 +668,18 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     // that all subsequent claim scenarios have non-zero emission.
     await ensureEpochsClosed();
     await fundRewardVault(new BN(1_000_000_000_000));
-    await rodeoCoreProgram.methods
-      .recognizeRewards(new BN(1_000_000_000_000))
-      .accounts({
-        caller: payer.publicKey,
-        globalConfig,
-        rewardState,
-        rewardVault,
-        clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
-      .rpc();
+    await runWhenCaughtUp(() =>
+      rodeoCoreProgram.methods
+        .recognizeRewards(new BN(1_000_000_000_000))
+        .accounts({
+          caller: payer.publicKey,
+          globalConfig,
+          rewardState,
+          rewardVault,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .rpc(),
+    );
     const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     expect(reward.recognizedRewardBalanceAtomic.gtn(0)).toBe(true);
   }, 60_000);
@@ -905,14 +907,38 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   }
 
   async function ensureEpochsClosed() {
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 100; i++) {
+      const before = (
+        await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState)
+      ).currentEpoch;
       try {
         await closeEpochsRaw(8);
       } catch (err) {
         if (isNoElapsedEpoch(err)) return;
         throw err;
       }
+      const after = (
+        await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState)
+      ).currentEpoch;
+      // If fewer than the max batch was processed, there were no more elapsed
+      // epochs at the moment the transaction executed.
+      if (after.sub(before).toNumber() < 8) return;
     }
+  }
+
+  async function runWhenCaughtUp<T>(fn: () => Promise<T>, retries = 10): Promise<T> {
+    for (let i = 0; i < retries; i++) {
+      await ensureEpochsClosed();
+      try {
+        return await fn();
+      } catch (err) {
+        const code = (err as { error?: { errorCode?: { code?: string } } }).error?.errorCode
+          ?.code;
+        if (code !== "EpochsNotClosed") throw err;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    throw new Error("runWhenCaughtUp exceeded retries");
   }
 
   async function claimPositionRaw(positionId: BN, owner = payer, ownerAnsem = payerAnsemAccount) {
@@ -943,10 +969,9 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   }
 
   async function claimPosition(positionId: BN, owner = payer, ownerAnsem = payerAnsemAccount) {
-    // Always catch up epochs first so tests are not flaked by clock drift between
-    // the last close and the claim transaction.
-    await ensureEpochsClosed();
-    await claimPositionRaw(positionId, owner, ownerAnsem);
+    // Always catch up epochs first, and retry if a new epoch elapses between the
+    // catch-up and the claim transaction landing.
+    await runWhenCaughtUp(() => claimPositionRaw(positionId, owner, ownerAnsem));
   }
 
   function getRole(pos: PositionAccount): "cowboy" | "bull" | null {
@@ -1342,17 +1367,18 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await ensureEpochsClosed();
 
     const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
-    await ensureEpochsClosed();
-    await rodeoCoreProgram.methods
-      .recognizeRewards(fundAmount)
-      .accounts({
-        caller: payer.publicKey,
-        globalConfig,
-        rewardState,
-        rewardVault,
-        clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
-      .rpc();
+    await runWhenCaughtUp(() =>
+      rodeoCoreProgram.methods
+        .recognizeRewards(fundAmount)
+        .accounts({
+          caller: payer.publicKey,
+          globalConfig,
+          rewardState,
+          rewardVault,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .rpc(),
+    );
 
     const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
@@ -1425,16 +1451,15 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const positionId = await stakeAndSettleWithRole("cowboy");
     await fundRewardVault(new BN(10_000_000_000));
     await sleep(5_000);
-    await ensureEpochsClosed();
 
-    const posBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(
-      derivePosition(rodeoCoreProgram.programId, globalConfig, positionId)[0],
-    );
-    const claimable = posBefore.claimableAnsemAtomic;
-    const ownerAmount = claimable.muln(8_000).divn(10_000);
-
+    let posBefore: PositionAccount;
     const ownerBefore = await getAccount(provider.connection, payerAnsemAccount);
-    await claimPositionRaw(positionId);
+    await runWhenCaughtUp(async () => {
+      posBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(
+        derivePosition(rodeoCoreProgram.programId, globalConfig, positionId)[0],
+      );
+      await claimPositionRaw(positionId);
+    });
     const ownerAfter = await getAccount(provider.connection, payerAnsemAccount);
 
     const posAfter = await rodeoAccounts(rodeoCoreProgram).position.fetch(
@@ -1442,6 +1467,8 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     );
     expect(posAfter.claimableAnsemAtomic.toString()).toBe("0");
 
+    const claimable = posBefore!.claimableAnsemAtomic;
+    const ownerAmount = claimable.muln(8_000).divn(10_000);
     const payout = new BN(ownerAfter.amount.toString()).sub(new BN(ownerBefore.amount.toString()));
     expect(payout.toString()).toBe(ownerAmount.toString());
   }, 60_000);
@@ -1452,19 +1479,21 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
 
     await fundRewardVault(new BN(10_000_000_000));
     await sleep(5_000);
-    await ensureEpochsClosed();
 
     // Claim the Cowboy first so the 20% tax is routed into the Bull pool.
-    await claimPositionRaw(cowboyId);
+    await runWhenCaughtUp(() => claimPositionRaw(cowboyId));
 
     const ownerBefore = await getAccount(provider.connection, payerAnsemAccount);
     const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
-    const posBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(
-      derivePosition(rodeoCoreProgram.programId, globalConfig, bullId)[0],
-    );
-    expect(posBefore.claimableAnsemAtomic.gtn(0)).toBe(true);
 
-    await claimPositionRaw(bullId);
+    let posBefore: PositionAccount;
+    await runWhenCaughtUp(async () => {
+      posBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(
+        derivePosition(rodeoCoreProgram.programId, globalConfig, bullId)[0],
+      );
+      await claimPositionRaw(bullId);
+    });
+    expect(posBefore!.claimableAnsemAtomic.gtn(0)).toBe(true);
 
     const ownerAfter = await getAccount(provider.connection, payerAnsemAccount);
     const payout = new BN(ownerAfter.amount.toString()).sub(new BN(ownerBefore.amount.toString()));
@@ -1489,11 +1518,11 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await sleep(5_000);
     await ensureEpochsClosed();
 
-    await claimPositionRaw(positionA);
-    await expect(claimPositionRaw(positionB)).rejects.toThrow();
+    await claimPosition(positionA);
+    await expect(claimPosition(positionB)).rejects.toThrow();
 
     await new Promise((r) => setTimeout(r, 2_500));
-    await claimPositionRaw(positionB);
+    await claimPosition(positionB);
   }, 60_000);
 
   it("conserves ANSEM liabilities after a Cowboy claim", async () => {
@@ -1506,7 +1535,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const vaultBefore = await getAccount(provider.connection, rewardVault);
 
-    await claimPositionRaw(positionId);
+    await claimPosition(positionId);
 
     const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const vaultAfter = await getAccount(provider.connection, rewardVault);
