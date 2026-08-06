@@ -7,6 +7,7 @@ import {
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccount,
   createMint,
+  createTransferInstruction,
   getAccount,
   getMint,
   mintTo,
@@ -238,6 +239,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   let principalVault: web3.PublicKey;
   let rewardVault: web3.PublicKey;
   let payerRodeoAccount: web3.PublicKey;
+  let payerAnsemAccount: web3.PublicKey;
 
   const upgradeCouncil = web3.Keypair.generate();
   const treasuryCouncil = web3.Keypair.generate();
@@ -288,10 +290,25 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       rodeoMint,
       payer.publicKey,
     );
+    payerAnsemAccount = await createAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      ansemMint,
+      payer.publicKey,
+    );
 
     // The protocol requires the full RODEO supply to be minted before initialization.
     const expectedTotalSupply = 1_000_000_000_000_000n;
     await mintTo(provider.connection, payer, rodeoMint, payerRodeoAccount, payer, expectedTotalSupply);
+    // Seed a pool of ANSEM that can be sent into the reward vault for testing.
+    await mintTo(
+      provider.connection,
+      payer,
+      ansemMint,
+      payerAnsemAccount,
+      payer,
+      10_000_000_000n,
+    );
     await revokeMintAuthorities(provider.connection, payer, rodeoMint);
     await revokeMintAuthorities(provider.connection, payer, ansemMint);
 
@@ -685,6 +702,89 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       .rpc();
   }
 
+  function deriveWalletCooldown(
+    programId: web3.PublicKey,
+    globalConfig: web3.PublicKey,
+    wallet: web3.PublicKey,
+  ): [web3.PublicKey, number] {
+    return web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("claim-cooldown"), globalConfig.toBuffer(), wallet.toBuffer()],
+      programId,
+    );
+  }
+
+  async function fundRewardVault(amount: BN) {
+    const transferIx = createTransferInstruction(
+      payerAnsemAccount,
+      rewardVault,
+      payer.publicKey,
+      BigInt(amount.toString()),
+    );
+    await provider.sendAndConfirm(new web3.Transaction().add(transferIx));
+  }
+
+  async function closeEpochs(maxEpochs: number) {
+    await rodeoCoreProgram.methods
+      .closeEpochs(maxEpochs)
+      .accounts({
+        caller: payer.publicKey,
+        globalConfig,
+        rewardState,
+        globalGameState,
+        bullAccumulator,
+        rewardVault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      })
+      .rpc();
+  }
+
+  async function claimPosition(positionId: BN, owner = payer, ownerAnsem = payerAnsemAccount) {
+    const { position } = await deriveStakeAccounts(positionId);
+    const [walletCooldown] = deriveWalletCooldown(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      owner.publicKey,
+    );
+    await rodeoCoreProgram.methods
+      .claimPosition()
+      .accounts({
+        owner: owner.publicKey,
+        globalConfig,
+        rewardState,
+        globalGameState,
+        bullAccumulator,
+        position,
+        walletClaimCooldown: walletCooldown,
+        rewardVault,
+        ownerAnsemAccount: ownerAnsem,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: web3.SystemProgram.programId,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      })
+      .signers([owner])
+      .rpc();
+  }
+
+  function getRole(pos: PositionAccount): "cowboy" | "bull" | null {
+    if (pos.role.cowboy) return "cowboy";
+    if (pos.role.bull) return "bull";
+    return null;
+  }
+
+  async function stakeAndSettleWithRole(desiredRole: "cowboy" | "bull"): Promise<BN> {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const positionId = new BN(nextPositionId++);
+      await stakeAndCommit(positionId);
+      await settleReveal(positionId);
+      const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(
+        derivePosition(rodeoCoreProgram.programId, globalConfig, positionId)[0],
+      );
+      if (getRole(pos) === desiredRole) return positionId;
+    }
+    throw new Error(`Could not roll a ${desiredRole} position after 50 attempts`);
+  }
+
   it("stakes the configured amount and creates a reveal-pending position", async () => {
     const positionId = new BN(nextPositionId++);
     const vaultBefore = await getAccount(provider.connection, principalVault);
@@ -962,6 +1062,216 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await stakeAndCommit(positionId);
     await settleReveal(positionId);
     await expect(recoverRevealTimeout(positionId)).rejects.toThrow();
+  }, 60_000);
+
+  it("rejects close_epochs with max_epochs == 0", async () => {
+    await expect(closeEpochs(0)).rejects.toThrow();
+  }, 30_000);
+
+  it("rejects close_epochs when no epoch has elapsed", async () => {
+    await expect(closeEpochs(1)).rejects.toThrow();
+  }, 30_000);
+
+  it("closes one elapsed epoch and emits liabilities", async () => {
+    const positionId = new BN(nextPositionId++);
+    await stakeAndCommit(positionId);
+    await settleReveal(positionId);
+
+    await fundRewardVault(new BN(10_000_000_000));
+    // Wait for the short pot-fill plus one epoch.
+    await new Promise((r) => setTimeout(r, 2_500));
+    await closeEpochs(1);
+
+    const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    expect(reward.currentEpoch.toString()).toBe("1");
+    expect(reward.ansemEmittedAtomic.gtn(0)).toBe(true);
+    expect(reward.totalAnsemLiabilityAtomic.gtn(0)).toBe(true);
+  }, 60_000);
+
+  it("caps epoch closure at eight per transaction", async () => {
+    // Wait for at least nine short epochs after init.
+    await new Promise((r) => setTimeout(r, 18_500));
+
+    const before = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    await closeEpochs(8);
+    const mid = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    expect(mid.currentEpoch.sub(before.currentEpoch).toNumber()).toBe(8);
+
+    // Wait for another epoch boundary before the next catch-up call.
+    await new Promise((r) => setTimeout(r, 5_000));
+    await closeEpochs(8);
+    const after = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    expect(after.currentEpoch.sub(mid.currentEpoch).toNumber()).toBeGreaterThanOrEqual(1);
+  }, 60_000);
+
+  it("recognizes reward-vault funding after catching up epochs", async () => {
+    const positionId = new BN(nextPositionId++);
+    await stakeAndCommit(positionId);
+    await settleReveal(positionId);
+
+    const fundAmount = new BN(5_000_000_000);
+    await fundRewardVault(fundAmount);
+
+    // Elapse an epoch before recognition.
+    await new Promise((r) => setTimeout(r, 2_500));
+    await closeEpochs(1);
+
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    await rodeoCoreProgram.methods
+      .recognizeRewards(fundAmount)
+      .accounts({
+        caller: payer.publicKey,
+        globalConfig,
+        rewardState,
+        rewardVault,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      })
+      .rpc();
+
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.add(fundAmount).toString(),
+    );
+    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBefore.totalAnsemLiabilityAtomic.toString(),
+    );
+  }, 60_000);
+
+  it("rejects claim when epochs are not caught up", async () => {
+    const positionId = new BN(nextPositionId++);
+    await stakeAndCommit(positionId);
+    await settleReveal(positionId);
+    await fundRewardVault(new BN(1_000_000_000));
+    await expect(claimPosition(positionId)).rejects.toThrow();
+  }, 60_000);
+
+  it("rejects claim by a non-owner", async () => {
+    const positionId = await stakeAndSettleWithRole("cowboy");
+    const impostor = web3.Keypair.generate();
+    const sig = await provider.connection.requestAirdrop(impostor.publicKey, 1_000_000_000);
+    await provider.connection.confirmTransaction(sig);
+
+    await fundRewardVault(new BN(10_000_000_000));
+    await new Promise((r) => setTimeout(r, 2_500));
+    await closeEpochs(1);
+
+    await expect(
+      claimPosition(positionId, impostor, payerAnsemAccount),
+    ).rejects.toThrow();
+  }, 60_000);
+
+  it("rejects claim while a randomness action is pending", async () => {
+    const positionId = new BN(nextPositionId++);
+    await stakeAndCommit(positionId);
+    await fundRewardVault(new BN(1_000_000_000));
+    await new Promise((r) => setTimeout(r, 2_500));
+    await closeEpochs(1);
+    await expect(claimPosition(positionId)).rejects.toThrow();
+  }, 60_000);
+
+  it("synchronizes and pays a Cowboy claim with the 80/20 split", async () => {
+    const positionId = await stakeAndSettleWithRole("cowboy");
+    await fundRewardVault(new BN(10_000_000_000));
+    await new Promise((r) => setTimeout(r, 2_500));
+    await closeEpochs(1);
+
+    const posBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(
+      derivePosition(rodeoCoreProgram.programId, globalConfig, positionId)[0],
+    );
+    const claimable = posBefore.claimableAnsemAtomic;
+    const ownerAmount = claimable.muln(8_000).divn(10_000);
+
+    const ownerBefore = await getAccount(provider.connection, payerAnsemAccount);
+    await claimPosition(positionId);
+    const ownerAfter = await getAccount(provider.connection, payerAnsemAccount);
+
+    const posAfter = await rodeoAccounts(rodeoCoreProgram).position.fetch(
+      derivePosition(rodeoCoreProgram.programId, globalConfig, positionId)[0],
+    );
+    expect(posAfter.claimableAnsemAtomic.toString()).toBe("0");
+
+    const payout = new BN(ownerAfter.amount.toString()).sub(new BN(ownerBefore.amount.toString()));
+    expect(payout.toString()).toBe(ownerAmount.toString());
+  }, 60_000);
+
+  it("synchronizes and pays a Bull claim 100% of accrued Bull-pool rewards", async () => {
+    const cowboyId = await stakeAndSettleWithRole("cowboy");
+    const bullId = await stakeAndSettleWithRole("bull");
+
+    await fundRewardVault(new BN(10_000_000_000));
+    await new Promise((r) => setTimeout(r, 2_500));
+    await closeEpochs(1);
+
+    // Claim the Cowboy first so the 20% tax is routed into the Bull pool.
+    await claimPosition(cowboyId);
+
+    const ownerBefore = await getAccount(provider.connection, payerAnsemAccount);
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const posBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(
+      derivePosition(rodeoCoreProgram.programId, globalConfig, bullId)[0],
+    );
+    expect(posBefore.claimableAnsemAtomic.gtn(0)).toBe(true);
+
+    await claimPosition(bullId);
+
+    const ownerAfter = await getAccount(provider.connection, payerAnsemAccount);
+    const payout = new BN(ownerAfter.amount.toString()).sub(new BN(ownerBefore.amount.toString()));
+    expect(payout.gtn(0)).toBe(true);
+
+    const posAfter = await rodeoAccounts(rodeoCoreProgram).position.fetch(
+      derivePosition(rodeoCoreProgram.programId, globalConfig, bullId)[0],
+    );
+    expect(posAfter.claimableAnsemAtomic.toString()).toBe("0");
+
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.sub(payout).toString(),
+    );
+  }, 60_000);
+
+  it("enforces the wallet-level claim cooldown", async () => {
+    const positionA = await stakeAndSettleWithRole("cowboy");
+    const positionB = await stakeAndSettleWithRole("cowboy");
+
+    await fundRewardVault(new BN(10_000_000_000));
+    await new Promise((r) => setTimeout(r, 2_500));
+    await closeEpochs(1);
+
+    await claimPosition(positionA);
+    await expect(claimPosition(positionB)).rejects.toThrow();
+
+    await new Promise((r) => setTimeout(r, 2_500));
+    await claimPosition(positionB);
+  }, 60_000);
+
+  it("conserves ANSEM liabilities after a Cowboy claim", async () => {
+    const positionId = await stakeAndSettleWithRole("cowboy");
+
+    await fundRewardVault(new BN(10_000_000_000));
+    await new Promise((r) => setTimeout(r, 2_500));
+    await closeEpochs(1);
+
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+
+    await claimPosition(positionId);
+
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultAfter = await getAccount(provider.connection, rewardVault);
+
+    expect(rewardAfter.recognizedRewardBalanceAtomic.lte(new BN(vaultAfter.amount.toString()))).toBe(
+      true,
+    );
+    const totalLiability = rewardAfter.positionClaimableLiabilityAtomic
+      .add(rewardAfter.cowboyUnmaterializedLiabilityAtomic)
+      .add(rewardAfter.bullPoolLiabilityAtomic)
+      .add(rewardAfter.bullPoolUnallocatedLiabilityAtomic)
+      .add(rewardAfter.suitVaultLiabilityAtomic);
+    expect(totalLiability.toString()).toBe(rewardAfter.totalAnsemLiabilityAtomic.toString());
+    expect(rewardAfter.totalAnsemLiabilityAtomic.lte(rewardAfter.recognizedRewardBalanceAtomic)).toBe(true);
+    expect(
+      new BN(vaultBefore.amount.toString()).sub(new BN(vaultAfter.amount.toString())).toString(),
+    ).toBe(rewardBefore.recognizedRewardBalanceAtomic.sub(rewardAfter.recognizedRewardBalanceAtomic).toString());
   }, 60_000);
 });
 

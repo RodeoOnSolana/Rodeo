@@ -2383,4 +2383,147 @@ mod tests {
     fn test_build_has_test_fixtures() {
         let _ = test_set_pause_flags as fn(Context<TestSetPauseFlags>, bool, bool) -> Result<()>;
     }
+
+    fn dummy_position() -> state::Position {
+        state::Position {
+            version: ACCOUNT_VERSION_POSITION,
+            owner: Pubkey::default(),
+            position_id: 1,
+            principal_amount: 0,
+            role: state::Role::Cowboy,
+            status: state::PositionStatus::Active,
+            cowboy_kind: state::CowboyKind::Rank(4),
+            bull_tier: 0,
+            suit: state::Suit::Unassigned,
+            opened_at: 0,
+            active_since: 0,
+            unstake_eligible_at: 0,
+            accrual_weight: 10_000,
+            buck_power: 0,
+            last_cowboy_reward_index: 0,
+            last_bull_reward_per_weight: 0,
+            cowboy_accrual_remainder_scaled: 0,
+            bull_accrual_remainder_scaled: 0,
+            claimable_ansem_atomic: 0,
+            settlement_nonce: 0,
+            state_version: 0,
+            listing_nonce: 0,
+            receipt_asset: Pubkey::default(),
+            pending_action_active: false,
+            pending_action_type: state::ActionType::Reveal,
+            pending_action_nonce: 0,
+            next_action_nonce: 0,
+            bump: 0,
+        }
+    }
+
+    fn dummy_reward_state() -> state::RewardState {
+        state::RewardState {
+            version: ACCOUNT_VERSION_REWARD_STATE,
+            global_config: Pubkey::default(),
+            current_epoch: 0,
+            epoch_started_at: 0,
+            last_closed_epoch_timestamp: 0,
+            total_ansem_liability_atomic: 0,
+            cowboy_unmaterialized_liability_atomic: 100_000,
+            position_claimable_liability_atomic: 0,
+            bull_pool_liability_atomic: 0,
+            bull_pool_unallocated_liability_atomic: 0,
+            suit_vault_liability_atomic: 0,
+            recognized_reward_balance_atomic: 0,
+            ansem_emitted_atomic: 0,
+            ansem_claimed_atomic: 0,
+            orphaned_reward_released_atomic: 0,
+            cowboy_reward_index: COWBOY_REWARD_INDEX_SCALE * 5,
+            cowboy_index_remainder_scaled: 0,
+            cowboy_orphaned_accrual_remainder_scaled: 0,
+            suit_epoch: 0,
+            bump: 0,
+        }
+    }
+
+    #[test]
+    fn sync_cowboy_rewards_accrues_exact_amount() {
+        let mut pos = dummy_position();
+        let mut reward = dummy_reward_state();
+        sync_cowboy_rewards(&mut pos, &mut reward).unwrap();
+
+        // Index delta = 5 * scale; weight = 10_000 => accrued = 5 * 10_000 = 50_000.
+        assert_eq!(pos.claimable_ansem_atomic, 50_000);
+        assert_eq!(reward.cowboy_unmaterialized_liability_atomic, 50_000);
+        assert_eq!(reward.position_claimable_liability_atomic, 50_000);
+        assert_eq!(pos.last_cowboy_reward_index, reward.cowboy_reward_index);
+    }
+
+    #[test]
+    fn sync_cowboy_rewards_preserves_total_liability() {
+        let mut pos = dummy_position();
+        let mut reward = dummy_reward_state();
+        let before = reward.total_ansem_liability_atomic;
+        sync_cowboy_rewards(&mut pos, &mut reward).unwrap();
+        assert_eq!(reward.total_ansem_liability_atomic, before);
+    }
+
+    fn dummy_bull_accumulator() -> state::BullAccumulator {
+        state::BullAccumulator {
+            version: ACCOUNT_VERSION_BULL_ACCUMULATOR,
+            global_config: Pubkey::default(),
+            reward_per_weight_scaled: REWARD_PER_WEIGHT_SCALE * 3,
+            bull_index_remainder_scaled: 0,
+            bull_orphaned_accrual_remainder_scaled: 0,
+            bump: 0,
+        }
+    }
+
+    #[test]
+    fn sync_bull_rewards_accrues_exact_amount() {
+        let mut pos = dummy_position();
+        pos.role = state::Role::Bull;
+        pos.buck_power = 4;
+        let mut reward = dummy_reward_state();
+        reward.bull_pool_liability_atomic = 12;
+        let mut acc = dummy_bull_accumulator();
+        sync_bull_rewards(&mut pos, &mut acc, &mut reward).unwrap();
+
+        // Index delta = 3 * scale; power = 4 => accrued = 12.
+        assert_eq!(pos.claimable_ansem_atomic, 12);
+        assert_eq!(reward.bull_pool_liability_atomic, 0);
+        assert_eq!(reward.position_claimable_liability_atomic, 12);
+        assert_eq!(
+            pos.last_bull_reward_per_weight,
+            acc.reward_per_weight_scaled
+        );
+    }
+
+    #[test]
+    fn distribute_bull_pool_contribution_updates_accumulator() {
+        let mut reward = dummy_reward_state();
+        let mut acc = dummy_bull_accumulator();
+        let game = state::GlobalGameState {
+            version: ACCOUNT_VERSION_GLOBAL_GAME_STATE,
+            global_config: Pubkey::default(),
+            total_completed_reveals: 0,
+            live_position_count: 0,
+            active_cowboy_count: 0,
+            active_bull_count: 1,
+            total_active_cowboy_weight: 0,
+            total_active_bull_power: 4,
+            accounted_principal_atomic: 0,
+            bump: 0,
+        };
+        distribute_bull_pool_contribution(
+            BullPoolContributionSource::CowboyClaimTax,
+            12,
+            &mut reward,
+            &mut acc,
+            &game,
+        )
+        .unwrap();
+
+        assert_eq!(reward.bull_pool_liability_atomic, 12);
+        assert_eq!(
+            acc.reward_per_weight_scaled,
+            REWARD_PER_WEIGHT_SCALE * 3 + (12 * REWARD_PER_WEIGHT_SCALE / 4)
+        );
+    }
 }

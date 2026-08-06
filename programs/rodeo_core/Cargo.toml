@@ -20,6 +20,10 @@ idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 mock-randomness = []
 # Reduces the reveal timeout for local tests. Never enable in production.
 test-short-timeout = []
+# Reduces the epoch duration and pot-fill period for local tests. Never enable in production.
+test-short-epoch = []
+# Reduces the wallet-level claim cooldown for local tests. Never enable in production.
+test-short-claim-cooldown = []
 # Compiles test-only fixtures used to exercise pause states in local tests.
 # Never enable in production.
 test-fixtures = []

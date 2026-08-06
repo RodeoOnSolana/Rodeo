@@ -692,4 +692,31 @@ describe("Protocol v1.3 simulator invariants", () => {
     simulator.state.cowboyOrphanedAccrualRemainderScaled = COWBOY_REWARD_INDEX_SCALE;
     expect(() => simulator.apply({ type: "directRewardTransfer", settlementId: "dr1", ansemAtomic: 1n })).toThrow("underflow");
   });
+
+  it("recognizes only the requested amount capped by the unrecognized surplus", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealCowboy("rank4", "hearts") });
+    simulator.apply({ type: "directRewardTransfer", settlementId: "dr1", ansemAtomic: 1_000n });
+    simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
+
+    simulator.apply({ type: "recognizeRewards", settlementId: "rec1", ansemAtomic: 300n });
+    expect(simulator.state.recognizedRewardBalanceAtomic).toBe(300n);
+    simulator.apply({ type: "recognizeRewards", settlementId: "rec2", ansemAtomic: 900n });
+    expect(simulator.state.recognizedRewardBalanceAtomic).toBe(1_000n);
+  });
+
+  it("counts ansemEmittedAtomic by full epoch emission even when no Cowboys are active", () => {
+    const simulator = new EconomicSimulator(config);
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "p1", outcomes: revealBull("tier1", "spades") });
+    simulator.apply({ type: "directRewardTransfer", settlementId: "dr1", ansemAtomic: 1_000_000n });
+    simulator.apply({ type: "recognizeRewards", settlementId: "rec1", ansemAtomic: 1_000_000n });
+    simulator.apply({ type: "closeEpoch", settlementId: "e1", now: POT_FILL_SECONDS + EPOCH_DURATION_SECONDS });
+
+    expect(simulator.state.ansemEmittedAtomic).toBeGreaterThan(0n);
+    expect(simulator.state.cowboyUnmaterializedLiabilityAtomic).toBe(0n);
+    // The full emission is split 90/10; with no Cowboys, the 90% stays free and only the suit 10% is reserved.
+    expect(simulator.state.suitVaultLiabilityAtomic).toBeGreaterThan(0n);
+  });
 });
