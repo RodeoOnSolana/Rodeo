@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
 import {
+  MIN_BULLS_FOR_THEFT,
+  MIN_REVEALS_FOR_THEFT,
   PROBABILITY_DENOMINATOR,
   RANDOMNESS_DOMAIN_PREFIX,
   RandomnessDomain,
   REJECTION_SAMPLING_MAX_RETRIES,
+  UNSTAKE_RETURN_BPS,
+  UNSTAKE_TAX_BPS,
 } from "./constants.js";
+import type { ProtocolConfig } from "./accounts.js";
 
 export interface ProbabilityEntry<Outcome extends string = string> {
   readonly outcome: Outcome;
@@ -123,6 +128,155 @@ export const BULL_BUCK_POWER: Record<BullTierOutcome, BuckPower> = {
   tier3: 8,
   tier4: 10,
 };
+
+const ROLE_ORDER: readonly RoleOutcome[] = ["cowboy", "bull"];
+
+const COWBOY_RANK_ORDER: readonly CowboyRankOutcome[] = [
+  "rank4",
+  "rank5",
+  "rank6",
+  "rank7",
+  "rank8",
+  "rank9",
+  "rank10",
+  "desperado",
+];
+
+const BULL_TIER_ORDER: readonly BullTierOutcome[] = ["tier1", "tier2", "tier3", "tier4"];
+
+const SUIT_ORDER: readonly SuitOutcome[] = ["hearts", "diamonds", "clubs", "spades"];
+
+const THEFT_OUTCOME_ORDER: readonly TheftFlagOutcome[] = ["stolen", "safe"];
+
+export function sumWeights(weights: readonly bigint[]): bigint {
+  return weights.reduce((sum, w) => sum + w, 0n);
+}
+
+export function createProbabilityTable<Outcome extends string>(
+  outcomes: readonly Outcome[],
+  weights: readonly bigint[],
+  denominator: bigint,
+): ProbabilityTable<Outcome> {
+  if (outcomes.length !== weights.length) {
+    throw new Error("Outcome and weight arrays must have the same length");
+  }
+  const entries = outcomes.map((outcome, i) => ({ outcome, weight: weights[i] ?? 0n }));
+  return { denominator, entries };
+}
+
+export const PROTOCOL_CONFIG_RESERVED_SIZE = 64;
+export const DEFAULT_PROTOCOL_CONFIG_BUMP = 0;
+export const ZERO_PROTOCOL_CONFIG_PUBKEY = "11111111111111111111111111111111";
+
+export function createProtocolConfig(
+  params: Partial<ProtocolConfig> & Pick<ProtocolConfig, "globalConfig" | "configVersion">,
+): ProtocolConfig {
+  const base: Omit<ProtocolConfig, "globalConfig" | "configVersion"> = {
+    version: 1,
+    roleWeights: ROLE_TABLE.entries.map((e) => e.weight),
+    cowboyRankWeights: COWBOY_RANK_TABLE.entries.map((e) => e.weight),
+    bullTierWeights: BULL_TIER_TABLE.entries.map((e) => e.weight),
+    suitWeights: SUIT_TABLE.entries.map((e) => e.weight),
+    mintTheftWeights: THEFT_FLAG_TABLE.entries.map((e) => e.weight),
+    unstakeTheftWeights: UNSTAKE_THEFT_FLAG_TABLE.entries.map((e) => e.weight),
+    cowboyAccrualWeights: COWBOY_RANK_ORDER.map((rank) => COWBOY_ACCRUAL_WEIGHTS[rank]),
+    bullBuckPowers: BULL_TIER_ORDER.map((tier) => BULL_BUCK_POWER[tier]),
+    minRevealsForTheft: MIN_REVEALS_FOR_THEFT,
+    minBullsForTheft: MIN_BULLS_FOR_THEFT,
+    unstakeTaxBps: UNSTAKE_TAX_BPS,
+    unstakeReturnBps: UNSTAKE_RETURN_BPS,
+    bump: DEFAULT_PROTOCOL_CONFIG_BUMP,
+    _reserved: new Uint8Array(PROTOCOL_CONFIG_RESERVED_SIZE),
+  };
+  return { ...base, ...params };
+}
+
+/** V1 ProtocolConfig: reproduces the current on-chain default. */
+export const PROTOCOL_CONFIG_V1: ProtocolConfig = createProtocolConfig({
+  version: 1,
+  globalConfig: ZERO_PROTOCOL_CONFIG_PUBKEY,
+  configVersion: 1n,
+});
+
+/** V2 ProtocolConfig fixture: altered role, cowboy rank, and bull tier distributions. */
+export const PROTOCOL_CONFIG_V2: ProtocolConfig = createProtocolConfig({
+  globalConfig: ZERO_PROTOCOL_CONFIG_PUBKEY,
+  configVersion: 2n,
+  roleWeights: [4_500_000n, 5_500_000n],
+  cowboyRankWeights: [
+    2_023_875n,
+    1_124_375n,
+    584_675n,
+    359_800n,
+    224_875n,
+    134_925n,
+    44_975n,
+    2_500n,
+  ],
+  bullTierWeights: [3_300_000n, 1_375_000n, 550_000n, 275_000n],
+});
+
+export function protocolConfigToRoleTable(
+  config: ProtocolConfig,
+): ProbabilityTable<RoleOutcome> {
+  return createProbabilityTable(ROLE_ORDER, config.roleWeights, PROBABILITY_DENOMINATOR);
+}
+
+export function protocolConfigToCowboyRankTable(
+  config: ProtocolConfig,
+): ProbabilityTable<CowboyRankOutcome> {
+  return createProbabilityTable(
+    COWBOY_RANK_ORDER,
+    config.cowboyRankWeights,
+    sumWeights(config.cowboyRankWeights),
+  );
+}
+
+export function protocolConfigToBullTierTable(
+  config: ProtocolConfig,
+): ProbabilityTable<BullTierOutcome> {
+  return createProbabilityTable(
+    BULL_TIER_ORDER,
+    config.bullTierWeights,
+    sumWeights(config.bullTierWeights),
+  );
+}
+
+export function protocolConfigToSuitTable(
+  config: ProtocolConfig,
+): ProbabilityTable<SuitOutcome> {
+  return createProbabilityTable(SUIT_ORDER, config.suitWeights, PROBABILITY_DENOMINATOR);
+}
+
+export function protocolConfigToMintTheftTable(
+  config: ProtocolConfig,
+): ProbabilityTable<TheftFlagOutcome> {
+  return createProbabilityTable(THEFT_OUTCOME_ORDER, config.mintTheftWeights, PROBABILITY_DENOMINATOR);
+}
+
+export function protocolConfigToUnstakeTheftTable(
+  config: ProtocolConfig,
+): ProbabilityTable<TheftFlagOutcome> {
+  return createProbabilityTable(
+    THEFT_OUTCOME_ORDER,
+    config.unstakeTheftWeights,
+    PROBABILITY_DENOMINATOR,
+  );
+}
+
+export function accrualWeightForCowboyIndex(config: ProtocolConfig, index: number): bigint {
+  if (index < 0 || index >= config.cowboyAccrualWeights.length) {
+    throw new RangeError("Cowboy index out of range");
+  }
+  return config.cowboyAccrualWeights[index];
+}
+
+export function buckPowerForTier(config: ProtocolConfig, tier: number): number {
+  if (tier < 1 || tier > config.bullBuckPowers.length) {
+    throw new RangeError("Bull tier out of range");
+  }
+  return config.bullBuckPowers[tier - 1];
+}
 
 export function sampleOutcome<Outcome extends string>(
   table: ProbabilityTable<Outcome>,
@@ -245,32 +399,68 @@ export function rejectionSampleDraw(
   throw new Error("Rejection sampling exceeded safety limit");
 }
 
-export function mapRole(context: RejectionSampleContext): RoleOutcome {
-  const draw = rejectionSampleDraw(ROLE_TABLE, context);
-  return sampleOutcome(ROLE_TABLE, draw);
+export function mapRole(
+  context: RejectionSampleContext,
+  config: ProtocolConfig = PROTOCOL_CONFIG_V1,
+): RoleOutcome {
+  const table = protocolConfigToRoleTable(config);
+  const draw = rejectionSampleDraw(table, context);
+  return sampleOutcome(table, draw);
 }
 
-export function mapCowboyKind(context: RejectionSampleContext): CowboyRankOutcome {
-  const draw = rejectionSampleDraw(COWBOY_RANK_TABLE, context);
-  return sampleOutcome(COWBOY_RANK_TABLE, draw);
+export function mapCowboyKind(
+  context: RejectionSampleContext,
+  config: ProtocolConfig = PROTOCOL_CONFIG_V1,
+): CowboyRankOutcome {
+  const table = protocolConfigToCowboyRankTable(config);
+  const draw = rejectionSampleDraw(table, context);
+  return sampleOutcome(table, draw);
 }
 
-export function mapBullTier(context: RejectionSampleContext): BullTierOutcome {
-  const draw = rejectionSampleDraw(BULL_TIER_TABLE, context);
-  return sampleOutcome(BULL_TIER_TABLE, draw);
+export function mapBullTier(
+  context: RejectionSampleContext,
+  config: ProtocolConfig = PROTOCOL_CONFIG_V1,
+): BullTierOutcome {
+  const table = protocolConfigToBullTierTable(config);
+  const draw = rejectionSampleDraw(table, context);
+  return sampleOutcome(table, draw);
 }
 
-export function mapSuit(context: RejectionSampleContext): SuitOutcome {
-  const draw = rejectionSampleDraw(SUIT_TABLE, context);
-  return sampleOutcome(SUIT_TABLE, draw);
+export function mapSuit(
+  context: RejectionSampleContext,
+  config: ProtocolConfig = PROTOCOL_CONFIG_V1,
+): SuitOutcome {
+  const table = protocolConfigToSuitTable(config);
+  const draw = rejectionSampleDraw(table, context);
+  return sampleOutcome(table, draw);
 }
 
-export function mapMintTheftFlag(context: RejectionSampleContext): boolean {
-  const draw = rejectionSampleDraw(THEFT_FLAG_TABLE, context);
-  return sampleOutcome(THEFT_FLAG_TABLE, draw) === "stolen";
+export function mapMintTheftFlag(
+  context: RejectionSampleContext,
+  config: ProtocolConfig = PROTOCOL_CONFIG_V1,
+): boolean {
+  const table = protocolConfigToMintTheftTable(config);
+  const draw = rejectionSampleDraw(table, context);
+  return sampleOutcome(table, draw) === "stolen";
 }
 
-export function mapUnstakeTheftFlag(context: RejectionSampleContext): boolean {
-  const draw = rejectionSampleDraw(UNSTAKE_THEFT_FLAG_TABLE, context);
-  return sampleOutcome(UNSTAKE_THEFT_FLAG_TABLE, draw) === "stolen";
+export function mapUnstakeTheftFlag(
+  context: RejectionSampleContext,
+  config: ProtocolConfig = PROTOCOL_CONFIG_V1,
+): boolean {
+  const table = protocolConfigToUnstakeTheftTable(config);
+  const draw = rejectionSampleDraw(table, context);
+  return sampleOutcome(table, draw) === "stolen";
+}
+
+export function cowboyRankToIndex(rank: CowboyRankOutcome): number {
+  const idx = COWBOY_RANK_ORDER.indexOf(rank);
+  if (idx < 0) throw new RangeError(`Unknown cowboy rank: ${rank}`);
+  return idx;
+}
+
+export function bullTierToIndex(tier: BullTierOutcome): number {
+  const idx = BULL_TIER_ORDER.indexOf(tier);
+  if (idx < 0) throw new RangeError(`Unknown bull tier: ${tier}`);
+  return idx;
 }

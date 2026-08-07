@@ -13,7 +13,16 @@ import {
   mintTo,
   setAuthority,
 } from "@solana/spl-token";
-import { POT_FILL_SECONDS } from "@rodeo/protocol-definition";
+import {
+  POT_FILL_SECONDS,
+  PROTOCOL_CONFIG_V1,
+  PROTOCOL_CONFIG_V2,
+  RandomnessDomain,
+  mapBullTier,
+  mapCowboyKind,
+  mapRole,
+  mapSuit,
+} from "@rodeo/protocol-definition";
 import { beforeAll, describe, expect, it } from "vitest";
 
 const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
@@ -31,6 +40,26 @@ interface RodeoCoreAccountNamespace {
   bullAccumulator: AccountFetcher<BullAccumulatorAccount>;
   position: AccountFetcher<PositionAccount>;
   pendingRandomness: AccountFetcher<PendingRandomnessAccount>;
+  protocolConfig: AccountFetcher<ProtocolConfigAccount>;
+}
+
+interface ProtocolConfigAccount {
+  version: number;
+  globalConfig: web3.PublicKey;
+  configVersion: BN;
+  roleWeights: BN[];
+  cowboyRankWeights: BN[];
+  bullTierWeights: BN[];
+  suitWeights: BN[];
+  mintTheftWeights: BN[];
+  unstakeTheftWeights: BN[];
+  cowboyAccrualWeights: number[];
+  bullBuckPowers: number[];
+  minRevealsForTheft: BN;
+  minBullsForTheft: BN;
+  unstakeTaxBps: BN;
+  unstakeReturnBps: BN;
+  bump: number;
 }
 
 interface PositionAccount {
@@ -61,6 +90,7 @@ interface PositionAccount {
   pendingActionType: { reveal?: {}; unstake?: {} };
   pendingActionNonce: BN;
   nextActionNonce: BN;
+  revealConfigVersion: BN;
   bump: number;
 }
 
@@ -77,6 +107,7 @@ interface PendingRandomnessAccount {
   timeoutTimestamp: BN;
   registryRootSnapshot: number[];
   registryVersionSnapshot: BN;
+  configVersionSnapshot: BN;
   settled: boolean;
   bump: number;
 }
@@ -99,6 +130,7 @@ interface GlobalConfigAccount {
   upgradeCouncil: web3.PublicKey;
   treasuryCouncil: web3.PublicKey;
   emergencyGuardians: web3.PublicKey;
+  currentConfigVersion: BN;
   bump: number;
   principalVaultBump: number;
   rewardVaultBump: number;
@@ -195,11 +227,86 @@ function deriveRandomness(
   );
 }
 
+function deriveProtocolConfig(
+  programId: web3.PublicKey,
+  globalConfig: web3.PublicKey,
+  configVersion: BN,
+): [web3.PublicKey, number] {
+  return web3.PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("protocol-config"),
+      globalConfig.toBuffer(),
+      configVersion.toArrayLike(Buffer, "le", 8),
+    ],
+    programId,
+  );
+}
+
 function programDataAddress(programId: web3.PublicKey): web3.PublicKey {
   return web3.PublicKey.findProgramAddressSync(
     [programId.toBuffer()],
     BPF_LOADER_UPGRADEABLE_PROGRAM_ID,
   )[0];
+}
+
+type OutcomeShape = {
+  role: string;
+  suit: string;
+  cowboyKind?: string;
+  bullTier?: number;
+};
+
+function expectedRevealOutcomes(
+  randomOutput: number[],
+  position: web3.PublicKey,
+  actionNonce: BN,
+  config: typeof PROTOCOL_CONFIG_V1,
+): OutcomeShape {
+  const output = new Uint8Array(randomOutput);
+  const posBytes = position.toBuffer();
+  const nonce = BigInt(actionNonce.toString());
+  const role = mapRole(
+    { randomOutput: output, domain: RandomnessDomain.Role, position: posBytes, actionNonce: nonce },
+    config,
+  );
+  const suit = mapSuit(
+    { randomOutput: output, domain: RandomnessDomain.Suit, position: posBytes, actionNonce: nonce },
+    config,
+  );
+  if (role === "cowboy") {
+    const rank = mapCowboyKind(
+      { randomOutput: output, domain: RandomnessDomain.CowboyKind, position: posBytes, actionNonce: nonce },
+      config,
+    );
+    return { role, suit, cowboyKind: rank };
+  }
+  const tier = mapBullTier(
+    { randomOutput: output, domain: RandomnessDomain.BullTier, position: posBytes, actionNonce: nonce },
+    config,
+  );
+  return { role, suit, bullTier: Number(tier.replace("tier", "")) };
+}
+
+function positionOutcomes(position: PositionAccount): OutcomeShape {
+  const role = position.role.cowboy ? "cowboy" : position.role.bull ? "bull" : "unassigned";
+  const suit = position.suit.hearts
+    ? "hearts"
+    : position.suit.diamonds
+      ? "diamonds"
+      : position.suit.clubs
+        ? "clubs"
+        : position.suit.spades
+          ? "spades"
+          : "unassigned";
+  if (role === "cowboy") {
+    const cowboyKind = position.cowboyKind.desperado
+      ? "desperado"
+      : position.cowboyKind.rank
+        ? `rank${position.cowboyKind.rank[0]}`
+        : "unassigned";
+    return { role, suit, cowboyKind };
+  }
+  return { role, suit, bullTier: position.bullTier };
 }
 
 async function createRevokedMint(
@@ -320,6 +427,11 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     await revokeMintAuthorities(provider.connection, payer, ansemMint);
 
     const programData = programDataAddress(rodeoCoreProgram.programId);
+    const [protocolConfig] = deriveProtocolConfig(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      new BN(1),
+    );
 
     await rodeoCoreProgram.methods
       .initializeProtocol(
@@ -340,6 +452,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         bullAccumulator,
         principalVault,
         rewardVault,
+        protocolConfig,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: web3.SystemProgram.programId,
         rent: web3.SYSVAR_RENT_PUBKEY,
@@ -400,6 +513,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       "Position",
       "PendingRandomness",
       "WalletClaimCooldown",
+      "ProtocolConfig",
     ];
     expect([...accountNames].sort()).toEqual(expectedAccounts.sort());
     expect(accountNames).not.toContain("IdlTypeHolder");
@@ -524,6 +638,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           bullAccumulator,
           principalVault,
           rewardVault,
+          protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -556,6 +671,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           bullAccumulator,
           principalVault,
           rewardVault,
+          protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -567,7 +683,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   it("initializes GlobalConfig with computed atomic values and governance addresses", async () => {
     const config = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
 
-    expect(config.version).toBe(1);
+    expect(config.version).toBe(2);
     expect(config.rodeoMint.toBase58()).toBe(rodeoMint.toBase58());
     expect(config.ansemMint.toBase58()).toBe(ansemMint.toBase58());
     expect(config.rodeoDecimals).toBe(6);
@@ -746,6 +862,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           bullAccumulator,
           principalVault,
           rewardVault,
+          protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -799,12 +916,19 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     owner = payer,
   ) {
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
+    const [protocolConfig] = deriveProtocolConfig(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      globalConfigAccount.currentConfigVersion,
+    );
     await rodeoCoreProgram.methods
       .stakeAndCommit(positionId, amount)
       .accounts({
         owner: owner.publicKey,
         ownerRodeoTokenAccount: ownerRodeo,
         globalConfig,
+        protocolConfig,
         principalVault,
         position,
         pendingRandomness,
@@ -817,11 +941,19 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       })
       .signers([owner])
       .rpc();
-    return { position, pendingRandomness };
+    return { position, pendingRandomness, protocolConfig };
   }
 
   async function settleReveal(positionId: BN, settler = payer) {
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const pendingRandomnessAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(
+      pendingRandomness,
+    );
+    const [protocolConfig] = deriveProtocolConfig(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      pendingRandomnessAccount.configVersionSnapshot,
+    );
     await rodeoCoreProgram.methods
       .settleReveal()
       .accounts({
@@ -832,6 +964,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         bullAccumulator,
         position,
         pendingRandomness,
+        protocolConfig,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
       })
       .signers([settler])
@@ -857,6 +990,44 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       })
       .signers([caller])
       .rpc();
+  }
+
+  // The `test-fixtures` instructions are compiled into the epoch/claim test
+  // binaries, but they are intentionally kept out of the production IDL.
+  // Invoke them via their Anchor discriminators.
+  async function fixtureCreateProtocolConfigV2(configVersion: BN) {
+    const [protocolConfig] = deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, configVersion);
+    const discriminator = Buffer.from("638f500cc67fd541", "hex");
+    const data = Buffer.concat([discriminator, configVersion.toArrayLike(Buffer, "le", 8)]);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: false },
+        { pubkey: protocolConfig, isSigner: false, isWritable: true },
+        { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: web3.SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
+    return protocolConfig;
+  }
+
+  async function fixtureSetCurrentConfigVersion(protocolConfig: web3.PublicKey) {
+    const discriminator = Buffer.from("9994dfcd3f23596c", "hex");
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: true },
+        { pubkey: protocolConfig, isSigner: false, isWritable: false },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data: discriminator,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
   }
 
   function deriveWalletCooldown(
@@ -1257,6 +1428,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           bullAccumulator,
           position,
           pendingRandomness: wrongRandomness,
+          protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
           clock: web3.SYSVAR_CLOCK_PUBKEY,
         })
         .rpc(),
@@ -1804,6 +1976,59 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     await expect(runWhenEpochsClosed(op, 3)).rejects.toThrow("EpochsNotClosed");
     expect(calls).toBe(3);
   }, 30_000);
+
+  it("snapshots the active ProtocolConfig at stake and settles reveal with the historical version", async () => {
+    const v1PositionId = new BN(nextPositionId++);
+    const { position: v1Position, pendingRandomness: v1Pending } = await stakeAndCommit(v1PositionId);
+
+    const v1PendingAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(v1Pending);
+    expect(v1PendingAccount.configVersionSnapshot.toString()).toBe("1");
+
+    // Compute the deterministic random input and prove V1 and V2 would resolve
+    // the same input to materially different outcomes.
+    const expectedV1 = expectedRevealOutcomes(
+      v1PendingAccount.commitment,
+      v1Position,
+      v1PendingAccount.actionNonce,
+      PROTOCOL_CONFIG_V1,
+    );
+    const expectedV2 = expectedRevealOutcomes(
+      v1PendingAccount.commitment,
+      v1Position,
+      v1PendingAccount.actionNonce,
+      PROTOCOL_CONFIG_V2,
+    );
+    expect(JSON.stringify(expectedV1)).not.toBe(JSON.stringify(expectedV2));
+
+    // Create and activate ProtocolConfig V2.
+    const protocolConfigV2 = await fixtureCreateProtocolConfigV2(new BN(2));
+    await fixtureSetCurrentConfigVersion(protocolConfigV2);
+
+    const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
+    expect(globalConfigAccount.currentConfigVersion.toString()).toBe("2");
+
+    // Stake a second position after V2 is active; it must snapshot V2.
+    const v2PositionId = new BN(nextPositionId++);
+    const { pendingRandomness: v2Pending } = await stakeAndCommit(v2PositionId);
+    const v2PendingAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(v2Pending);
+    expect(v2PendingAccount.configVersionSnapshot.toString()).toBe("2");
+
+    // Settle the original V1 position. It must use the V1 protocol config and record version 1.
+    await settleReveal(v1PositionId);
+    const settledV1 = await rodeoAccounts(rodeoCoreProgram).position.fetch(v1Position);
+    expect(settledV1.revealConfigVersion.toString()).toBe("1");
+    expect(settledV1.status).toHaveProperty("active");
+    const actualV1 = positionOutcomes(settledV1);
+    expect(actualV1).toEqual(expectedV1);
+    expect(actualV1).not.toEqual(expectedV2);
+
+    // Settle the V2 position and verify it records version 2.
+    await settleReveal(v2PositionId);
+    const [v2Position] = derivePosition(rodeoCoreProgram.programId, globalConfig, v2PositionId);
+    const settledV2 = await rodeoAccounts(rodeoCoreProgram).position.fetch(v2Position);
+    expect(settledV2.revealConfigVersion.toString()).toBe("2");
+    expect(settledV2.status).toHaveProperty("active");
+  }, 120_000);
 });
 
 describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", () => {
@@ -1889,6 +2114,7 @@ describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", (
           bullAccumulator: accounts.bullAccumulator,
           principalVault: accounts.principalVault,
           rewardVault: accounts.rewardVault,
+          protocolConfig: deriveProtocolConfig(program.programId, accounts.globalConfig, new BN(1))[0],
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,

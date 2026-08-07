@@ -122,6 +122,7 @@ pub mod rodeo_core {
         global_config.upgrade_council = upgrade_council;
         global_config.treasury_council = treasury_council;
         global_config.emergency_guardians = emergency_guardians;
+        global_config.current_config_version = 1;
         global_config.bump = ctx.bumps.global_config;
         global_config.principal_vault_bump = ctx.bumps.principal_vault;
         global_config.reward_vault_bump = ctx.bumps.reward_vault;
@@ -168,11 +169,19 @@ pub mod rodeo_core {
         bull_accumulator.bull_orphaned_accrual_remainder_scaled = 0;
         bull_accumulator.bump = ctx.bumps.bull_accumulator;
 
+        let protocol_config = &mut ctx.accounts.protocol_config;
+        let mut v1_config =
+            probability::protocol_config_v1(global_config.key(), ctx.bumps.protocol_config);
+        v1_config.config_version = 1;
+        probability::validate_protocol_config(&v1_config)?;
+        protocol_config.set_inner(v1_config);
+
         emit!(ProtocolInitialized {
             global_config: global_config.key(),
             reward_state: reward_state.key(),
             global_game_state: global_game_state.key(),
             bull_accumulator: bull_accumulator.key(),
+            protocol_config: protocol_config.key(),
             rodeo_mint: global_config.rodeo_mint,
             ansem_mint: global_config.ansem_mint,
             rodeo_decimals: decimals,
@@ -185,6 +194,7 @@ pub mod rodeo_core {
             upgrade_council,
             treasury_council,
             emergency_guardians,
+            current_config_version: 1,
         });
 
         Ok(())
@@ -288,6 +298,8 @@ pub mod rodeo_core {
             .ok_or(RodeoError::ArithmeticOverflow)?;
         pending_randomness.registry_root_snapshot = [0u8; 32];
         pending_randomness.registry_version_snapshot = 0;
+        pending_randomness.config_version_snapshot =
+            ctx.accounts.global_config.current_config_version;
         pending_randomness.settled = false;
         pending_randomness.bump = ctx.bumps.pending_randomness;
 
@@ -318,6 +330,7 @@ pub mod rodeo_core {
             callback_id: None,
             registry_root_snapshot: [0u8; 32],
             registry_version_snapshot: 0,
+            config_version_snapshot: pending_randomness.config_version_snapshot,
             commitment,
         });
 
@@ -443,7 +456,6 @@ pub mod rodeo_core {
 
         let reward_state = &mut ctx.accounts.reward_state;
         let global_game_state = &ctx.accounts.global_game_state;
-        let bull_accumulator = &mut ctx.accounts.bull_accumulator;
         let reward_vault = &ctx.accounts.reward_vault;
 
         require_keys_eq!(
@@ -686,7 +698,7 @@ pub mod rodeo_core {
         let reward_paid_reason: RewardPaidReason;
         match position.role {
             Role::Cowboy => {
-                let (owner_bps, bull_pool_bps) = if position.cowboy_kind == CowboyKind::Desperado {
+                let (owner_bps, _bull_pool_bps) = if position.cowboy_kind == CowboyKind::Desperado {
                     (DESPERADO_CLAIM_OWNER_BPS, DESPERADO_CLAIM_BULL_POOL_BPS)
                 } else {
                     (CLAIM_OWNER_BPS, CLAIM_BULL_POOL_BPS)
@@ -730,7 +742,7 @@ pub mod rodeo_core {
 
                 transfer_ansem_from_vault(
                     owner_amount,
-                    &ctx.accounts.global_config,
+                    &*ctx.accounts.global_config,
                     ctx.accounts.reward_vault.to_account_info(),
                     ctx.accounts.owner_ansem_account.to_account_info(),
                     ctx.accounts.token_program.to_account_info(),
@@ -793,7 +805,7 @@ pub mod rodeo_core {
 
                 transfer_ansem_from_vault(
                     claimable,
-                    &ctx.accounts.global_config,
+                    &*ctx.accounts.global_config,
                     ctx.accounts.reward_vault.to_account_info(),
                     ctx.accounts.owner_ansem_account.to_account_info(),
                     ctx.accounts.token_program.to_account_info(),
@@ -914,6 +926,42 @@ pub mod rodeo_core {
 
         Ok(())
     }
+
+    /// Test-only fixture to create a ProtocolConfig V2 with altered reveal
+    /// probabilities. Used to prove historical snapshot behavior on localnet.
+    #[cfg(feature = "test-fixtures")]
+    pub fn create_protocol_config_v2_fixture(
+        ctx: Context<CreateProtocolConfigFixture>,
+        config_version: u64,
+    ) -> Result<()> {
+        require_eq!(config_version, 2, RodeoError::InvalidProbabilityTable);
+
+        let mut config = probability::protocol_config_v1(
+            ctx.accounts.global_config.key(),
+            ctx.bumps.protocol_config,
+        );
+        config.config_version = 2;
+        config.role_weights = [4_500_000, 5_500_000];
+        config.cowboy_rank_weights = [
+            2_023_875, 1_124_375, 584_675, 359_800, 224_875, 134_925, 44_975, 2_500,
+        ];
+        config.bull_tier_weights = [3_300_000, 1_375_000, 550_000, 275_000];
+
+        probability::validate_protocol_config(&config)?;
+        ctx.accounts.protocol_config.set_inner(config);
+
+        Ok(())
+    }
+
+    /// Test-only fixture to activate an already-created ProtocolConfig.
+    #[cfg(feature = "test-fixtures")]
+    pub fn set_current_config_version_fixture(
+        ctx: Context<SetCurrentConfigVersionFixture>,
+    ) -> Result<()> {
+        ctx.accounts.global_config.current_config_version =
+            ctx.accounts.protocol_config.config_version;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -927,7 +975,7 @@ pub struct TestSetPauseFlags<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -940,14 +988,14 @@ pub struct TestFixtureRecognizeRewards<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         mut,
@@ -977,28 +1025,82 @@ pub struct TestFixturePreparePosition<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         mut,
         seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
         bump = bull_accumulator.bump,
     )]
-    pub bull_accumulator: Account<'info, BullAccumulator>,
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
 
     #[account(
         mut,
         seeds = [SEED_POSITION, global_config.key().as_ref(), &position_id.to_le_bytes()],
         bump = position.bump,
     )]
-    pub position: Account<'info, Position>,
+    pub position: Box<Account<'info, Position>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(config_version: u64)]
+pub struct CreateProtocolConfigFixture<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + ProtocolConfig::INIT_SPACE,
+        seeds = [
+            SEED_PROTOCOL_CONFIG,
+            global_config.key().as_ref(),
+            &config_version.to_le_bytes(),
+        ],
+        bump,
+    )]
+    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
+
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct SetCurrentConfigVersionFixture<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        seeds = [
+            SEED_PROTOCOL_CONFIG,
+            global_config.key().as_ref(),
+            &protocol_config.config_version.to_le_bytes(),
+        ],
+        bump = protocol_config.bump,
+    )]
+    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
 }
 
 #[derive(Accounts)]
@@ -1036,7 +1138,7 @@ pub struct InitializeProtocol<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         init,
@@ -1045,7 +1147,7 @@ pub struct InitializeProtocol<'info> {
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         init,
@@ -1054,7 +1156,7 @@ pub struct InitializeProtocol<'info> {
         seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
         bump
     )]
-    pub global_game_state: Account<'info, GlobalGameState>,
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
     #[account(
         init,
@@ -1063,7 +1165,16 @@ pub struct InitializeProtocol<'info> {
         seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
         bump
     )]
-    pub bull_accumulator: Account<'info, BullAccumulator>,
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
+
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + ProtocolConfig::INIT_SPACE,
+        seeds = [SEED_PROTOCOL_CONFIG, global_config.key().as_ref(), &[1, 0, 0, 0, 0, 0, 0, 0]],
+        bump
+    )]
+    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
 
     #[account(
         init,
@@ -1107,7 +1218,18 @@ pub struct StakeAndCommit<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        seeds = [
+            SEED_PROTOCOL_CONFIG,
+            global_config.key().as_ref(),
+            &global_config.current_config_version.to_le_bytes(),
+        ],
+        bump = protocol_config.bump,
+        constraint = protocol_config.config_version == global_config.current_config_version @ RodeoError::InvalidProbabilityTable,
+    )]
+    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
 
     #[account(
         mut,
@@ -1125,7 +1247,7 @@ pub struct StakeAndCommit<'info> {
         seeds = [SEED_POSITION, global_config.key().as_ref(), &position_id.to_le_bytes()],
         bump
     )]
-    pub position: Account<'info, Position>,
+    pub position: Box<Account<'info, Position>>,
 
     #[account(
         init,
@@ -1139,20 +1261,20 @@ pub struct StakeAndCommit<'info> {
         ],
         bump
     )]
-    pub pending_randomness: Account<'info, PendingRandomness>,
+    pub pending_randomness: Box<Account<'info, PendingRandomness>>,
 
     #[account(
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         mut,
         seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
         bump = global_game_state.bump,
     )]
-    pub global_game_state: Account<'info, GlobalGameState>,
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -1169,28 +1291,28 @@ pub struct SettleReveal<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
         seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
         bump = global_game_state.bump,
     )]
-    pub global_game_state: Account<'info, GlobalGameState>,
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
     #[account(
         mut,
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         mut,
         seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
         bump = bull_accumulator.bump,
     )]
-    pub bull_accumulator: Account<'info, BullAccumulator>,
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
 
     #[account(
         mut,
@@ -1199,7 +1321,7 @@ pub struct SettleReveal<'info> {
         constraint = position.pending_action_active @ RodeoError::PendingActionConflict,
         constraint = position.pending_action_type == ActionType::Reveal @ RodeoError::WrongActionType,
     )]
-    pub position: Account<'info, Position>,
+    pub position: Box<Account<'info, Position>>,
 
     #[account(
         mut,
@@ -1214,7 +1336,18 @@ pub struct SettleReveal<'info> {
         constraint = pending_randomness.action_type == ActionType::Reveal @ RodeoError::WrongActionType,
         constraint = pending_randomness.action_nonce == position.pending_action_nonce @ RodeoError::InvalidPendingRandomness,
     )]
-    pub pending_randomness: Account<'info, PendingRandomness>,
+    pub pending_randomness: Box<Account<'info, PendingRandomness>>,
+
+    #[account(
+        seeds = [
+            SEED_PROTOCOL_CONFIG,
+            global_config.key().as_ref(),
+            &pending_randomness.config_version_snapshot.to_le_bytes(),
+        ],
+        bump = protocol_config.bump,
+        constraint = protocol_config.config_version == pending_randomness.config_version_snapshot @ RodeoError::InvalidProbabilityTable,
+    )]
+    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
 
     pub clock: Sysvar<'info, Clock>,
 }
@@ -1233,7 +1366,7 @@ pub struct RecoverRevealTimeout<'info> {
         constraint = position.pending_action_active @ RodeoError::InvalidPendingRandomness,
         constraint = position.pending_action_type == ActionType::Reveal @ RodeoError::WrongActionType,
     )]
-    pub position: Account<'info, Position>,
+    pub position: Box<Account<'info, Position>>,
 
     #[account(
         mut,
@@ -1249,13 +1382,13 @@ pub struct RecoverRevealTimeout<'info> {
         constraint = pending_randomness.action_type == ActionType::Reveal @ RodeoError::WrongActionType,
         constraint = pending_randomness.action_nonce == position.pending_action_nonce @ RodeoError::InvalidPendingRandomness,
     )]
-    pub pending_randomness: Account<'info, PendingRandomness>,
+    pub pending_randomness: Box<Account<'info, PendingRandomness>>,
 
     #[account(
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
@@ -1281,7 +1414,7 @@ pub struct RecoverRevealTimeout<'info> {
         seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
         bump = global_game_state.bump,
     )]
-    pub global_game_state: Account<'info, GlobalGameState>,
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -1298,27 +1431,27 @@ pub struct CloseEpochs<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
         bump = global_game_state.bump,
     )]
-    pub global_game_state: Account<'info, GlobalGameState>,
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
     #[account(
         mut,
         seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
         bump = bull_accumulator.bump,
     )]
-    pub bull_accumulator: Account<'info, BullAccumulator>,
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
 
     #[account(
         mut,
@@ -1340,14 +1473,14 @@ pub struct RecognizeRewards<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         constraint = reward_vault.key() == global_config.reward_vault @ RodeoError::InvalidRewardVault,
@@ -1367,35 +1500,35 @@ pub struct ClaimPosition<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         mut,
         seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
         bump = global_game_state.bump,
     )]
-    pub global_game_state: Account<'info, GlobalGameState>,
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
     #[account(
         mut,
         seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
         bump = bull_accumulator.bump,
     )]
-    pub bull_accumulator: Account<'info, BullAccumulator>,
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
 
     #[account(
         mut,
         seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
         bump = position.bump,
     )]
-    pub position: Account<'info, Position>,
+    pub position: Box<Account<'info, Position>>,
 
     #[account(
         init_if_needed,
@@ -1435,6 +1568,7 @@ pub struct ProtocolInitialized {
     pub reward_state: Pubkey,
     pub global_game_state: Pubkey,
     pub bull_accumulator: Pubkey,
+    pub protocol_config: Pubkey,
     pub rodeo_mint: Pubkey,
     pub ansem_mint: Pubkey,
     pub rodeo_decimals: u8,
@@ -1447,6 +1581,7 @@ pub struct ProtocolInitialized {
     pub upgrade_council: Pubkey,
     pub treasury_council: Pubkey,
     pub emergency_guardians: Pubkey,
+    pub current_config_version: u64,
 }
 
 #[event]
@@ -1481,6 +1616,7 @@ pub struct RandomnessRequested {
     pub callback_id: Option<[u8; 32]>,
     pub registry_root_snapshot: [u8; 32],
     pub registry_version_snapshot: u64,
+    pub config_version_snapshot: u64,
     pub commitment: [u8; 32],
 }
 
@@ -1498,6 +1634,7 @@ pub struct PositionRevealed {
     pub active_since: i64,
     pub unstake_eligible_at: i64,
     pub settlement_nonce: u64,
+    pub config_version: u64,
 }
 
 #[event]
@@ -1899,6 +2036,8 @@ fn transfer_ansem_from_vault<'info>(
 fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
     use crate::probability;
 
+    let config: &ProtocolConfig = &**ctx.accounts.protocol_config;
+
     let position_key = ctx.accounts.position.key();
     let action_type = ctx.accounts.pending_randomness.action_type;
     let action_nonce = ctx.accounts.pending_randomness.action_nonce;
@@ -1908,19 +2047,25 @@ fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
     // position, action type, action nonce, and protocol epoch.
     let random_output = derive_commitment(position_key, action_type, action_nonce, protocol_epoch);
 
-    let role = probability::map_role(probability::RandomnessSampleContext {
-        random_output,
-        domain: probability::RandomnessDomain::Role,
-        position: position_key,
-        action_nonce,
-    })?;
+    let role = probability::map_role(
+        probability::RandomnessSampleContext {
+            random_output,
+            domain: probability::RandomnessDomain::Role,
+            position: position_key,
+            action_nonce,
+        },
+        config,
+    )?;
 
-    let suit = probability::map_suit(probability::RandomnessSampleContext {
-        random_output,
-        domain: probability::RandomnessDomain::Suit,
-        position: position_key,
-        action_nonce,
-    })?;
+    let suit = probability::map_suit(
+        probability::RandomnessSampleContext {
+            random_output,
+            domain: probability::RandomnessDomain::Suit,
+            position: position_key,
+            action_nonce,
+        },
+        config,
+    )?;
 
     let position = &mut ctx.accounts.position;
     let pending_randomness = &mut ctx.accounts.pending_randomness;
@@ -1937,6 +2082,7 @@ fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
         .settlement_nonce
         .checked_add(1)
         .ok_or(RodeoError::ArithmeticOverflow)?;
+    position.reveal_config_version = pending_randomness.config_version_snapshot;
 
     pending_randomness.settled = true;
 
@@ -1948,20 +2094,32 @@ fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
     let unstake_eligible_at = position.unstake_eligible_at;
     let settlement_nonce = position.settlement_nonce;
     let final_owner = position.owner;
+    let config_version = position.reveal_config_version;
 
     match role {
         Role::Cowboy => {
-            let kind = probability::map_cowboy_kind(probability::RandomnessSampleContext {
-                random_output,
-                domain: probability::RandomnessDomain::CowboyKind,
-                position: position_key,
-                action_nonce,
-            })?;
+            let kind = probability::map_cowboy_kind(
+                probability::RandomnessSampleContext {
+                    random_output,
+                    domain: probability::RandomnessDomain::CowboyKind,
+                    position: position_key,
+                    action_nonce,
+                },
+                config,
+            )?;
             let weight = match kind {
-                CowboyKind::Rank(rank) => probability::accrual_weight_for_rank(rank),
-                CowboyKind::Desperado => probability::accrual_weight_for_rank(10),
-                CowboyKind::Unassigned => 0,
+                CowboyKind::Rank(rank) if (4..=10).contains(&rank) => {
+                    probability::accrual_weight_for_cowboy_index(config, (rank - 4) as usize)
+                }
+                CowboyKind::Desperado => probability::accrual_weight_for_cowboy_index(config, 7),
+                _ => 0,
             };
+
+            // Defensive: a valid map_cowboy_kind must produce either a rank or desperado.
+            require!(
+                weight > 0 || matches!(kind, CowboyKind::Unassigned),
+                RodeoError::InvalidProbabilityOutcome
+            );
 
             position.role = Role::Cowboy;
             position.cowboy_kind = kind;
@@ -1989,16 +2147,20 @@ fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
                 active_since,
                 unstake_eligible_at,
                 settlement_nonce,
+                config_version,
             });
         }
         Role::Bull => {
-            let tier = probability::map_bull_tier(probability::RandomnessSampleContext {
-                random_output,
-                domain: probability::RandomnessDomain::BullTier,
-                position: position_key,
-                action_nonce,
-            })?;
-            let power = probability::buck_power_for_tier(tier);
+            let tier = probability::map_bull_tier(
+                probability::RandomnessSampleContext {
+                    random_output,
+                    domain: probability::RandomnessDomain::BullTier,
+                    position: position_key,
+                    action_nonce,
+                },
+                config,
+            )?;
+            let power = probability::buck_power_for_tier(config, tier);
 
             position.role = Role::Bull;
             position.bull_tier = tier;
@@ -2054,6 +2216,7 @@ fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
                 active_since,
                 unstake_eligible_at,
                 settlement_nonce,
+                config_version,
             });
         }
         Role::Unassigned => {
@@ -2080,7 +2243,6 @@ mod tests {
     use super::*;
     use crate::probability;
     use crate::state;
-    use constants::*;
 
     fn pubkey_from_u64(n: u64) -> Pubkey {
         let mut bytes = [0u8; 32];
@@ -2095,7 +2257,7 @@ mod tests {
         probability::RandomnessSampleContext {
             random_output: [tag + 1; 32],
             domain,
-            position: pubkey_from_u64((tag + 7) as u64),
+            position: Pubkey::new_from_array([tag + 7; 32]),
             action_nonce: tag as u64,
         }
     }
@@ -2121,24 +2283,26 @@ mod tests {
 
     #[test]
     fn account_versions_match_protocol_definition() {
-        assert_eq!(ACCOUNT_VERSION_GLOBAL_CONFIG, 1);
+        assert_eq!(ACCOUNT_VERSION_GLOBAL_CONFIG, 2);
         assert_eq!(ACCOUNT_VERSION_REWARD_STATE, 3);
         assert_eq!(ACCOUNT_VERSION_GLOBAL_GAME_STATE, 3);
         assert_eq!(ACCOUNT_VERSION_BULL_ACCUMULATOR, 3);
-        assert_eq!(ACCOUNT_VERSION_POSITION, 3);
+        assert_eq!(ACCOUNT_VERSION_POSITION, 4);
         assert_eq!(ACCOUNT_VERSION_WALLET_CLAIM_COOLDOWN, 1);
-        assert_eq!(ACCOUNT_VERSION_PENDING_RANDOMNESS, 3);
+        assert_eq!(ACCOUNT_VERSION_PENDING_RANDOMNESS, 4);
+        assert_eq!(ACCOUNT_VERSION_PROTOCOL_CONFIG, 1);
     }
 
     #[test]
     fn account_init_space_values() {
-        assert_eq!(GlobalConfig::INIT_SPACE, 258);
+        assert_eq!(GlobalConfig::INIT_SPACE, 266);
         assert_eq!(RewardState::INIT_SPACE, 194);
         assert_eq!(GlobalGameState::INIT_SPACE, 98);
         assert_eq!(BullAccumulator::INIT_SPACE, 82);
-        assert_eq!(Position::INIT_SPACE, 231);
+        assert_eq!(Position::INIT_SPACE, 239);
         assert_eq!(WalletClaimCooldown::INIT_SPACE, 74);
-        assert_eq!(PendingRandomness::INIT_SPACE, 204);
+        assert_eq!(PendingRandomness::INIT_SPACE, 212);
+        assert_eq!(ProtocolConfig::INIT_SPACE, 322);
     }
 
     #[test]
@@ -2437,59 +2601,78 @@ mod tests {
 
     #[test]
     fn map_role_is_stable_and_valid() {
+        let config = probability::protocol_config_v1(Pubkey::default(), 0);
         let ctx = sample_ctx(probability::RandomnessDomain::Role, 4);
-        let first = probability::map_role(ctx).unwrap();
-        let second = probability::map_role(ctx).unwrap();
+        let first = probability::map_role(ctx, &config).unwrap();
+        let second = probability::map_role(ctx, &config).unwrap();
         assert_eq!(first, second);
         assert!(first == state::Role::Cowboy || first == state::Role::Bull);
     }
 
     #[test]
     fn map_cowboy_kind_is_stable_and_valid() {
+        let config = probability::protocol_config_v1(Pubkey::default(), 0);
         let ctx = sample_ctx(probability::RandomnessDomain::CowboyKind, 5);
-        let kind = probability::map_cowboy_kind(ctx).unwrap();
+        let kind = probability::map_cowboy_kind(ctx, &config).unwrap();
         assert!(matches!(
             kind,
             state::CowboyKind::Rank(4 | 5 | 6 | 7 | 8 | 9 | 10) | state::CowboyKind::Desperado
         ));
-        assert_eq!(probability::map_cowboy_kind(ctx).unwrap(), kind);
+        assert_eq!(probability::map_cowboy_kind(ctx, &config).unwrap(), kind);
     }
 
     #[test]
     fn map_bull_tier_is_stable_and_valid() {
+        let config = probability::protocol_config_v1(Pubkey::default(), 0);
         let ctx = sample_ctx(probability::RandomnessDomain::BullTier, 6);
-        let tier = probability::map_bull_tier(ctx).unwrap();
+        let tier = probability::map_bull_tier(ctx, &config).unwrap();
         assert!((1..=4).contains(&tier));
-        assert_eq!(probability::map_bull_tier(ctx).unwrap(), tier);
+        assert_eq!(probability::map_bull_tier(ctx, &config).unwrap(), tier);
     }
 
     #[test]
     fn map_suit_is_stable_and_valid() {
+        let config = probability::protocol_config_v1(Pubkey::default(), 0);
         let ctx = sample_ctx(probability::RandomnessDomain::Suit, 7);
-        let suit = probability::map_suit(ctx).unwrap();
+        let suit = probability::map_suit(ctx, &config).unwrap();
         assert!(matches!(
             suit,
             state::Suit::Hearts | state::Suit::Diamonds | state::Suit::Clubs | state::Suit::Spades
         ));
-        assert_eq!(probability::map_suit(ctx).unwrap(), suit);
+        assert_eq!(probability::map_suit(ctx, &config).unwrap(), suit);
     }
 
     #[test]
     fn theft_flag_helpers_are_distinct_domains() {
+        let config = probability::protocol_config_v1(Pubkey::default(), 0);
         let mint_ctx = sample_ctx(probability::RandomnessDomain::MintTheft, 2);
         let unstake_ctx = sample_ctx(probability::RandomnessDomain::UnstakeTheft, 3);
         // The outputs are deterministic booleans; this just verifies both helpers run.
-        let _ = probability::map_mint_theft_flag(mint_ctx).unwrap();
-        let _ = probability::map_unstake_theft_flag(unstake_ctx).unwrap();
+        let _ = probability::map_mint_theft_flag(mint_ctx, &config).unwrap();
+        let _ = probability::map_unstake_theft_flag(unstake_ctx, &config).unwrap();
     }
 
     #[test]
     fn accrual_weights_and_buck_power() {
-        assert_eq!(probability::accrual_weight_for_rank(4), 10_000);
-        assert_eq!(probability::accrual_weight_for_rank(10), 15_500);
-        assert_eq!(probability::accrual_weight_for_rank(7), 11_800);
-        assert_eq!(probability::buck_power_for_tier(1), 4);
-        assert_eq!(probability::buck_power_for_tier(4), 10);
+        let config = probability::protocol_config_v1(Pubkey::default(), 0);
+        assert_eq!(
+            probability::accrual_weight_for_cowboy_index(&config, 0),
+            10_000
+        );
+        assert_eq!(
+            probability::accrual_weight_for_cowboy_index(&config, 6),
+            15_500
+        );
+        assert_eq!(
+            probability::accrual_weight_for_cowboy_index(&config, 3),
+            11_800
+        );
+        assert_eq!(
+            probability::accrual_weight_for_cowboy_index(&config, 7),
+            10_000
+        );
+        assert_eq!(probability::buck_power_for_tier(&config, 1), 4);
+        assert_eq!(probability::buck_power_for_tier(&config, 4), 10);
     }
 
     #[test]
@@ -2623,6 +2806,7 @@ mod tests {
             pending_action_type: state::ActionType::Reveal,
             pending_action_nonce: 0,
             next_action_nonce: 0,
+            reveal_config_version: 0,
             bump: 0,
         }
     }

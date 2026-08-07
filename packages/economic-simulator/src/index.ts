@@ -1,14 +1,13 @@
+import { createHash } from "node:crypto";
 import {
   ACCRUAL_WEIGHT_SCALE,
-  BULL_BUCK_POWER,
+  ACTION_TYPES,
   BPS_DENOMINATOR,
   CLAIM_BULL_POOL_BPS,
   CLAIM_COOLDOWN_SECONDS,
   CLAIM_OWNER_BPS,
   CLOSE_EPOCH_BATCH_MAX,
-  COWBOY_ACCRUAL_WEIGHTS,
   COWBOY_REWARD_INDEX_SCALE,
-  DESPERADO_ACCRUAL_WEIGHT,
   DESPERADO_CLAIM_BULL_POOL_BPS,
   DESPERADO_CLAIM_OWNER_BPS,
   EMISSION_COWBOY_BPS,
@@ -21,16 +20,25 @@ import {
   MIN_STAKE_SECONDS,
   MINT_THEFT_BPS,
   POT_FILL_SECONDS,
+  PROTOCOL_CONFIG_V1,
+  RandomnessDomain,
   REWARD_PER_WEIGHT_SCALE,
   REVENUE_ANSEM_BPS,
   REVENUE_BUYBACK_BPS,
   REVENUE_SECURITY_BPS,
   REVENUE_TEAM_BPS,
   RUNWAY_EPOCHS,
+  accrualWeightForCowboyIndex,
+  buckPowerForTier,
+  bullTierToIndex,
+  cowboyRankToIndex,
+  mapBullTier,
+  mapCowboyKind,
+  mapRole,
+  mapSuit,
   stakeAmountAtomic,
+  type ProtocolConfig,
   UNSTAKE_ANSEM_THEFT_BPS,
-  UNSTAKE_RETURN_BPS,
-  UNSTAKE_TAX_BPS,
 } from "@rodeo/protocol-definition";
 import { checkedAdd, checkedSub, mulDivCeil, mulDivFloor } from "@rodeo/shared";
 
@@ -48,7 +56,7 @@ export interface PositionState {
   status: PositionStatus;
   role: Role;
   cowboyKind: CowboyKind;
-  bullTier: number; // 0 for Cowboys, 1-4 for Bulls
+  bullTier: number; // 0 for Cowboys, power value for Bulls
   suit: Suit;
   accrualWeight: bigint;
   buckPower: number;
@@ -66,6 +74,8 @@ export interface PositionState {
   nextActionNonce: bigint;
   settlementNonce: bigint;
   stateVersion: bigint;
+  revealConfigVersion: bigint;
+  committedProtocolEpoch: bigint;
 }
 
 export function isDesperado(position: PositionState): boolean {
@@ -89,6 +99,9 @@ export interface SimulationState {
   epoch: bigint;
   epochStartedAt: bigint;
   launchTimestamp: bigint;
+  // Protocol configuration
+  currentConfigVersion: bigint;
+  protocolConfigs: Map<bigint, ProtocolConfig>;
   // Principal accounting
   principalVaultAtomic: bigint;
   accountedPrincipalAtomic: bigint;
@@ -159,8 +172,8 @@ export interface SuitClaimLeaf {
 }
 
 export type SimulationEvent =
-  | { readonly type: "stake"; readonly settlementId: string; readonly positionId: string; readonly owner: string; readonly openedAt: bigint }
-  | { readonly type: "reveal"; readonly settlementId: string; readonly positionId: string; readonly outcomes: RevealOutcomes }
+  | { readonly type: "stake"; readonly settlementId: string; readonly positionId: string; readonly owner: string; readonly openedAt: bigint; readonly configVersion?: bigint }
+  | { readonly type: "reveal"; readonly settlementId: string; readonly positionId: string; readonly configVersion?: bigint; readonly outcomes?: RevealOutcomes; readonly randomOutput?: Uint8Array }
   | { readonly type: "claimCowboy"; readonly settlementId: string; readonly positionId: string; readonly claimedAt: bigint }
   | { readonly type: "claimBull"; readonly settlementId: string; readonly positionId: string; readonly claimedAt: bigint }
   | { readonly type: "requestUnstake"; readonly settlementId: string; readonly positionId: string; readonly requestedAt: bigint }
@@ -201,6 +214,8 @@ export class EconomicSimulator {
       epoch: 0n,
       epochStartedAt: 0n,
       launchTimestamp: 0n,
+      currentConfigVersion: 1n,
+      protocolConfigs: new Map([[1n, PROTOCOL_CONFIG_V1]]),
       principalVaultAtomic: 0n,
       accountedPrincipalAtomic: 0n,
       principalVaultSurplusAtomic: 0n,
@@ -321,6 +336,7 @@ export class EconomicSimulator {
   private stake(event: Extract<SimulationEvent, { type: "stake" }>): void {
     const amount = stakeAmountAtomic(this.config.rodeoDecimals);
     if (this.state.positions.has(event.positionId)) throw new Error("Position already exists");
+    const configVersion = event.configVersion ?? this.state.currentConfigVersion;
     this.state.positions.set(event.positionId, {
       id: event.positionId,
       owner: event.owner,
@@ -346,6 +362,8 @@ export class EconomicSimulator {
       nextActionNonce: 1n,
       settlementNonce: 0n,
       stateVersion: 0n,
+      revealConfigVersion: configVersion,
+      committedProtocolEpoch: this.state.epoch,
     });
     this.state.principalVaultAtomic = checkedAdd(this.state.principalVaultAtomic, amount);
     this.state.accountedPrincipalAtomic = checkedAdd(this.state.accountedPrincipalAtomic, amount);
@@ -360,12 +378,29 @@ export class EconomicSimulator {
     const position = this.position(event.positionId);
     if (!position.pendingActionActive || position.pendingActionType !== "reveal") throw new Error("No pending reveal action");
     if (position.settlementNonce !== 0n) throw new Error("Reveal can only settle the first action");
-    if (event.outcomes.thiefPositionId !== null && !this.state.positions.has(event.outcomes.thiefPositionId)) {
+
+    const configVersion = event.configVersion ?? position.revealConfigVersion;
+    if (configVersion !== position.revealConfigVersion) {
+      throw new Error("Reveal config version does not match stake snapshot");
+    }
+    const config = this.state.protocolConfigs.get(configVersion);
+    if (!config) throw new Error(`Unknown protocol config version: ${configVersion}`);
+
+    let outcomes: RevealOutcomes;
+    if (event.outcomes) {
+      outcomes = event.outcomes;
+    } else if (event.randomOutput) {
+      outcomes = this.resolveRevealOutcomes(config, position, event.randomOutput);
+    } else {
+      throw new Error("Reveal event must provide outcomes or randomOutput");
+    }
+
+    if (outcomes.mintTheft && outcomes.thiefPositionId !== null && !this.state.positions.has(outcomes.thiefPositionId)) {
       throw new Error("Invalid thief position");
     }
 
-    position.role = event.outcomes.role;
-    position.suit = event.outcomes.suit;
+    position.role = outcomes.role;
+    position.suit = outcomes.suit;
     position.status = "active";
     position.pendingActionActive = false;
     position.pendingActionType = null;
@@ -378,20 +413,20 @@ export class EconomicSimulator {
     // final owner, initializes checkpoints, and would create the receipt
     // directly for that owner. It must not force-settle rewards or transfer a
     // nonexistent receipt.
-    if (event.outcomes.mintTheft && event.outcomes.thiefPositionId !== null) {
-      const thief = this.position(event.outcomes.thiefPositionId);
+    if (outcomes.mintTheft && outcomes.thiefPositionId !== null) {
+      const thief = this.position(outcomes.thiefPositionId);
       if (thief.role !== "bull") throw new Error("Thief must be a Bull");
       position.owner = thief.owner;
     }
 
-    if (event.outcomes.role === "cowboy") {
-      if (event.outcomes.isDesperado) {
+    if (outcomes.role === "cowboy") {
+      if (outcomes.isDesperado) {
         position.cowboyKind = { kind: "desperado" };
-        position.accrualWeight = DESPERADO_ACCRUAL_WEIGHT;
+        position.accrualWeight = accrualWeightForCowboyIndex(config, 7);
       } else {
-        const rank = event.outcomes.cowboyRank as CowboyRank;
+        const rank = outcomes.cowboyRank as CowboyRank;
         position.cowboyKind = { kind: "rank", rank };
-        position.accrualWeight = COWBOY_ACCRUAL_WEIGHTS[rank];
+        position.accrualWeight = accrualWeightForCowboyIndex(config, cowboyRankToIndex(rank));
       }
       this.state.activeCowboyCount = checkedAdd(this.state.activeCowboyCount, 1n);
       this.state.totalActiveCowboyWeight = checkedAdd(this.state.totalActiveCowboyWeight, position.accrualWeight);
@@ -399,10 +434,12 @@ export class EconomicSimulator {
       position.cowboyAccrualRemainderScaled = 0n;
       position.lastBullRewardPerWeight = 0n;
       position.bullAccrualRemainderScaled = 0n;
-    } else if (event.outcomes.role === "bull") {
-      const tier = event.outcomes.bullTier as BullTier;
-      position.bullTier = BULL_BUCK_POWER[tier];
-      position.buckPower = BULL_BUCK_POWER[tier];
+    } else if (outcomes.role === "bull") {
+      const tier = outcomes.bullTier as BullTier;
+      const tierIndex = bullTierToIndex(tier);
+      const power = buckPowerForTier(config, tierIndex + 1);
+      position.bullTier = power;
+      position.buckPower = power;
       this.state.activeBullCount = checkedAdd(this.state.activeBullCount, 1n);
       this.state.totalActiveBullPower = checkedAdd(this.state.totalActiveBullPower, BigInt(position.buckPower));
       position.lastBullRewardPerWeight = this.state.bullRewardPerWeightScaled;
@@ -411,6 +448,82 @@ export class EconomicSimulator {
       position.cowboyAccrualRemainderScaled = 0n;
       this.allocateBullPoolUnallocated();
     }
+  }
+
+  private positionIdToBytes(positionId: string): Uint8Array {
+    const encoded = new TextEncoder().encode(positionId);
+    const bytes = new Uint8Array(32);
+    bytes.set(encoded.subarray(0, 32));
+    return bytes;
+  }
+
+  private deriveMockCommitment(
+    position: PositionState,
+    actionType: number,
+    actionNonce: bigint,
+    protocolEpoch: bigint,
+  ): Uint8Array {
+    const positionBytes = this.positionIdToBytes(position.id);
+    const preimage = Buffer.alloc(49);
+    let offset = 0;
+    Buffer.from(positionBytes).copy(preimage, offset);
+    offset += 32;
+    preimage.writeUInt8(actionType, offset);
+    offset += 1;
+    preimage.writeBigUInt64LE(actionNonce & 0xffffffffffffffffn, offset);
+    offset += 8;
+    preimage.writeBigUInt64LE(protocolEpoch & 0xffffffffffffffffn, offset);
+    return createHash("sha256").update(preimage).digest();
+  }
+
+  private resolveRevealOutcomes(
+    config: ProtocolConfig,
+    position: PositionState,
+    randomOutput?: Uint8Array,
+  ): RevealOutcomes {
+    const positionBytes = this.positionIdToBytes(position.id);
+    const actionNonce = position.pendingActionNonce;
+    const protocolEpoch = position.committedProtocolEpoch;
+    const output = randomOutput ?? this.deriveMockCommitment(position, ACTION_TYPES.reveal, actionNonce, protocolEpoch);
+
+    const role = mapRole(
+      { randomOutput: output, domain: RandomnessDomain.Role, position: positionBytes, actionNonce },
+      config,
+    );
+    const suit = mapSuit(
+      { randomOutput: output, domain: RandomnessDomain.Suit, position: positionBytes, actionNonce },
+      config,
+    );
+
+    if (role === "cowboy") {
+      const cowboyRank = mapCowboyKind(
+        { randomOutput: output, domain: RandomnessDomain.CowboyKind, position: positionBytes, actionNonce },
+        config,
+      );
+      const isDesperado = cowboyRank === "desperado";
+      const rank = isDesperado ? undefined : (cowboyRank as CowboyRank);
+      return {
+        role,
+        cowboyRank: rank,
+        isDesperado,
+        suit,
+        mintTheft: false,
+        thiefPositionId: null,
+      };
+    }
+
+    const bullTier = mapBullTier(
+      { randomOutput: output, domain: RandomnessDomain.BullTier, position: positionBytes, actionNonce },
+      config,
+    );
+    return {
+      role,
+      bullTier,
+      isDesperado: false,
+      suit,
+      mintTheft: false,
+      thiefPositionId: null,
+    };
   }
 
   private claimCowboy(event: Extract<SimulationEvent, { type: "claimCowboy" }>): void {
@@ -489,8 +602,9 @@ export class EconomicSimulator {
     this.applyCowboyRewardDelta(position);
     this.applyBullRewardDelta(position);
 
+    const config = this.state.protocolConfigs.get(position.revealConfigVersion) ?? this.state.protocolConfigs.get(this.state.currentConfigVersion)!;
     const principal = position.principalAtomic;
-    const returned = mulDivFloor(principal, UNSTAKE_RETURN_BPS, BPS_DENOMINATOR);
+    const returned = mulDivFloor(principal, config.unstakeReturnBps, BPS_DENOMINATOR);
     const burned = checkedSub(principal, returned);
 
     this.state.principalVaultAtomic = checkedSub(this.state.principalVaultAtomic, principal);

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   BULL_TIER_TABLE,
   COWBOY_RANK_TABLE,
+  PROTOCOL_CONFIG_V1,
+  PROTOCOL_CONFIG_V2,
   ROLE_TABLE,
   SUIT_TABLE,
   THEFT_FLAG_TABLE,
@@ -15,6 +17,12 @@ import {
   mapSuit,
   mapUnstakeTheftFlag,
   outcomeIndexForDraw,
+  protocolConfigToBullTierTable,
+  protocolConfigToCowboyRankTable,
+  protocolConfigToMintTheftTable,
+  protocolConfigToRoleTable,
+  protocolConfigToSuitTable,
+  protocolConfigToUnstakeTheftTable,
   rejectionSampleDraw,
 } from "../probabilities.js";
 import {
@@ -158,5 +166,108 @@ describe("canonical rejection sampling", () => {
       const sampled = rejectionSampleDraw(table, ctx);
       expect(sampled).toBe(draw);
     }
+  });
+});
+
+describe("ProtocolConfig fixtures", () => {
+  it("V1 ProtocolConfig matches the on-chain default exactly", () => {
+    expect(PROTOCOL_CONFIG_V1.version).toBe(1);
+    expect(PROTOCOL_CONFIG_V1.globalConfig).toBe("11111111111111111111111111111111");
+    expect(PROTOCOL_CONFIG_V1.configVersion).toBe(1n);
+    expect(PROTOCOL_CONFIG_V1.roleWeights).toEqual([9_000_000n, 1_000_000n]);
+    expect(PROTOCOL_CONFIG_V1.cowboyRankWeights).toEqual([
+      4_047_750n,
+      2_248_750n,
+      1_169_350n,
+      719_600n,
+      449_750n,
+      269_850n,
+      89_950n,
+      5_000n,
+    ]);
+    expect(PROTOCOL_CONFIG_V1.bullTierWeights).toEqual([600_000n, 250_000n, 100_000n, 50_000n]);
+    expect(PROTOCOL_CONFIG_V1.suitWeights).toEqual([2_500_000n, 2_500_000n, 2_500_000n, 2_500_000n]);
+    expect(PROTOCOL_CONFIG_V1.mintTheftWeights).toEqual([500_000n, 9_500_000n]);
+    expect(PROTOCOL_CONFIG_V1.unstakeTheftWeights).toEqual([500_000n, 9_500_000n]);
+    expect(PROTOCOL_CONFIG_V1.cowboyAccrualWeights).toEqual([
+      10_000n,
+      10_500n,
+      11_000n,
+      11_800n,
+      12_800n,
+      14_000n,
+      15_500n,
+      10_000n,
+    ]);
+    expect(PROTOCOL_CONFIG_V1.bullBuckPowers).toEqual([4, 6, 8, 10]);
+    expect(PROTOCOL_CONFIG_V1.minRevealsForTheft).toBe(50n);
+    expect(PROTOCOL_CONFIG_V1.minBullsForTheft).toBe(3n);
+    expect(PROTOCOL_CONFIG_V1.unstakeTaxBps).toBe(500n);
+    expect(PROTOCOL_CONFIG_V1.unstakeReturnBps).toBe(9_500n);
+    expect(PROTOCOL_CONFIG_V1.bump).toBe(0);
+    expect(PROTOCOL_CONFIG_V1._reserved).toBeInstanceOf(Uint8Array);
+    expect(PROTOCOL_CONFIG_V1._reserved.length).toBe(64);
+  });
+
+  it("V2 ProtocolConfig has the expected override fields", () => {
+    expect(PROTOCOL_CONFIG_V2.configVersion).toBe(2n);
+    expect(PROTOCOL_CONFIG_V2.roleWeights).toEqual([4_500_000n, 5_500_000n]);
+    expect(PROTOCOL_CONFIG_V2.cowboyRankWeights).toEqual([
+      2_023_875n,
+      1_124_375n,
+      584_675n,
+      359_800n,
+      224_875n,
+      134_925n,
+      44_975n,
+      2_500n,
+    ]);
+    expect(PROTOCOL_CONFIG_V2.bullTierWeights).toEqual([
+      3_300_000n,
+      1_375_000n,
+      550_000n,
+      275_000n,
+    ]);
+    expect(PROTOCOL_CONFIG_V2.suitWeights).toEqual(PROTOCOL_CONFIG_V1.suitWeights);
+    expect(PROTOCOL_CONFIG_V2.mintTheftWeights).toEqual(PROTOCOL_CONFIG_V1.mintTheftWeights);
+    expect(PROTOCOL_CONFIG_V2.unstakeTheftWeights).toEqual(PROTOCOL_CONFIG_V1.unstakeTheftWeights);
+    expect(PROTOCOL_CONFIG_V2.cowboyAccrualWeights).toEqual(PROTOCOL_CONFIG_V1.cowboyAccrualWeights);
+    expect(PROTOCOL_CONFIG_V2.bullBuckPowers).toEqual(PROTOCOL_CONFIG_V1.bullBuckPowers);
+  });
+
+  it("versioned tables derived from V1 are normalized", () => {
+    expect(isNormalized(protocolConfigToRoleTable(PROTOCOL_CONFIG_V1))).toBe(true);
+    expect(isNormalized(protocolConfigToCowboyRankTable(PROTOCOL_CONFIG_V1))).toBe(true);
+    expect(isNormalized(protocolConfigToBullTierTable(PROTOCOL_CONFIG_V1))).toBe(true);
+    expect(isNormalized(protocolConfigToSuitTable(PROTOCOL_CONFIG_V1))).toBe(true);
+    expect(isNormalized(protocolConfigToMintTheftTable(PROTOCOL_CONFIG_V1))).toBe(true);
+    expect(isNormalized(protocolConfigToUnstakeTheftTable(PROTOCOL_CONFIG_V1))).toBe(true);
+  });
+
+  it("versioned tables derived from V2 are normalized", () => {
+    expect(isNormalized(protocolConfigToRoleTable(PROTOCOL_CONFIG_V2))).toBe(true);
+    expect(isNormalized(protocolConfigToCowboyRankTable(PROTOCOL_CONFIG_V2))).toBe(true);
+    expect(isNormalized(protocolConfigToBullTierTable(PROTOCOL_CONFIG_V2))).toBe(true);
+    expect(isNormalized(protocolConfigToSuitTable(PROTOCOL_CONFIG_V2))).toBe(true);
+    expect(isNormalized(protocolConfigToMintTheftTable(PROTOCOL_CONFIG_V2))).toBe(true);
+    expect(isNormalized(protocolConfigToUnstakeTheftTable(PROTOCOL_CONFIG_V2))).toBe(true);
+  });
+
+  it("V2 produces different role and rank outcomes than V1 for the same random context", () => {
+    const output = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) output[i] = i;
+    const position = new Uint8Array(32);
+    position[0] = 1;
+
+    const ctx = {
+      randomOutput: output,
+      domain: RandomnessDomain.Role,
+      position,
+      actionNonce: 1n,
+    };
+
+    const v1Role = mapRole(ctx, PROTOCOL_CONFIG_V1);
+    const v2Role = mapRole(ctx, PROTOCOL_CONFIG_V2);
+    expect(v1Role).not.toBe(v2Role);
   });
 });

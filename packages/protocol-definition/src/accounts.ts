@@ -1,11 +1,12 @@
 export const ACCOUNT_VERSIONS = {
-  globalConfig: 1,
+  globalConfig: 2,
   rewardState: 3,
   globalGameState: 3,
   bullAccumulator: 3,
-  position: 3,
+  position: 4,
   walletClaimCooldown: 1,
-  pendingRandomness: 3,
+  pendingRandomness: 4,
+  protocolConfig: 1,
 } as const;
 
 export type AccountName = keyof typeof ACCOUNT_VERSIONS;
@@ -30,6 +31,7 @@ export interface GlobalConfig {
   readonly upgradeCouncil: string;
   readonly treasuryCouncil: string;
   readonly emergencyGuardians: string;
+  readonly currentConfigVersion: bigint;
   readonly bump: number;
   readonly principalVaultBump: number;
   readonly rewardVaultBump: number;
@@ -123,6 +125,7 @@ export interface Position {
   readonly pendingActionType: ActionType;
   readonly pendingActionNonce: bigint;
   readonly nextActionNonce: bigint;
+  readonly revealConfigVersion: bigint;
   readonly bump: number;
 }
 
@@ -147,6 +150,7 @@ export interface PendingRandomness {
   readonly timeoutTimestamp: bigint;
   readonly registryRootSnapshot: Uint8Array;
   readonly registryVersionSnapshot: bigint;
+  readonly configVersionSnapshot: bigint;
   readonly settled: boolean;
   readonly bump: number;
 }
@@ -162,6 +166,26 @@ export interface SocialResult {
   readonly contentHash: Uint8Array;
   readonly attestedAt: bigint;
   readonly bump: number;
+}
+
+export interface ProtocolConfig {
+  readonly version: number;
+  readonly globalConfig: string;
+  readonly configVersion: bigint;
+  readonly roleWeights: readonly bigint[];
+  readonly cowboyRankWeights: readonly bigint[];
+  readonly bullTierWeights: readonly bigint[];
+  readonly suitWeights: readonly bigint[];
+  readonly mintTheftWeights: readonly bigint[];
+  readonly unstakeTheftWeights: readonly bigint[];
+  readonly cowboyAccrualWeights: readonly bigint[];
+  readonly bullBuckPowers: readonly number[];
+  readonly minRevealsForTheft: bigint;
+  readonly minBullsForTheft: bigint;
+  readonly unstakeTaxBps: bigint;
+  readonly unstakeReturnBps: bigint;
+  readonly bump: number;
+  readonly _reserved: Uint8Array;
 }
 
 /** SuitClaimReceipt PDA: [b"suit-claim", social_result, leaf_nonce] */

@@ -30,6 +30,26 @@ interface RodeoCoreAccountNamespace {
   bullAccumulator: AccountFetcher<BullAccumulatorAccount>;
   position: AccountFetcher<PositionAccount>;
   pendingRandomness: AccountFetcher<PendingRandomnessAccount>;
+  protocolConfig: AccountFetcher<ProtocolConfigAccount>;
+}
+
+interface ProtocolConfigAccount {
+  version: number;
+  globalConfig: web3.PublicKey;
+  configVersion: BN;
+  roleWeights: BN[];
+  cowboyRankWeights: BN[];
+  bullTierWeights: BN[];
+  suitWeights: BN[];
+  mintTheftWeights: BN[];
+  unstakeTheftWeights: BN[];
+  cowboyAccrualWeights: number[];
+  bullBuckPowers: number[];
+  minRevealsForTheft: BN;
+  minBullsForTheft: BN;
+  unstakeTaxBps: BN;
+  unstakeReturnBps: BN;
+  bump: number;
 }
 
 interface PositionAccount {
@@ -60,6 +80,7 @@ interface PositionAccount {
   pendingActionType: { reveal?: {}; unstake?: {} };
   pendingActionNonce: BN;
   nextActionNonce: BN;
+  revealConfigVersion: BN;
   bump: number;
 }
 
@@ -76,6 +97,7 @@ interface PendingRandomnessAccount {
   timeoutTimestamp: BN;
   registryRootSnapshot: number[];
   registryVersionSnapshot: BN;
+  configVersionSnapshot: BN;
   settled: boolean;
   bump: number;
 }
@@ -98,6 +120,7 @@ interface GlobalConfigAccount {
   upgradeCouncil: web3.PublicKey;
   treasuryCouncil: web3.PublicKey;
   emergencyGuardians: web3.PublicKey;
+  currentConfigVersion: BN;
   bump: number;
   principalVaultBump: number;
   rewardVaultBump: number;
@@ -189,6 +212,21 @@ function deriveRandomness(
       position.toBuffer(),
       Buffer.from([actionType]),
       actionNonce.toArrayLike(Buffer, "le", 8),
+    ],
+    programId,
+  );
+}
+
+function deriveProtocolConfig(
+  programId: web3.PublicKey,
+  globalConfig: web3.PublicKey,
+  configVersion: BN,
+): [web3.PublicKey, number] {
+  return web3.PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("protocol-config"),
+      globalConfig.toBuffer(),
+      configVersion.toArrayLike(Buffer, "le", 8),
     ],
     programId,
   );
@@ -321,6 +359,11 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     await revokeMintAuthorities(provider.connection, payer, ansemMint);
 
     const programData = programDataAddress(rodeoCoreProgram.programId);
+    const [protocolConfig] = deriveProtocolConfig(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      new BN(1),
+    );
 
     await rodeoCoreProgram.methods
       .initializeProtocol(
@@ -341,6 +384,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         bullAccumulator,
         principalVault,
         rewardVault,
+        protocolConfig,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: web3.SystemProgram.programId,
         rent: web3.SYSVAR_RENT_PUBKEY,
@@ -364,12 +408,19 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     owner = payer,
   ) {
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
+    const [protocolConfig] = deriveProtocolConfig(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      globalConfigAccount.currentConfigVersion,
+    );
     await rodeoCoreProgram.methods
       .stakeAndCommit(positionId, amount)
       .accounts({
         owner: owner.publicKey,
         ownerRodeoTokenAccount: ownerRodeo,
         globalConfig,
+        protocolConfig,
         principalVault,
         position,
         pendingRandomness,
@@ -382,11 +433,19 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       })
       .signers([owner])
       .rpc();
-    return { position, pendingRandomness };
+    return { position, pendingRandomness, protocolConfig };
   }
 
   async function settleReveal(positionId: BN, settler = payer) {
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const pendingRandomnessAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(
+      pendingRandomness,
+    );
+    const [protocolConfig] = deriveProtocolConfig(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      pendingRandomnessAccount.configVersionSnapshot,
+    );
     await rodeoCoreProgram.methods
       .settleReveal()
       .accounts({
@@ -397,6 +456,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         bullAccumulator,
         position,
         pendingRandomness,
+        protocolConfig,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
       })
       .signers([settler])

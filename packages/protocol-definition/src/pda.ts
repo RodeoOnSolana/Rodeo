@@ -14,6 +14,7 @@ export const PDA_SEEDS = {
   position: "position",
   claimCooldown: "claim_cooldown",
   randomness: "randomness",
+  protocolConfig: "protocol-config",
 } as const;
 
 // Stable, append-only discriminant mirroring the on-chain `ActionType` enum.

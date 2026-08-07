@@ -20,9 +20,32 @@ pub struct GlobalConfig {
     pub upgrade_council: Pubkey,
     pub treasury_council: Pubkey,
     pub emergency_guardians: Pubkey,
+    pub current_config_version: u64,
     pub bump: u8,
     pub principal_vault_bump: u8,
     pub reward_vault_bump: u8,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct ProtocolConfig {
+    pub version: u8,
+    pub global_config: Pubkey,
+    pub config_version: u64,
+    pub role_weights: [u64; 2],
+    pub cowboy_rank_weights: [u64; 8],
+    pub bull_tier_weights: [u64; 4],
+    pub suit_weights: [u64; 4],
+    pub mint_theft_weights: [u64; 2],
+    pub unstake_theft_weights: [u64; 2],
+    pub cowboy_accrual_weights: [u32; 8],
+    pub bull_buck_powers: [u8; 4],
+    pub min_reveals_for_theft: u64,
+    pub min_bulls_for_theft: u64,
+    pub unstake_tax_bps: u64,
+    pub unstake_return_bps: u64,
+    pub bump: u8,
+    pub _reserved: [u8; 64],
 }
 
 #[account]
@@ -106,6 +129,7 @@ pub struct Position {
     pub pending_action_type: ActionType,
     pub pending_action_nonce: u64,
     pub next_action_nonce: u64,
+    pub reveal_config_version: u64,
     pub bump: u8,
 }
 
@@ -134,6 +158,7 @@ pub struct PendingRandomness {
     pub timeout_timestamp: i64,
     pub registry_root_snapshot: [u8; 32],
     pub registry_version_snapshot: u64,
+    pub config_version_snapshot: u64,
     pub settled: bool,
     pub bump: u8,
 }
