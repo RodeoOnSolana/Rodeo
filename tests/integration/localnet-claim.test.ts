@@ -4,7 +4,10 @@ import { resolve } from "node:path";
 import type { Idl } from "@coral-xyz/anchor";
 import {
   PROTOCOL_CONFIG_V1,
+  PROTOCOL_CONFIG_V2,
   RandomnessDomain,
+  mapCowboyKind,
+  mapRole,
   mapUnstakeTheftFlag,
 } from "@rodeo/protocol-definition";
 import { AnchorProvider, BN, Program, setProvider, web3 } from "@coral-xyz/anchor";
@@ -400,6 +403,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
   }, 60_000);
 
   const stakeAmountAtomic = new BN(100_000_000_000);
+  const REWARD_PER_WEIGHT_SCALE = new BN("1000000000000000000");
   let nextPositionId = 1;
 
   async function deriveStakeAccounts(positionId: BN) {
@@ -693,6 +697,111 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     offset += 8;
     Buffer.from(protocolEpoch.toArrayLike(Buffer, "le", 8)).copy(preimage, offset);
     return new Uint8Array(createHash("sha256").update(preimage).digest());
+  }
+
+  function expectedRevealRole(position: web3.PublicKey, config = PROTOCOL_CONFIG_V1): "cowboy" | "bull" {
+    const randomOutput = deriveMockCommitment(position, 0, new BN(0), new BN(0));
+    return mapRole(
+      {
+        randomOutput,
+        domain: RandomnessDomain.Role,
+        position: position.toBuffer(),
+        actionNonce: 0n,
+      },
+      config,
+    ) as "cowboy" | "bull";
+  }
+
+  function expectedCowboyKind(position: web3.PublicKey, config = PROTOCOL_CONFIG_V1): string {
+    const randomOutput = deriveMockCommitment(position, 0, new BN(0), new BN(0));
+    return mapCowboyKind(
+      {
+        randomOutput,
+        domain: RandomnessDomain.CowboyKind,
+        position: position.toBuffer(),
+        actionNonce: 0n,
+      },
+      config,
+    );
+  }
+
+  function expectedUnstakeTheftFlag(
+    position: web3.PublicKey,
+    actionNonce: BN,
+    protocolEpoch: BN,
+    config = PROTOCOL_CONFIG_V1,
+  ): boolean {
+    const randomOutput = deriveMockCommitment(position, 1, actionNonce, protocolEpoch);
+    return mapUnstakeTheftFlag(
+      {
+        randomOutput,
+        domain: RandomnessDomain.UnstakeTheft,
+        position: position.toBuffer(),
+        actionNonce: BigInt(actionNonce.toString()),
+      },
+      config,
+    );
+  }
+
+  async function prepareUnstakeReadyPositionById(
+    positionId: BN,
+    claimable: BN,
+  ): Promise<{ positionId: BN; position: web3.PublicKey; role: "cowboy" | "bull" | "desperado" }> {
+    await stakeAndCommit(positionId);
+    await settleReveal(positionId);
+    const { position } = await deriveStakeAccounts(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+
+    const role: "cowboy" | "bull" | "desperado" = pos.role.bull
+      ? "bull"
+      : pos.cowboyKind.desperado
+        ? "desperado"
+        : "cowboy";
+    const cowboyKindCode = pos.cowboyKind.desperado
+      ? 254
+      : pos.cowboyKind.rank
+        ? pos.cowboyKind.rank[0]
+        : 0;
+
+    await fixturePreparePosition(positionId, {
+      roleCode: pos.role.cowboy ? 1 : pos.role.bull ? 2 : 0,
+      cowboyKindCode,
+      accrualWeight: pos.accrualWeight,
+      buckPower: pos.buckPower,
+      claimable,
+      positionClaimableLiabilityDelta: claimable,
+    });
+
+    return { positionId, position, role };
+  }
+
+  async function findPositionForUnstake(
+    predicate: (positionId: BN, position: web3.PublicKey, role: string, cowboyKind: string, stolen: boolean) => boolean,
+    maxAttempts = 1000,
+  ): Promise<{ positionId: BN; position: web3.PublicKey; role: string; cowboyKind: string; stolen: boolean }> {
+    for (let i = 0; i < maxAttempts; i++) {
+      const positionId = new BN(nextPositionId++);
+      const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
+      const role = expectedRevealRole(position);
+      if (role !== "cowboy") continue;
+      const cowboyKind = expectedCowboyKind(position);
+      const stolen = expectedUnstakeTheftFlag(position, new BN(1), new BN(0));
+      if (predicate(positionId, position, role, cowboyKind, stolen)) {
+        return { positionId, position, role, cowboyKind, stolen };
+      }
+    }
+    throw new Error("Could not find a matching unstake position");
+  }
+
+  async function findBullPosition(maxAttempts = 100): Promise<{ positionId: BN; position: web3.PublicKey }> {
+    for (let i = 0; i < maxAttempts; i++) {
+      const positionId = new BN(nextPositionId++);
+      const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
+      if (expectedRevealRole(position) === "bull") {
+        return { positionId, position };
+      }
+    }
+    throw new Error("Could not find a Bull position");
   }
 
   async function requestUnstake(positionId: BN, owner = payer) {
@@ -1380,7 +1489,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
   }, 60_000);
 
   it("settle_unstake uses the historical ProtocolConfig version for the RODEO split", async () => {
-    const { positionId } = await prepareUnstakeReadyPosition(new BN(0));
+    const { positionId, position } = await prepareUnstakeReadyPosition(new BN(0));
 
     const { pendingRandomness, actionNonce } = await requestUnstake(positionId);
     const pendingAccount =
@@ -1394,23 +1503,937 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
     expect(globalConfigAccount.currentConfigVersion.toString()).toBe("2");
 
+    const posBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(posBefore.claimableAnsemAtomic.toString()).toBe("0");
+
+    const ansemBefore = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
     const principalVaultBefore = await getAccount(provider.connection, principalVault);
     const rodeoBefore = await getAccount(provider.connection, payerRodeoAccount);
 
     await settleUnstake(positionId, actionNonce);
 
+    const ansemAfter = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultAfter = await getAccount(provider.connection, rewardVault);
     const principalVaultAfter = await getAccount(provider.connection, principalVault);
     const rodeoAfter = await getAccount(provider.connection, payerRodeoAccount);
 
-    const stakeAmount = new BN(100_000_000_000);
-    const v1Returned = stakeAmount.muln(9_500).divn(10_000);
+    const v1Returned = stakeAmountAtomic.muln(9_500).divn(10_000);
 
     expect(new BN(principalVaultAfter.amount.toString()).toString()).toBe(
-      new BN(principalVaultBefore.amount.toString()).sub(stakeAmount).toString(),
+      new BN(principalVaultBefore.amount.toString()).sub(stakeAmountAtomic).toString(),
     );
     expect(new BN(rodeoAfter.amount.toString()).sub(new BN(rodeoBefore.amount.toString())).toString()).toBe(
       v1Returned.toString(),
     );
+    expect(ansemAfter.amount.toString()).toBe(ansemBefore.amount.toString());
+    expect(vaultAfter.amount.toString()).toBe(vaultBefore.amount.toString());
+
+    // The pending randomness was opened under V1; the same random output must
+    // map to safe (not stolen) for V1, so the historical V1 config owns the
+    // unstake settlement even though V2 is now active. With claimable 0 this
+    // is vacuous for ANSEM but still deterministic.
+    const randomOutput = deriveMockCommitment(
+      position,
+      1,
+      actionNonce,
+      pendingAccount.committedProtocolEpoch,
+    );
+    const stolenUnderV1 = mapUnstakeTheftFlag(
+      {
+        randomOutput,
+        domain: RandomnessDomain.UnstakeTheft,
+        position: position.toBuffer(),
+        actionNonce: BigInt(actionNonce.toString()),
+      },
+      PROTOCOL_CONFIG_V1,
+    );
+    expect(stolenUnderV1).toBe(false);
   }, 120_000);
+
+  it("request_unstake enforces owner, no pending action, and preserves token/state", async () => {
+    const claimable = new BN(1_000_000_000);
+    await ensureRecognizedReserve(claimable);
+
+    const { positionId, position } = await findPositionForUnstake(
+      (_id, _pos, _role, cowboyKind, stolen) => cowboyKind !== "desperado" && !stolen,
+    );
+    await prepareUnstakeReadyPositionById(positionId, claimable);
+
+    // Non-owner request fails.
+    const nonOwner = web3.Keypair.generate();
+    await expect(requestUnstake(positionId, nonOwner)).rejects.toThrow();
+
+    const posBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(posBefore.nextActionNonce.toString()).toBe("1");
+
+    const principalVaultBefore = await getAccount(provider.connection, principalVault);
+    const rodeoBefore = await getAccount(provider.connection, payerRodeoAccount);
+    const ansemBefore = await getAccount(provider.connection, payerAnsemAccount);
+    const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    const { pendingRandomness, actionNonce } = await requestUnstake(positionId);
+
+    const pendingAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
+    expect(pendingAccount.configVersionSnapshot.toString()).toBe("1");
+    expect(pendingAccount.actionType).toHaveProperty("unstake");
+    expect(pendingAccount.actionNonce.toString()).toBe(actionNonce.toString());
+
+    const posAfter = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(posAfter.status).toHaveProperty("active");
+    expect(posAfter.pendingActionActive).toBe(true);
+    expect(posAfter.pendingActionType).toHaveProperty("unstake");
+    expect(posAfter.pendingActionNonce.toString()).toBe(actionNonce.toString());
+    expect(posAfter.nextActionNonce.toString()).toBe("2");
+
+    // Existing pending action blocks a second request.
+    await expect(requestUnstake(positionId)).rejects.toThrow();
+
+    const principalVaultAfter = await getAccount(provider.connection, principalVault);
+    const rodeoAfter = await getAccount(provider.connection, payerRodeoAccount);
+    const ansemAfter = await getAccount(provider.connection, payerAnsemAccount);
+    const gameAfter = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    expect(principalVaultAfter.amount.toString()).toBe(principalVaultBefore.amount.toString());
+    expect(rodeoAfter.amount.toString()).toBe(rodeoBefore.amount.toString());
+    expect(ansemAfter.amount.toString()).toBe(ansemBefore.amount.toString());
+    expect(gameAfter.livePositionCount.toString()).toBe(gameBefore.livePositionCount.toString());
+    expect(gameAfter.totalActiveCowboyWeight.toString()).toBe(gameBefore.totalActiveCowboyWeight.toString());
+    expect(gameAfter.activeCowboyCount.toString()).toBe(gameBefore.activeCowboyCount.toString());
+    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(rewardBefore.totalAnsemLiabilityAtomic.toString());
+    expect(rewardAfter.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBefore.positionClaimableLiabilityAtomic.toString(),
+    );
+
+    // Clean up.
+    await settleUnstake(positionId, actionNonce);
+  }, 120_000);
+
+  interface PositionUnstakedEvent {
+    ansemFate: unknown;
+    ansemPaidToOwner: BN;
+    ansemRoutedToBullPool: BN;
+  }
+
+  interface BullPoolContributionEvent {
+    source: unknown;
+    amountAtomic: BN;
+    epoch: BN;
+  }
+
+  function ansemFateKey(fate: unknown, expected: string) {
+    if (fate && typeof fate === "object") {
+      expect(Object.keys(fate)).toContain(expected);
+    } else if (typeof fate === "string") {
+      expect(fate).toBe(expected);
+    } else {
+      throw new Error("Unexpected ansemFate shape");
+    }
+  }
+
+  function bullPoolSourceKey(source: unknown, expected: string) {
+    if (source && typeof source === "object") {
+      expect(Object.keys(source)).toContain(expected);
+    } else if (typeof source === "string") {
+      expect(source).toBe(expected);
+    } else {
+      throw new Error("Unexpected BullPoolContribution source shape");
+    }
+  }
+
+  function findV1SafeV2StolenCowboy(maxAttempts = 2000): {
+    positionId: BN;
+    position: web3.PublicKey;
+    randomOutput: Uint8Array;
+  } {
+    for (let i = 0; i < maxAttempts; i++) {
+      const positionId = new BN(nextPositionId++);
+      const [position] = derivePosition(
+        rodeoCoreProgram.programId,
+        globalConfig,
+        positionId,
+      );
+      const role = expectedRevealRole(position, PROTOCOL_CONFIG_V1);
+      if (role !== "cowboy") continue;
+      const cowboyKind = expectedCowboyKind(position, PROTOCOL_CONFIG_V1);
+      if (cowboyKind === "desperado") continue;
+      const v1Stolen = expectedUnstakeTheftFlag(
+        position,
+        new BN(1),
+        new BN(0),
+        PROTOCOL_CONFIG_V1,
+      );
+      if (v1Stolen) continue;
+      const v2Stolen = expectedUnstakeTheftFlag(
+        position,
+        new BN(1),
+        new BN(0),
+        PROTOCOL_CONFIG_V2,
+      );
+      if (!v2Stolen) continue;
+      const randomOutput = deriveMockCommitment(position, 1, new BN(1), new BN(0));
+      return { positionId, position, randomOutput };
+    }
+    throw new Error("Could not find a V1-safe / V2-stolen Cowboy position");
+  }
+
+  function findV2StolenCowboy(maxAttempts = 1000): {
+    positionId: BN;
+    position: web3.PublicKey;
+  } {
+    for (let i = 0; i < maxAttempts; i++) {
+      const positionId = new BN(nextPositionId++);
+      const [position] = derivePosition(
+        rodeoCoreProgram.programId,
+        globalConfig,
+        positionId,
+      );
+      const role = expectedRevealRole(position, PROTOCOL_CONFIG_V2);
+      if (role !== "cowboy") continue;
+      const cowboyKind = expectedCowboyKind(position, PROTOCOL_CONFIG_V2);
+      if (cowboyKind === "desperado") continue;
+      const stolen = expectedUnstakeTheftFlag(
+        position,
+        new BN(1),
+        new BN(0),
+        PROTOCOL_CONFIG_V2,
+      );
+      if (stolen) return { positionId, position };
+    }
+    throw new Error("Could not find a V2-stolen non-Desperado Cowboy position");
+  }
+
+  it("stolen Cowboy routes ANSEM to active Bull pool with exact liability/index changes", async () => {
+    const { positionId: bullPositionId } = await findBullPosition();
+    await prepareUnstakeReadyPositionById(bullPositionId, new BN(0));
+
+    const claimable = new BN(1_000_000_000);
+    const { positionId: cowboyPositionId, position: cowboyPosition } =
+      await findPositionForUnstake(
+        (_id, _pos, _role, cowboyKind, stolen) => cowboyKind !== "desperado" && stolen,
+      );
+    await ensureRecognizedReserve(claimable);
+    await prepareUnstakeReadyPositionById(cowboyPositionId, claimable);
+
+    const ownerAnsemBefore = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const bullBefore = await rodeoAccounts(rodeoCoreProgram).bullAccumulator.fetch(bullAccumulator);
+    const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+
+    const bullPoolContributionPromise = collectOneEvent<BullPoolContributionEvent>(
+      "bullPoolContribution",
+    );
+    const positionUnstakedPromise = collectOneEvent<PositionUnstakedEvent>("positionUnstaked");
+    const rewardPaidPromise = collectEvents<{ amountAtomic: BN }>("rewardPaid", 1, 2_000);
+
+    const { actionNonce } = await requestUnstake(cowboyPositionId);
+    await settleUnstake(cowboyPositionId, actionNonce);
+
+    const ownerAnsemAfter = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultAfter = await getAccount(provider.connection, rewardVault);
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const bullAfter = await rodeoAccounts(rodeoCoreProgram).bullAccumulator.fetch(bullAccumulator);
+    const gameAfter = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const unassignedPosition =
+      await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(cowboyPosition);
+
+    expect(ownerAnsemAfter.amount.toString()).toBe(ownerAnsemBefore.amount.toString());
+    expect(vaultAfter.amount.toString()).toBe(vaultBefore.amount.toString());
+    expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.toString(),
+    );
+    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBefore.totalAnsemLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBefore.positionClaimableLiabilityAtomic.sub(claimable).toString(),
+    );
+    expect(rewardAfter.bullPoolLiabilityAtomic.toString()).toBe(
+      rewardBefore.bullPoolLiabilityAtomic.add(claimable).toString(),
+    );
+    expect(rewardAfter.bullPoolUnallocatedLiabilityAtomic.toString()).toBe(
+      rewardBefore.bullPoolUnallocatedLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.ansemClaimedAtomic.toString()).toBe(
+      rewardBefore.ansemClaimedAtomic.toString(),
+    );
+
+    const totalPower = gameBefore.totalActiveBullPower;
+    const numerator = claimable.mul(REWARD_PER_WEIGHT_SCALE).add(bullBefore.bullIndexRemainderScaled);
+    const increment = numerator.div(totalPower);
+    const newRemainder = numerator.mod(totalPower);
+    const expectedRewardPerWeight = bullBefore.rewardPerWeightScaled.add(increment);
+
+    expect(bullAfter.rewardPerWeightScaled.toString()).toBe(expectedRewardPerWeight.toString());
+    expect(bullAfter.bullIndexRemainderScaled.toString()).toBe(newRemainder.toString());
+
+    expect(gameAfter.activeBullCount.toString()).toBe(gameBefore.activeBullCount.toString());
+    expect(gameAfter.totalActiveBullPower.toString()).toBe(gameBefore.totalActiveBullPower.toString());
+    expect(gameAfter.activeCowboyCount.toString()).toBe(
+      gameBefore.activeCowboyCount.subn(1).toString(),
+    );
+    expect(gameAfter.livePositionCount.toString()).toBe(
+      gameBefore.livePositionCount.subn(1).toString(),
+    );
+    expect(gameAfter.accountedPrincipalAtomic.toString()).toBe(
+      gameBefore.accountedPrincipalAtomic.sub(stakeAmountAtomic).toString(),
+    );
+
+    expect(unassignedPosition).toBeNull();
+
+    const positionUnstaked = await positionUnstakedPromise;
+    ansemFateKey(positionUnstaked.ansemFate, "toBullPool");
+    expect(positionUnstaked.ansemPaidToOwner.toString()).toBe("0");
+    expect(positionUnstaked.ansemRoutedToBullPool.toString()).toBe(claimable.toString());
+
+    const bullPoolContribution = await bullPoolContributionPromise;
+    bullPoolSourceKey(bullPoolContribution.source, "unstakeTheft");
+    expect(bullPoolContribution.amountAtomic.toString()).toBe(claimable.toString());
+    expect(bullPoolContribution.epoch.toString()).toBe(rewardBefore.currentEpoch.toString());
+
+    const rewardPaid = await rewardPaidPromise;
+    expect(rewardPaid.length).toBe(0);
+  }, 180_000);
+
+  it("stolen Cowboy with zero active Bulls routes to unallocated liability", async () => {
+    const claimable = new BN(1_000_000_000);
+    const { positionId, position } = await findPositionForUnstake(
+      (_id, _pos, _role, cowboyKind, stolen) => cowboyKind !== "desperado" && stolen,
+    );
+    await ensureRecognizedReserve(claimable);
+    await prepareUnstakeReadyPositionById(positionId, claimable);
+
+    const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const ownerAnsemBefore = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const bullBefore = await rodeoAccounts(rodeoCoreProgram).bullAccumulator.fetch(bullAccumulator);
+
+    const bullPoolContributionPromise = collectOneEvent<BullPoolContributionEvent>(
+      "bullPoolContribution",
+    );
+    const positionUnstakedPromise = collectOneEvent<PositionUnstakedEvent>("positionUnstaked");
+    const rewardPaidPromise = collectEvents<{ amountAtomic: BN }>("rewardPaid", 1, 2_000);
+
+    const { actionNonce } = await requestUnstake(positionId);
+    await settleUnstake(positionId, actionNonce);
+
+    const gameAfter = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const ownerAnsemAfter = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultAfter = await getAccount(provider.connection, rewardVault);
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const bullAfter = await rodeoAccounts(rodeoCoreProgram).bullAccumulator.fetch(bullAccumulator);
+    const unassignedPosition = await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(position);
+
+    expect(ownerAnsemAfter.amount.toString()).toBe(ownerAnsemBefore.amount.toString());
+    expect(vaultAfter.amount.toString()).toBe(vaultBefore.amount.toString());
+    expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.toString(),
+    );
+    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBefore.totalAnsemLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBefore.positionClaimableLiabilityAtomic.sub(claimable).toString(),
+    );
+    expect(rewardAfter.bullPoolLiabilityAtomic.toString()).toBe(
+      rewardBefore.bullPoolLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.bullPoolUnallocatedLiabilityAtomic.toString()).toBe(
+      rewardBefore.bullPoolUnallocatedLiabilityAtomic.add(claimable).toString(),
+    );
+    expect(rewardAfter.ansemClaimedAtomic.toString()).toBe(
+      rewardBefore.ansemClaimedAtomic.toString(),
+    );
+
+    expect(bullAfter.rewardPerWeightScaled.toString()).toBe(
+      bullBefore.rewardPerWeightScaled.toString(),
+    );
+    expect(bullAfter.bullIndexRemainderScaled.toString()).toBe(
+      bullBefore.bullIndexRemainderScaled.toString(),
+    );
+
+    expect(gameAfter.activeBullCount.toString()).toBe(gameBefore.activeBullCount.toString());
+    expect(gameAfter.totalActiveBullPower.toString()).toBe(gameBefore.totalActiveBullPower.toString());
+    expect(gameAfter.activeCowboyCount.toString()).toBe(
+      gameBefore.activeCowboyCount.subn(1).toString(),
+    );
+    expect(gameAfter.livePositionCount.toString()).toBe(
+      gameBefore.livePositionCount.subn(1).toString(),
+    );
+    expect(gameAfter.accountedPrincipalAtomic.toString()).toBe(
+      gameBefore.accountedPrincipalAtomic.sub(stakeAmountAtomic).toString(),
+    );
+
+    expect(unassignedPosition).toBeNull();
+
+    const positionUnstaked = await positionUnstakedPromise;
+    ansemFateKey(positionUnstaked.ansemFate, "toBullPool");
+    expect(positionUnstaked.ansemPaidToOwner.toString()).toBe("0");
+    expect(positionUnstaked.ansemRoutedToBullPool.toString()).toBe(claimable.toString());
+
+    const bullPoolContribution = await bullPoolContributionPromise;
+    bullPoolSourceKey(bullPoolContribution.source, "unstakeTheft");
+    expect(bullPoolContribution.amountAtomic.toString()).toBe(claimable.toString());
+
+    const rewardPaid = await rewardPaidPromise;
+    expect(rewardPaid.length).toBe(0);
+  }, 180_000);
+
+  it("Desperado exit is immune to unstake theft and receives full ANSEM", async () => {
+    const claimable = new BN(1_000_000_000);
+    const { positionId, position } = await findPositionForUnstake(
+      (_id, _pos, _role, cowboyKind, _stolen) => cowboyKind === "desperado",
+      5000,
+    );
+    await ensureRecognizedReserve(claimable);
+    await prepareUnstakeReadyPositionById(positionId, claimable);
+
+    const ownerAnsemBefore = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const principalVaultBefore = await getAccount(provider.connection, principalVault);
+    const rodeoBefore = await getAccount(provider.connection, payerRodeoAccount);
+
+    const positionUnstakedPromise = collectOneEvent<PositionUnstakedEvent>("positionUnstaked");
+
+    const { actionNonce } = await requestUnstake(positionId);
+    await settleUnstake(positionId, actionNonce);
+
+    const ownerAnsemAfter = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultAfter = await getAccount(provider.connection, rewardVault);
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const gameAfter = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const principalVaultAfter = await getAccount(provider.connection, principalVault);
+    const rodeoAfter = await getAccount(provider.connection, payerRodeoAccount);
+    const unassignedPosition = await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(position);
+
+    expect(new BN(ownerAnsemAfter.amount.toString()).toString()).toBe(
+      new BN(ownerAnsemBefore.amount.toString()).add(claimable).toString(),
+    );
+    expect(vaultAfter.amount.toString()).toBe(vaultBefore.amount.toString());
+    expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.sub(claimable).toString(),
+    );
+    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBefore.totalAnsemLiabilityAtomic.sub(claimable).toString(),
+    );
+    expect(rewardAfter.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBefore.positionClaimableLiabilityAtomic.sub(claimable).toString(),
+    );
+    expect(rewardAfter.bullPoolLiabilityAtomic.toString()).toBe(
+      rewardBefore.bullPoolLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.bullPoolUnallocatedLiabilityAtomic.toString()).toBe(
+      rewardBefore.bullPoolUnallocatedLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.ansemClaimedAtomic.toString()).toBe(
+      rewardBefore.ansemClaimedAtomic.add(claimable).toString(),
+    );
+
+    const returned = stakeAmountAtomic.muln(9_500).divn(10_000);
+    const burned = stakeAmountAtomic.sub(returned);
+    expect(new BN(principalVaultAfter.amount.toString()).toString()).toBe(
+      new BN(principalVaultBefore.amount.toString()).sub(stakeAmountAtomic).toString(),
+    );
+    expect(new BN(rodeoAfter.amount.toString()).toString()).toBe(
+      new BN(rodeoBefore.amount.toString()).add(returned).toString(),
+    );
+
+    expect(gameAfter.livePositionCount.toString()).toBe(
+      gameBefore.livePositionCount.subn(1).toString(),
+    );
+    expect(gameAfter.activeCowboyCount.toString()).toBe(
+      gameBefore.activeCowboyCount.subn(1).toString(),
+    );
+    expect(gameAfter.accountedPrincipalAtomic.toString()).toBe(
+      gameBefore.accountedPrincipalAtomic.sub(stakeAmountAtomic).toString(),
+    );
+
+    expect(unassignedPosition).toBeNull();
+
+    const positionUnstaked = await positionUnstakedPromise;
+    ansemFateKey(positionUnstaked.ansemFate, "immune");
+    expect(positionUnstaked.ansemPaidToOwner.toString()).toBe(claimable.toString());
+    expect(positionUnstaked.ansemRoutedToBullPool.toString()).toBe("0");
+  }, 180_000);
+
+  it("Bull settlement does not double-decrement bull_pool_liability", async () => {
+    const stolenAmount = new BN(1_000_000_000);
+
+    const { positionId: bullPositionId, position: bullPosition } = await findBullPosition();
+    await prepareUnstakeReadyPositionById(bullPositionId, new BN(0));
+
+    const { positionId: cowboyPositionId } = await findPositionForUnstake(
+      (_id, _pos, _role, cowboyKind, stolen) => cowboyKind !== "desperado" && stolen,
+    );
+    await ensureRecognizedReserve(stolenAmount);
+    await prepareUnstakeReadyPositionById(cowboyPositionId, stolenAmount);
+
+    const { actionNonce: bullActionNonce } = await requestUnstake(bullPositionId);
+    const { actionNonce: cowboyActionNonce } = await requestUnstake(cowboyPositionId);
+
+    const rewardBeforeCowboy = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const bullBeforeCowboy = await rodeoAccounts(rodeoCoreProgram).bullAccumulator.fetch(
+      bullAccumulator,
+    );
+    const gameBeforeCowboy = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(
+      globalGameState,
+    );
+    const positionBullBeforeCowboy = await rodeoAccounts(rodeoCoreProgram).position.fetch(
+      bullPosition,
+    );
+    const ownerAnsemBeforeCowboy = await getAccount(provider.connection, payerAnsemAccount);
+
+    await settleUnstake(cowboyPositionId, cowboyActionNonce);
+
+    const rewardBeforeBull = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const bullBeforeBull = await rodeoAccounts(rodeoCoreProgram).bullAccumulator.fetch(
+      bullAccumulator,
+    );
+    const ownerAnsemBeforeBull = await getAccount(provider.connection, payerAnsemAccount);
+
+    expect(rewardBeforeBull.bullPoolLiabilityAtomic.sub(rewardBeforeCowboy.bullPoolLiabilityAtomic).toString()).toBe(
+      stolenAmount.toString(),
+    );
+    expect(ownerAnsemBeforeBull.amount.toString()).toBe(ownerAnsemBeforeCowboy.amount.toString());
+
+    const totalPower = gameBeforeCowboy.totalActiveBullPower;
+    const numerator = stolenAmount
+      .mul(REWARD_PER_WEIGHT_SCALE)
+      .add(bullBeforeCowboy.bullIndexRemainderScaled);
+    const expectedIndexAfterCowboy = bullBeforeCowboy.rewardPerWeightScaled.add(
+      numerator.div(totalPower),
+    );
+    const expectedBullIndexRemainder = numerator.mod(totalPower);
+
+    expect(bullBeforeBull.rewardPerWeightScaled.toString()).toBe(
+      expectedIndexAfterCowboy.toString(),
+    );
+    expect(bullBeforeBull.bullIndexRemainderScaled.toString()).toBe(
+      expectedBullIndexRemainder.toString(),
+    );
+
+    const bullPower = new BN(positionBullBeforeCowboy.buckPower);
+    const deltaIndex = expectedIndexAfterCowboy.sub(positionBullBeforeCowboy.lastBullRewardPerWeight);
+    const expectedPayout = deltaIndex
+      .mul(bullPower)
+      .add(positionBullBeforeCowboy.bullAccrualRemainderScaled)
+      .div(REWARD_PER_WEIGHT_SCALE);
+
+    const positionUnstakedPromise = collectOneEvent<PositionUnstakedEvent>("positionUnstaked");
+
+    await settleUnstake(bullPositionId, bullActionNonce);
+
+    const ownerAnsemAfterBull = await getAccount(provider.connection, payerAnsemAccount);
+    const rewardAfterBull = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const gameAfterBull = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(
+      globalGameState,
+    );
+    const unassignedBull = await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(
+      bullPosition,
+    );
+
+    const payout = rewardAfterBull.ansemClaimedAtomic.sub(rewardBeforeBull.ansemClaimedAtomic);
+    expect(payout.toString()).toBe(expectedPayout.toString());
+    expect(payout.gtn(0)).toBe(true);
+
+    expect(new BN(ownerAnsemAfterBull.amount.toString()).toString()).toBe(
+      new BN(ownerAnsemBeforeBull.amount.toString()).add(payout).toString(),
+    );
+    expect(rewardAfterBull.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBeforeBull.totalAnsemLiabilityAtomic.sub(payout).toString(),
+    );
+    expect(rewardAfterBull.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBeforeBull.recognizedRewardBalanceAtomic.sub(payout).toString(),
+    );
+    expect(rewardAfterBull.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBeforeBull.positionClaimableLiabilityAtomic.toString(),
+    );
+    expect(rewardAfterBull.bullPoolLiabilityAtomic.toString()).toBe(
+      rewardBeforeBull.bullPoolLiabilityAtomic.sub(payout).toString(),
+    );
+
+    expect(gameAfterBull.activeBullCount.toString()).toBe(
+      gameBeforeCowboy.activeBullCount.subn(1).toString(),
+    );
+    expect(gameAfterBull.livePositionCount.toString()).toBe(
+      gameBeforeCowboy.livePositionCount.subn(2).toString(),
+    );
+    expect(gameAfterBull.accountedPrincipalAtomic.toString()).toBe(
+      gameBeforeCowboy.accountedPrincipalAtomic.sub(stakeAmountAtomic.muln(2)).toString(),
+    );
+
+    expect(unassignedBull).toBeNull();
+
+    const positionUnstaked = await positionUnstakedPromise;
+    ansemFateKey(positionUnstaked.ansemFate, "toOwner");
+    expect(positionUnstaked.ansemPaidToOwner.toString()).toBe(payout.toString());
+    expect(positionUnstaked.ansemRoutedToBullPool.toString()).toBe("0");
+  }, 180_000);
+
+  it("zero-ANSEM unstake exits without ANSEM transfer", async () => {
+    const { positionId, position } = await findPositionForUnstake(
+      (_id, _pos, _role, cowboyKind, stolen) => cowboyKind !== "desperado" && !stolen,
+    );
+    await prepareUnstakeReadyPositionById(positionId, new BN(0));
+
+    const posBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(posBefore.claimableAnsemAtomic.toString()).toBe("0");
+
+    const ownerAnsemBefore = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const principalVaultBefore = await getAccount(provider.connection, principalVault);
+    const rodeoBefore = await getAccount(provider.connection, payerRodeoAccount);
+
+    const rewardPaidPromise = collectEvents<{ amountAtomic: BN }>("rewardPaid", 1, 2_000);
+
+    const { actionNonce } = await requestUnstake(positionId);
+    await settleUnstake(positionId, actionNonce);
+
+    const ownerAnsemAfter = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultAfter = await getAccount(provider.connection, rewardVault);
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const gameAfter = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const principalVaultAfter = await getAccount(provider.connection, principalVault);
+    const rodeoAfter = await getAccount(provider.connection, payerRodeoAccount);
+    const unassignedPosition = await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(position);
+
+    expect(ownerAnsemAfter.amount.toString()).toBe(ownerAnsemBefore.amount.toString());
+    expect(vaultAfter.amount.toString()).toBe(vaultBefore.amount.toString());
+    expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.toString(),
+    );
+    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBefore.totalAnsemLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBefore.positionClaimableLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.ansemClaimedAtomic.toString()).toBe(
+      rewardBefore.ansemClaimedAtomic.toString(),
+    );
+
+    const returned = stakeAmountAtomic.muln(9_500).divn(10_000);
+    expect(new BN(principalVaultAfter.amount.toString()).toString()).toBe(
+      new BN(principalVaultBefore.amount.toString()).sub(stakeAmountAtomic).toString(),
+    );
+    expect(new BN(rodeoAfter.amount.toString()).sub(new BN(rodeoBefore.amount.toString())).toString()).toBe(
+      returned.toString(),
+    );
+
+    expect(gameAfter.livePositionCount.toString()).toBe(
+      gameBefore.livePositionCount.subn(1).toString(),
+    );
+    expect(gameAfter.activeCowboyCount.toString()).toBe(
+      gameBefore.activeCowboyCount.subn(1).toString(),
+    );
+    expect(gameAfter.accountedPrincipalAtomic.toString()).toBe(
+      gameBefore.accountedPrincipalAtomic.sub(stakeAmountAtomic).toString(),
+    );
+
+    expect(unassignedPosition).toBeNull();
+
+    const rewardPaid = await rewardPaidPromise;
+    expect(rewardPaid.length).toBe(0);
+  }, 120_000);
+
+  it("recover_unstake_timeout is rejected before timeout and preserves all state", async () => {
+    const claimable = new BN(1_000_000_000);
+    const { positionId, position } = await findPositionForUnstake(
+      (_id, _pos, _role, cowboyKind, stolen) => cowboyKind !== "desperado" && !stolen,
+    );
+    await ensureRecognizedReserve(claimable);
+    await prepareUnstakeReadyPositionById(positionId, claimable);
+
+    const posBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const principalVaultBefore = await getAccount(provider.connection, principalVault);
+    const ownerRodeoBefore = await getAccount(provider.connection, payerRodeoAccount);
+    const ownerAnsemBefore = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+    const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    const { actionNonce } = await requestUnstake(positionId);
+    const posAfterRequest = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+
+    await expect(recoverUnstakeTimeout(positionId, actionNonce)).rejects.toThrow();
+
+    const posAfter = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const principalVaultAfter = await getAccount(provider.connection, principalVault);
+    const ownerRodeoAfter = await getAccount(provider.connection, payerRodeoAccount);
+    const ownerAnsemAfter = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultAfter = await getAccount(provider.connection, rewardVault);
+    const gameAfter = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    expect(posAfter.claimableAnsemAtomic.toString()).toBe(posBefore.claimableAnsemAtomic.toString());
+    expect(posAfter.nextActionNonce.toString()).toBe(posAfterRequest.nextActionNonce.toString());
+    expect(posAfter.pendingActionActive).toBe(true);
+    expect(posAfter.pendingActionType).toHaveProperty("unstake");
+    expect(posAfter.pendingActionNonce.toString()).toBe(actionNonce.toString());
+
+    expect(principalVaultAfter.amount.toString()).toBe(principalVaultBefore.amount.toString());
+    expect(ownerRodeoAfter.amount.toString()).toBe(ownerRodeoBefore.amount.toString());
+    expect(ownerAnsemAfter.amount.toString()).toBe(ownerAnsemBefore.amount.toString());
+    expect(vaultAfter.amount.toString()).toBe(vaultBefore.amount.toString());
+    expect(gameAfter.livePositionCount.toString()).toBe(gameBefore.livePositionCount.toString());
+    expect(gameAfter.activeCowboyCount.toString()).toBe(gameBefore.activeCowboyCount.toString());
+    expect(gameAfter.totalActiveCowboyWeight.toString()).toBe(
+      gameBefore.totalActiveCowboyWeight.toString(),
+    );
+    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBefore.totalAnsemLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBefore.positionClaimableLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.toString(),
+    );
+    expect(rewardAfter.bullPoolLiabilityAtomic.toString()).toBe(
+      rewardBefore.bullPoolLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.bullPoolUnallocatedLiabilityAtomic.toString()).toBe(
+      rewardBefore.bullPoolUnallocatedLiabilityAtomic.toString(),
+    );
+  }, 120_000);
+
+  it("recover_unstake_timeout after timeout preserves all state and allows a new request", async () => {
+    const claimable = new BN(1_000_000_000);
+    const { positionId, position } = await findPositionForUnstake(
+      (_id, _pos, _role, cowboyKind, stolen) => cowboyKind !== "desperado" && !stolen,
+    );
+    await ensureRecognizedReserve(claimable);
+    await prepareUnstakeReadyPositionById(positionId, claimable);
+
+    const posBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const principalVaultBefore = await getAccount(provider.connection, principalVault);
+    const ownerRodeoBefore = await getAccount(provider.connection, payerRodeoAccount);
+    const ownerAnsemBefore = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+    const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    const { pendingRandomness: pendingRandomness1, actionNonce: actionNonce1 } =
+      await requestUnstake(positionId);
+    const posAfterRequest = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+
+    await sleep(2_500);
+    await recoverUnstakeTimeout(positionId, actionNonce1);
+
+    const posAfter = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const principalVaultAfter = await getAccount(provider.connection, principalVault);
+    const ownerRodeoAfter = await getAccount(provider.connection, payerRodeoAccount);
+    const ownerAnsemAfter = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultAfter = await getAccount(provider.connection, rewardVault);
+    const gameAfter = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    expect(principalVaultAfter.amount.toString()).toBe(principalVaultBefore.amount.toString());
+    expect(ownerRodeoAfter.amount.toString()).toBe(ownerRodeoBefore.amount.toString());
+    expect(ownerAnsemAfter.amount.toString()).toBe(ownerAnsemBefore.amount.toString());
+    expect(vaultAfter.amount.toString()).toBe(vaultBefore.amount.toString());
+    expect(gameAfter.livePositionCount.toString()).toBe(gameBefore.livePositionCount.toString());
+    expect(gameAfter.activeCowboyCount.toString()).toBe(gameBefore.activeCowboyCount.toString());
+    expect(gameAfter.totalActiveCowboyWeight.toString()).toBe(
+      gameBefore.totalActiveCowboyWeight.toString(),
+    );
+    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBefore.totalAnsemLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBefore.positionClaimableLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.toString(),
+    );
+
+    expect(posAfter.pendingActionActive).toBe(false);
+    expect(posAfter.pendingActionType).toHaveProperty("reveal");
+    expect(posAfter.pendingActionNonce.toString()).toBe("0");
+    expect(posAfter.nextActionNonce.toString()).toBe(posAfterRequest.nextActionNonce.toString());
+    expect(posAfter.claimableAnsemAtomic.toString()).toBe(posBefore.claimableAnsemAtomic.toString());
+
+    const pendingAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetchNullable(
+      pendingRandomness1,
+    );
+    expect(pendingAccount).toBeNull();
+
+    const { pendingRandomness: pendingRandomness2, actionNonce: actionNonce2 } =
+      await requestUnstake(positionId);
+    expect(actionNonce2.gt(actionNonce1)).toBe(true);
+    expect(pendingRandomness2.toBase58()).not.toBe(pendingRandomness1.toBase58());
+
+    await expect(settleUnstake(positionId, actionNonce1)).rejects.toThrow();
+
+    // Clean up with the valid new action.
+    await settleUnstake(positionId, actionNonce2);
+  }, 120_000);
+
+  it("historical V1/V2 unstake snapshot with same input producing different theft", async () => {
+    const { positionId: positionAId, position: positionA, randomOutput } =
+      findV1SafeV2StolenCowboy();
+    const v1Prediction = expectedUnstakeTheftFlag(
+      positionA,
+      new BN(1),
+      new BN(0),
+      PROTOCOL_CONFIG_V1,
+    );
+    const v2Prediction = expectedUnstakeTheftFlag(
+      positionA,
+      new BN(1),
+      new BN(0),
+      PROTOCOL_CONFIG_V2,
+    );
+
+    const claimable = new BN(1_000_000_000);
+    await ensureRecognizedReserve(claimable);
+    await prepareUnstakeReadyPositionById(positionAId, claimable);
+
+    const { pendingRandomness: pendingA, actionNonce: actionNonceA } =
+      await requestUnstake(positionAId);
+    const pendingAccountA = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingA);
+    expect(pendingAccountA.configVersionSnapshot.toString()).toBe("1");
+
+    const protocolConfigV2 = await fixtureCreateProtocolConfigV2(new BN(2));
+    await fixtureSetCurrentConfigVersion(protocolConfigV2);
+
+    const ownerAnsemBeforeA = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultBeforeA = await getAccount(provider.connection, rewardVault);
+    const rewardBeforeA = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const principalVaultBeforeA = await getAccount(provider.connection, principalVault);
+    const rodeoBeforeA = await getAccount(provider.connection, payerRodeoAccount);
+
+    await settleUnstake(positionAId, actionNonceA);
+
+    const ownerAnsemAfterA = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultAfterA = await getAccount(provider.connection, rewardVault);
+    const rewardAfterA = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const principalVaultAfterA = await getAccount(provider.connection, principalVault);
+    const rodeoAfterA = await getAccount(provider.connection, payerRodeoAccount);
+
+    expect(new BN(ownerAnsemAfterA.amount.toString()).sub(new BN(ownerAnsemBeforeA.amount.toString())).toString()).toBe(
+      claimable.toString(),
+    );
+    expect(vaultAfterA.amount.toString()).toBe(vaultBeforeA.amount.toString());
+    expect(rewardAfterA.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBeforeA.positionClaimableLiabilityAtomic.sub(claimable).toString(),
+    );
+    expect(rewardAfterA.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBeforeA.totalAnsemLiabilityAtomic.sub(claimable).toString(),
+    );
+    expect(rewardAfterA.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBeforeA.recognizedRewardBalanceAtomic.sub(claimable).toString(),
+    );
+    expect(rewardAfterA.ansemClaimedAtomic.toString()).toBe(
+      rewardBeforeA.ansemClaimedAtomic.add(claimable).toString(),
+    );
+
+    const v1Returned = stakeAmountAtomic.muln(9_500).divn(10_000);
+    expect(new BN(principalVaultAfterA.amount.toString()).toString()).toBe(
+      new BN(principalVaultBeforeA.amount.toString()).sub(stakeAmountAtomic).toString(),
+    );
+    expect(new BN(rodeoAfterA.amount.toString()).toString()).toBe(
+      new BN(rodeoBeforeA.amount.toString()).add(v1Returned).toString(),
+    );
+
+    const { positionId: positionBId, position: positionB } = findV2StolenCowboy();
+    await ensureRecognizedReserve(claimable);
+    await prepareUnstakeReadyPositionById(positionBId, claimable);
+
+    const { pendingRandomness: pendingB, actionNonce: actionNonceB } =
+      await requestUnstake(positionBId);
+    const pendingAccountB = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingB);
+    expect(pendingAccountB.configVersionSnapshot.toString()).toBe("2");
+
+    const gameBeforeB = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const rewardBeforeB = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const ownerAnsemBeforeB = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultBeforeB = await getAccount(provider.connection, rewardVault);
+    const principalVaultBeforeB = await getAccount(provider.connection, principalVault);
+    const rodeoBeforeB = await getAccount(provider.connection, payerRodeoAccount);
+
+    const positionUnstakedPromise = collectOneEvent<PositionUnstakedEvent>("positionUnstaked");
+
+    await settleUnstake(positionBId, actionNonceB);
+
+    const gameAfterB = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const rewardAfterB = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const ownerAnsemAfterB = await getAccount(provider.connection, payerAnsemAccount);
+    const vaultAfterB = await getAccount(provider.connection, rewardVault);
+    const principalVaultAfterB = await getAccount(provider.connection, principalVault);
+    const rodeoAfterB = await getAccount(provider.connection, payerRodeoAccount);
+    const unassignedB = await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(positionB);
+
+    expect(unassignedB).toBeNull();
+    expect(ownerAnsemAfterB.amount.toString()).toBe(ownerAnsemBeforeB.amount.toString());
+    expect(vaultAfterB.amount.toString()).toBe(vaultBeforeB.amount.toString());
+
+    if (gameBeforeB.totalActiveBullPower.gtn(0)) {
+      const totalPower = gameBeforeB.totalActiveBullPower;
+      const bullBefore = await rodeoAccounts(rodeoCoreProgram).bullAccumulator.fetch(bullAccumulator);
+      const numerator = claimable
+        .mul(REWARD_PER_WEIGHT_SCALE)
+        .add(bullBefore.bullIndexRemainderScaled);
+      const increment = numerator.div(totalPower);
+      const newRemainder = numerator.mod(totalPower);
+      const bullAfter = await rodeoAccounts(rodeoCoreProgram).bullAccumulator.fetch(bullAccumulator);
+      expect(bullAfter.rewardPerWeightScaled.toString()).toBe(
+        bullBefore.rewardPerWeightScaled.add(increment).toString(),
+      );
+      expect(bullAfter.bullIndexRemainderScaled.toString()).toBe(newRemainder.toString());
+      expect(rewardAfterB.bullPoolLiabilityAtomic.toString()).toBe(
+        rewardBeforeB.bullPoolLiabilityAtomic.add(claimable).toString(),
+      );
+      expect(rewardAfterB.bullPoolUnallocatedLiabilityAtomic.toString()).toBe(
+        rewardBeforeB.bullPoolUnallocatedLiabilityAtomic.toString(),
+      );
+    } else {
+      expect(rewardAfterB.bullPoolUnallocatedLiabilityAtomic.toString()).toBe(
+        rewardBeforeB.bullPoolUnallocatedLiabilityAtomic.add(claimable).toString(),
+      );
+      expect(rewardAfterB.bullPoolLiabilityAtomic.toString()).toBe(
+        rewardBeforeB.bullPoolLiabilityAtomic.toString(),
+      );
+    }
+    expect(rewardAfterB.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBeforeB.positionClaimableLiabilityAtomic.sub(claimable).toString(),
+    );
+    expect(rewardAfterB.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBeforeB.totalAnsemLiabilityAtomic.toString(),
+    );
+    expect(rewardAfterB.ansemClaimedAtomic.toString()).toBe(
+      rewardBeforeB.ansemClaimedAtomic.toString(),
+    );
+
+    const v2Returned = stakeAmountAtomic.muln(8_000).divn(10_000);
+    expect(new BN(principalVaultAfterB.amount.toString()).toString()).toBe(
+      new BN(principalVaultBeforeB.amount.toString()).sub(stakeAmountAtomic).toString(),
+    );
+    expect(new BN(rodeoAfterB.amount.toString()).toString()).toBe(
+      new BN(rodeoBeforeB.amount.toString()).add(v2Returned).toString(),
+    );
+
+    const positionUnstaked = await positionUnstakedPromise;
+    ansemFateKey(positionUnstaked.ansemFate, "toBullPool");
+    expect(positionUnstaked.ansemPaidToOwner.toString()).toBe("0");
+    expect(positionUnstaked.ansemRoutedToBullPool.toString()).toBe(claimable.toString());
+
+    console.log("historical V1/V2 same-input vector:", {
+      positionA: positionAId.toString(),
+      positionB: positionBId.toString(),
+      randomOutput: Buffer.from(randomOutput).toString("hex"),
+      v1Prediction,
+      v2Prediction,
+    });
+  }, 180_000);
+
 });
 

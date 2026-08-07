@@ -1140,10 +1140,11 @@ pub mod rodeo_core {
         ];
         config.bull_tier_weights = [3_300_000, 1_375_000, 550_000, 275_000];
 
-        // Make V2 materially different for unstake settlement so historical
-        // snapshot tests can observe a distinct RODEO split.
+        // Make V2 materially different for unstake settlement in both
+        // dimensions: principal split (20/80) and theft probability (50/50).
         config.unstake_tax_bps = 2_000;
         config.unstake_return_bps = 8_000;
+        config.unstake_theft_weights = [5_000_000, 5_000_000];
 
         probability::validate_protocol_config(&config)?;
         ctx.accounts.protocol_config.set_inner(config);
