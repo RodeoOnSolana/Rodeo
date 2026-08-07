@@ -2243,7 +2243,6 @@ mod tests {
     use super::*;
     use crate::probability;
     use crate::state;
-    use constants::*;
 
     fn pubkey_from_u64(n: u64) -> Pubkey {
         let mut bytes = [0u8; 32];
@@ -2807,6 +2806,7 @@ mod tests {
             pending_action_type: state::ActionType::Reveal,
             pending_action_nonce: 0,
             next_action_nonce: 0,
+            reveal_config_version: 0,
             bump: 0,
         }
     }
