@@ -1901,6 +1901,7 @@ pub struct SettleUnstake<'info> {
     pub principal_vault: Account<'info, TokenAccount>,
 
     #[account(
+        mut,
         constraint = rodeo_mint.key() == global_config.rodeo_mint @ RodeoError::InvalidMint,
     )]
     pub rodeo_mint: Account<'info, Mint>,
