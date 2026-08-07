@@ -1675,15 +1675,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         clock: web3.SYSVAR_CLOCK_PUBKEY,
       })
       .signers([settler]);
-    try {
-      await (builder as any).simulate();
-    } catch (simErr: any) {
-      throw new Error(
-        `settleUnstake simulation failed for position ${positionId.toString()}:\n` +
-          JSON.stringify({ message: simErr.message, logs: simErr.logs }, null, 2),
-      );
-    }
-    await builder.rpc();
+    await runWhenEpochsClosed(() => builder.rpc());
   }
 
   async function recoverUnstakeTimeout(positionId: BN, actionNonce: BN, caller = payer) {
