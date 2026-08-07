@@ -1099,6 +1099,7 @@ pub mod rodeo_core {
         position.buck_power = buck_power;
         position.status = PositionStatus::Active;
         position.pending_action_active = false;
+        position.unstake_eligible_at = 0;
         position.claimable_ansem_atomic = claimable;
         position.last_cowboy_reward_index = ctx.accounts.reward_state.cowboy_reward_index;
         position.cowboy_accrual_remainder_scaled = 0;
@@ -1138,6 +1139,11 @@ pub mod rodeo_core {
             2_023_875, 1_124_375, 584_675, 359_800, 224_875, 134_925, 44_975, 2_500,
         ];
         config.bull_tier_weights = [3_300_000, 1_375_000, 550_000, 275_000];
+
+        // Make V2 materially different for unstake settlement so historical
+        // snapshot tests can observe a distinct RODEO split.
+        config.unstake_tax_bps = 2_000;
+        config.unstake_return_bps = 8_000;
 
         probability::validate_protocol_config(&config)?;
         ctx.accounts.protocol_config.set_inner(config);

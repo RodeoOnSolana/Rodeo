@@ -214,6 +214,8 @@ export const PROTOCOL_CONFIG_V2: ProtocolConfig = createProtocolConfig({
     2_500n,
   ],
   bullTierWeights: [3_300_000n, 1_375_000n, 550_000n, 275_000n],
+  unstakeTaxBps: 2_000n,
+  unstakeReturnBps: 8_000n,
 });
 
 export function protocolConfigToRoleTable(

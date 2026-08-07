@@ -483,6 +483,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         "close_epochs",
         "recognize_rewards",
         "claim_position",
+        "request_unstake",
+        "settle_unstake",
+        "recover_unstake_timeout",
       ].sort(),
     );
     expect(instructionNames).not.toContain("ensure_idl_accounts");
@@ -532,6 +535,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     expect(sdkSource).toContain("close_epochs");
     expect(sdkSource).toContain("recognize_rewards");
     expect(sdkSource).toContain("claim_position");
+    expect(sdkSource).toContain("request_unstake");
+    expect(sdkSource).toContain("settle_unstake");
+    expect(sdkSource).toContain("recover_unstake_timeout");
     expect(sdkSource).not.toContain("ensure_idl_accounts");
   }, 30_000);
 
@@ -609,6 +615,28 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     expect(enumVariants(bullPoolSource!).sort()).toEqual(
       ["CowboyClaimTax", "DesperadoClaimTax", "UnstakeTheft"].sort(),
     );
+
+    expect(eventNames).toContain("UnstakeRequested");
+    expect(eventNames).toContain("PositionUnstaked");
+    expect(fieldNames(findType("PositionUnstaked")!).sort()).toEqual(
+      [
+        "position",
+        "owner",
+        "principal_amount",
+        "principal_returned",
+        "principal_burned",
+        "ansem_fate",
+        "synchronized_ansem",
+        "ansem_paid_to_owner",
+        "ansem_routed_to_bull_pool",
+        "settlement_nonce",
+        "config_version",
+      ].sort(),
+    );
+
+    const ansemUnstakeFate = findType("AnsemUnstakeFate");
+    expect(ansemUnstakeFate).toBeDefined();
+    expect(enumVariants(ansemUnstakeFate!).sort()).toEqual(["ToOwner", "ToBullPool", "Immune"].sort());
   }, 30_000);
 
   it("only allows the program upgrade authority to initialize", async () => {

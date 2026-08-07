@@ -1,6 +1,12 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Idl } from "@coral-xyz/anchor";
+import {
+  PROTOCOL_CONFIG_V1,
+  RandomnessDomain,
+  mapUnstakeTheftFlag,
+} from "@rodeo/protocol-definition";
 import { AnchorProvider, BN, Program, setProvider, web3 } from "@coral-xyz/anchor";
 import {
   AuthorityType,
@@ -21,6 +27,7 @@ const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
 
 interface AccountFetcher<T> {
   fetch(address: web3.PublicKey): Promise<T>;
+  fetchNullable(address: web3.PublicKey): Promise<T | null>;
 }
 
 interface RodeoCoreAccountNamespace {
@@ -638,6 +645,192 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     await fixtureRecognizeRewards(amount);
   }
 
+  async function prepareUnstakeReadyPosition(
+    claimable: BN,
+  ): Promise<{ positionId: BN; position: web3.PublicKey; role: "cowboy" | "bull" | "desperado" }> {
+    const positionId = new BN(nextPositionId++);
+    await stakeAndCommit(positionId);
+    await settleReveal(positionId);
+    const { position } = await deriveStakeAccounts(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+
+    const role: "cowboy" | "bull" | "desperado" = pos.role.bull
+      ? "bull"
+      : pos.cowboyKind.desperado
+        ? "desperado"
+        : "cowboy";
+    const cowboyKindCode = pos.cowboyKind.desperado
+      ? 254
+      : pos.cowboyKind.rank
+        ? pos.cowboyKind.rank[0]
+        : 0;
+
+    await fixturePreparePosition(positionId, {
+      roleCode: pos.role.cowboy ? 1 : pos.role.bull ? 2 : 0,
+      cowboyKindCode,
+      accrualWeight: pos.accrualWeight,
+      buckPower: pos.buckPower,
+      claimable,
+      positionClaimableLiabilityDelta: claimable,
+    });
+
+    return { positionId, position, role };
+  }
+
+  function deriveMockCommitment(
+    position: web3.PublicKey,
+    actionType: number,
+    actionNonce: BN,
+    protocolEpoch: BN,
+  ): Uint8Array {
+    const preimage = Buffer.alloc(49);
+    let offset = 0;
+    position.toBuffer().copy(preimage, offset);
+    offset += 32;
+    preimage.writeUInt8(actionType, offset);
+    offset += 1;
+    Buffer.from(actionNonce.toArrayLike(Buffer, "le", 8)).copy(preimage, offset);
+    offset += 8;
+    Buffer.from(protocolEpoch.toArrayLike(Buffer, "le", 8)).copy(preimage, offset);
+    return new Uint8Array(createHash("sha256").update(preimage).digest());
+  }
+
+  async function requestUnstake(positionId: BN, owner = payer) {
+    const { position } = await deriveStakeAccounts(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const actionNonce = pos.nextActionNonce;
+    const [pendingRandomness] = deriveRandomness(
+      rodeoCoreProgram.programId,
+      position,
+      1,
+      actionNonce,
+    );
+    const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
+    const [protocolConfig] = deriveProtocolConfig(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      globalConfigAccount.currentConfigVersion,
+    );
+    await rodeoCoreProgram.methods
+      .requestUnstake()
+      .accounts({
+        owner: owner.publicKey,
+        globalConfig,
+        protocolConfig,
+        position,
+        pendingRandomness,
+        rewardState,
+        bullAccumulator,
+        systemProgram: web3.SystemProgram.programId,
+        rent: web3.SYSVAR_RENT_PUBKEY,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      })
+      .signers([owner])
+      .rpc();
+    return { position, pendingRandomness, actionNonce };
+  }
+
+  async function settleUnstake(positionId: BN, actionNonce: BN, settler = payer) {
+    const { position } = await deriveStakeAccounts(positionId);
+    const [pendingRandomness] = deriveRandomness(
+      rodeoCoreProgram.programId,
+      position,
+      1,
+      actionNonce,
+    );
+    const pendingRandomnessAccount =
+      await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
+    const [protocolConfig] = deriveProtocolConfig(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      pendingRandomnessAccount.configVersionSnapshot,
+    );
+    await rodeoCoreProgram.methods
+      .settleUnstake()
+      .accounts({
+        settler: settler.publicKey,
+        globalConfig,
+        globalGameState,
+        rewardState,
+        bullAccumulator,
+        position,
+        pendingRandomness,
+        protocolConfig,
+        principalVault,
+        rodeoMint,
+        ownerRodeoAccount: payerRodeoAccount,
+        rewardVault,
+        ownerAnsemAccount: payerAnsemAccount,
+        owner: payer.publicKey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      })
+      .signers([settler])
+      .rpc();
+  }
+
+  async function recoverUnstakeTimeout(positionId: BN, actionNonce: BN, caller = payer) {
+    const { position } = await deriveStakeAccounts(positionId);
+    const [pendingRandomness] = deriveRandomness(
+      rodeoCoreProgram.programId,
+      position,
+      1,
+      actionNonce,
+    );
+    await rodeoCoreProgram.methods
+      .recoverUnstakeTimeout()
+      .accounts({
+        caller: caller.publicKey,
+        globalConfig,
+        position,
+        pendingRandomness,
+        owner: payer.publicKey,
+        systemProgram: web3.SystemProgram.programId,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      })
+      .signers([caller])
+      .rpc();
+  }
+
+  async function fixtureCreateProtocolConfigV2(configVersion: BN) {
+    const [protocolConfig] = deriveProtocolConfig(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      configVersion,
+    );
+    const discriminator = Buffer.from("638f500cc67fd541", "hex");
+    const data = Buffer.concat([discriminator, configVersion.toArrayLike(Buffer, "le", 8)]);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: false },
+        { pubkey: protocolConfig, isSigner: false, isWritable: true },
+        { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: web3.SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
+    return protocolConfig;
+  }
+
+  async function fixtureSetCurrentConfigVersion(protocolConfig: web3.PublicKey) {
+    const discriminator = Buffer.from("9994dfcd3f23596c", "hex");
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: true },
+        { pubkey: protocolConfig, isSigner: false, isWritable: false },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data: discriminator,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
+  }
+
   it("recognizes reward-vault funding immediately after funding (no epoch elapses)", async () => {
     const fundAmount = new BN(5_000_000_000);
     await fundRewardVault(fundAmount);
@@ -1001,5 +1194,223 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       rewardBefore.suitVaultLiabilityAtomic.toString(),
     );
   }, 30_000);
+
+  it("rejects request_unstake before unstake_eligible_at", async () => {
+    const freshPositionId = new BN(nextPositionId++);
+    await stakeAndCommit(freshPositionId);
+    await settleReveal(freshPositionId);
+    await expect(requestUnstake(freshPositionId)).rejects.toThrow();
+
+    // Clean up with an eligible position so the suite count stays consistent.
+    const { positionId } = await prepareUnstakeReadyPosition(new BN(0));
+    const { actionNonce } = await requestUnstake(positionId);
+    await settleUnstake(positionId, actionNonce);
+  }, 60_000);
+
+  it("request_unstake opens a pending randomness with actionType unstake", async () => {
+    const { positionId, position } = await prepareUnstakeReadyPosition(new BN(0));
+    const { pendingRandomness, actionNonce } = await requestUnstake(positionId);
+    expect(actionNonce.toString()).toBe("1");
+
+    const pendingAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(
+      pendingRandomness,
+    );
+    expect(pendingAccount.actionType).toHaveProperty("unstake");
+    expect(pendingAccount.actionNonce.toString()).toBe(actionNonce.toString());
+    expect(pendingAccount.configVersionSnapshot.toString()).toBe("1");
+
+    const positionAccount = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(positionAccount.pendingActionActive).toBe(true);
+    expect(positionAccount.pendingActionType).toHaveProperty("unstake");
+    expect(positionAccount.pendingActionNonce.toString()).toBe(actionNonce.toString());
+  }, 60_000);
+
+  it("settle_unstake returns RODEO principal and removes a Bull position", async () => {
+    let attempts = 0;
+    let positionId: BN | undefined;
+    let settleInfo: { position: web3.PublicKey; pendingRandomness: web3.PublicKey; actionNonce: BN } | undefined;
+
+    while (attempts < 20) {
+      attempts++;
+      const prep = await prepareUnstakeReadyPosition(new BN(0));
+      if (prep.role === "bull") {
+        positionId = prep.positionId;
+        settleInfo = await requestUnstake(positionId);
+        break;
+      }
+      // Close non-bull positions to keep state consistent.
+      const { pendingRandomness, actionNonce } = await requestUnstake(prep.positionId);
+      await settleUnstake(prep.positionId, actionNonce);
+    }
+
+    if (!positionId || !settleInfo) {
+      throw new Error("Failed to reveal a Bull after 20 attempts");
+    }
+
+    const principalVaultBefore = await getAccount(provider.connection, principalVault);
+    const rodeoBefore = await getAccount(provider.connection, payerRodeoAccount);
+    const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+
+    await settleUnstake(positionId, settleInfo.actionNonce);
+
+    const principalVaultAfter = await getAccount(provider.connection, principalVault);
+    const rodeoAfter = await getAccount(provider.connection, payerRodeoAccount);
+    const gameAfter = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+
+    const stakeAmount = new BN(100_000_000_000);
+    const returned = stakeAmount.muln(9_500).divn(10_000);
+    const burned = stakeAmount.sub(returned);
+
+    expect(new BN(principalVaultAfter.amount.toString()).toString()).toBe(
+      new BN(principalVaultBefore.amount.toString()).sub(stakeAmount).toString(),
+    );
+    expect(new BN(rodeoAfter.amount.toString()).toString()).toBe(
+      new BN(rodeoBefore.amount.toString()).add(returned).toString(),
+    );
+    expect(gameAfter.livePositionCount.toString()).toBe(
+      gameBefore.livePositionCount.subn(1).toString(),
+    );
+    expect(gameAfter.activeBullCount.toString()).toBe(
+      gameBefore.activeBullCount.subn(1).toString(),
+    );
+    expect(gameAfter.accountedPrincipalAtomic.toString()).toBe(
+      gameBefore.accountedPrincipalAtomic.sub(stakeAmount).toString(),
+    );
+
+    const unassignedPosition = await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(
+      settleInfo.position,
+    );
+    expect(unassignedPosition).toBeNull();
+  }, 120_000);
+
+  it("settle_unstake pays ANSEM to the owner for a safe Cowboy", async () => {
+    let attempts = 0;
+    let positionId: BN | undefined;
+    let settleInfo: { position: web3.PublicKey; pendingRandomness: web3.PublicKey; actionNonce: BN } | undefined;
+
+    const claimable = new BN(1_000_000_000);
+    await ensureRecognizedReserve(claimable);
+
+    while (attempts < 64) {
+      attempts++;
+      const prep = await prepareUnstakeReadyPosition(new BN(0));
+      if (prep.role !== "cowboy") {
+        const { pendingRandomness, actionNonce } = await requestUnstake(prep.positionId);
+        await settleUnstake(prep.positionId, actionNonce);
+        continue;
+      }
+
+      // Credit claimable on the Cowboy so the safe-payout path can be observed.
+      const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(prep.position);
+      const cowboyKindCode = pos.cowboyKind.desperado ? 254 : pos.cowboyKind.rank![0];
+      await fixturePreparePosition(prep.positionId, {
+        roleCode: 1,
+        cowboyKindCode,
+        accrualWeight: pos.accrualWeight,
+        buckPower: pos.buckPower,
+        claimable,
+        positionClaimableLiabilityDelta: claimable,
+      });
+
+      const { position, pendingRandomness, actionNonce } = await requestUnstake(prep.positionId);
+      const pendingAccount =
+        await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
+      const randomOutput = deriveMockCommitment(
+        position,
+        1,
+        actionNonce,
+        pendingAccount.committedProtocolEpoch,
+      );
+      if (!mapUnstakeTheftFlag({
+        randomOutput,
+        domain: RandomnessDomain.UnstakeTheft,
+        position: position.toBuffer(),
+        actionNonce: BigInt(actionNonce.toString()),
+      }, PROTOCOL_CONFIG_V1)) {
+        positionId = prep.positionId;
+        settleInfo = { position, pendingRandomness, actionNonce };
+        break;
+      }
+      await settleUnstake(prep.positionId, actionNonce);
+    }
+
+    if (!positionId || !settleInfo) {
+      throw new Error("Failed to reveal a safe non-Desperado Cowboy after 64 attempts");
+    }
+
+    const ansemBefore = await getAccount(provider.connection, payerAnsemAccount);
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    await settleUnstake(positionId, settleInfo.actionNonce);
+
+    const ansemAfter = await getAccount(provider.connection, payerAnsemAccount);
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    expect(new BN(ansemAfter.amount.toString()).toString()).toBe(
+      new BN(ansemBefore.amount.toString()).add(claimable).toString(),
+    );
+    expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.sub(claimable).toString(),
+    );
+    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBefore.totalAnsemLiabilityAtomic.sub(claimable).toString(),
+    );
+    expect(rewardAfter.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBefore.positionClaimableLiabilityAtomic.sub(claimable).toString(),
+    );
+  }, 120_000);
+
+  it("recover_unstake_timeout cancels the pending action after timeout", async () => {
+    const { positionId } = await prepareUnstakeReadyPosition(new BN(0));
+    const { pendingRandomness, actionNonce } = await requestUnstake(positionId);
+    await sleep(2_500);
+    await recoverUnstakeTimeout(positionId, actionNonce);
+
+    const positionAccount = await rodeoAccounts(rodeoCoreProgram).position.fetch(
+      (await deriveStakeAccounts(positionId)).position,
+    );
+    expect(positionAccount.pendingActionActive).toBe(false);
+    expect(positionAccount.pendingActionType).toHaveProperty("reveal");
+    expect(positionAccount.pendingActionNonce.toString()).toBe("0");
+
+    const pendingAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetchNullable(
+      pendingRandomness,
+    );
+    expect(pendingAccount).toBeNull();
+  }, 60_000);
+
+  it("settle_unstake uses the historical ProtocolConfig version for the RODEO split", async () => {
+    const { positionId } = await prepareUnstakeReadyPosition(new BN(0));
+
+    const { pendingRandomness, actionNonce } = await requestUnstake(positionId);
+    const pendingAccount =
+      await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
+    expect(pendingAccount.configVersionSnapshot.toString()).toBe("1");
+
+    // Activate ProtocolConfig V2 after the unstake request is already open.
+    const protocolConfigV2 = await fixtureCreateProtocolConfigV2(new BN(2));
+    await fixtureSetCurrentConfigVersion(protocolConfigV2);
+
+    const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
+    expect(globalConfigAccount.currentConfigVersion.toString()).toBe("2");
+
+    const principalVaultBefore = await getAccount(provider.connection, principalVault);
+    const rodeoBefore = await getAccount(provider.connection, payerRodeoAccount);
+
+    await settleUnstake(positionId, actionNonce);
+
+    const principalVaultAfter = await getAccount(provider.connection, principalVault);
+    const rodeoAfter = await getAccount(provider.connection, payerRodeoAccount);
+
+    const stakeAmount = new BN(100_000_000_000);
+    const v1Returned = stakeAmount.muln(9_500).divn(10_000);
+
+    expect(new BN(principalVaultAfter.amount.toString()).toString()).toBe(
+      new BN(principalVaultBefore.amount.toString()).sub(stakeAmount).toString(),
+    );
+    expect(new BN(rodeoAfter.amount.toString()).sub(new BN(rodeoBefore.amount.toString())).toString()).toBe(
+      v1Returned.toString(),
+    );
+  }, 120_000);
 });
 
