@@ -31,6 +31,26 @@ interface RodeoCoreAccountNamespace {
   bullAccumulator: AccountFetcher<BullAccumulatorAccount>;
   position: AccountFetcher<PositionAccount>;
   pendingRandomness: AccountFetcher<PendingRandomnessAccount>;
+  protocolConfig: AccountFetcher<ProtocolConfigAccount>;
+}
+
+interface ProtocolConfigAccount {
+  version: number;
+  globalConfig: web3.PublicKey;
+  configVersion: BN;
+  roleWeights: BN[];
+  cowboyRankWeights: BN[];
+  bullTierWeights: BN[];
+  suitWeights: BN[];
+  mintTheftWeights: BN[];
+  unstakeTheftWeights: BN[];
+  cowboyAccrualWeights: number[];
+  bullBuckPowers: number[];
+  minRevealsForTheft: BN;
+  minBullsForTheft: BN;
+  unstakeTaxBps: BN;
+  unstakeReturnBps: BN;
+  bump: number;
 }
 
 interface PositionAccount {
@@ -61,6 +81,7 @@ interface PositionAccount {
   pendingActionType: { reveal?: {}; unstake?: {} };
   pendingActionNonce: BN;
   nextActionNonce: BN;
+  revealConfigVersion: BN;
   bump: number;
 }
 
@@ -77,6 +98,7 @@ interface PendingRandomnessAccount {
   timeoutTimestamp: BN;
   registryRootSnapshot: number[];
   registryVersionSnapshot: BN;
+  configVersionSnapshot: BN;
   settled: boolean;
   bump: number;
 }
@@ -99,6 +121,7 @@ interface GlobalConfigAccount {
   upgradeCouncil: web3.PublicKey;
   treasuryCouncil: web3.PublicKey;
   emergencyGuardians: web3.PublicKey;
+  currentConfigVersion: BN;
   bump: number;
   principalVaultBump: number;
   rewardVaultBump: number;
@@ -190,6 +213,21 @@ function deriveRandomness(
       position.toBuffer(),
       Buffer.from([actionType]),
       actionNonce.toArrayLike(Buffer, "le", 8),
+    ],
+    programId,
+  );
+}
+
+function deriveProtocolConfig(
+  programId: web3.PublicKey,
+  globalConfig: web3.PublicKey,
+  configVersion: BN,
+): [web3.PublicKey, number] {
+  return web3.PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("protocol-config"),
+      globalConfig.toBuffer(),
+      configVersion.toArrayLike(Buffer, "le", 8),
     ],
     programId,
   );
@@ -799,12 +837,19 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     owner = payer,
   ) {
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
+    const [protocolConfig] = deriveProtocolConfig(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      globalConfigAccount.currentConfigVersion,
+    );
     await rodeoCoreProgram.methods
       .stakeAndCommit(positionId, amount)
       .accounts({
         owner: owner.publicKey,
         ownerRodeoTokenAccount: ownerRodeo,
         globalConfig,
+        protocolConfig,
         principalVault,
         position,
         pendingRandomness,
@@ -817,11 +862,19 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       })
       .signers([owner])
       .rpc();
-    return { position, pendingRandomness };
+    return { position, pendingRandomness, protocolConfig };
   }
 
   async function settleReveal(positionId: BN, settler = payer) {
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const pendingRandomnessAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(
+      pendingRandomness,
+    );
+    const [protocolConfig] = deriveProtocolConfig(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      pendingRandomnessAccount.configVersionSnapshot,
+    );
     await rodeoCoreProgram.methods
       .settleReveal()
       .accounts({
@@ -832,6 +885,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         bullAccumulator,
         position,
         pendingRandomness,
+        protocolConfig,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
       })
       .signers([settler])
@@ -1257,6 +1311,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           bullAccumulator,
           position,
           pendingRandomness: wrongRandomness,
+          protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
           clock: web3.SYSVAR_CLOCK_PUBKEY,
         })
         .rpc(),
@@ -1804,6 +1859,60 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     await expect(runWhenEpochsClosed(op, 3)).rejects.toThrow("EpochsNotClosed");
     expect(calls).toBe(3);
   }, 30_000);
+
+  it("snapshots the active ProtocolConfig at stake and settles reveal with the historical version", async () => {
+    const v1PositionId = new BN(nextPositionId++);
+    const { position: v1Position, pendingRandomness: v1Pending } = await stakeAndCommit(v1PositionId);
+
+    const v1PendingAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(v1Pending);
+    expect(v1PendingAccount.configVersionSnapshot.toString()).toBe("1");
+
+    // Create and activate ProtocolConfig V2.
+    const [protocolConfigV2] = deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(2));
+    await rodeoCoreProgram.methods
+      .createProtocolConfigV2Fixture(new BN(2))
+      .accounts({
+        authority: payer.publicKey,
+        globalConfig,
+        protocolConfig: protocolConfigV2,
+        systemProgram: web3.SystemProgram.programId,
+        rent: web3.SYSVAR_RENT_PUBKEY,
+      })
+      .signers([payer])
+      .rpc();
+
+    await rodeoCoreProgram.methods
+      .setCurrentConfigVersionFixture()
+      .accounts({
+        authority: payer.publicKey,
+        globalConfig,
+        protocolConfig: protocolConfigV2,
+      })
+      .signers([payer])
+      .rpc();
+
+    const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
+    expect(globalConfigAccount.currentConfigVersion.toString()).toBe("2");
+
+    // Stake a second position after V2 is active; it must snapshot V2.
+    const v2PositionId = new BN(nextPositionId++);
+    const { pendingRandomness: v2Pending } = await stakeAndCommit(v2PositionId);
+    const v2PendingAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(v2Pending);
+    expect(v2PendingAccount.configVersionSnapshot.toString()).toBe("2");
+
+    // Settle the original V1 position. It must use the V1 protocol config and record version 1.
+    await settleReveal(v1PositionId);
+    const settledV1 = await rodeoAccounts(rodeoCoreProgram).position.fetch(v1Position);
+    expect(settledV1.revealConfigVersion.toString()).toBe("1");
+    expect(settledV1.status).toHaveProperty("active");
+
+    // Settle the V2 position and verify it records version 2.
+    await settleReveal(v2PositionId);
+    const [v2Position] = derivePosition(rodeoCoreProgram.programId, globalConfig, v2PositionId);
+    const settledV2 = await rodeoAccounts(rodeoCoreProgram).position.fetch(v2Position);
+    expect(settledV2.revealConfigVersion.toString()).toBe("2");
+    expect(settledV2.status).toHaveProperty("active");
+  }, 120_000);
 });
 
 describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", () => {

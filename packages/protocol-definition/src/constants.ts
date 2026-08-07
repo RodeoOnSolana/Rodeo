@@ -83,3 +83,4 @@ export const SEED_REWARD_VAULT = Buffer.from("reward-vault");
 export const SEED_POSITION = Buffer.from("position");
 export const SEED_CLAIM_COOLDOWN = Buffer.from("claim_cooldown");
 export const SEED_RANDOMNESS = Buffer.from("randomness");
+export const SEED_PROTOCOL_CONFIG = Buffer.from("protocol-config");

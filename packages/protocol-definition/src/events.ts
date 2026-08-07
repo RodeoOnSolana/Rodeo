@@ -11,6 +11,7 @@ export type ProtocolInitializedEvent = {
   readonly rewardState: string;
   readonly globalGameState: string;
   readonly bullAccumulator: string;
+  readonly protocolConfig: string;
   readonly rodeoMint: string;
   readonly ansemMint: string;
   readonly rodeoDecimals: number;
@@ -23,6 +24,7 @@ export type ProtocolInitializedEvent = {
   readonly upgradeCouncil: string;
   readonly treasuryCouncil: string;
   readonly emergencyGuardians: string;
+  readonly currentConfigVersion: bigint;
 };
 
 export type PositionStakedEvent = ProtocolEventEnvelope<"positionStaked", {
@@ -52,6 +54,7 @@ export type PositionRevealedEvent = ProtocolEventEnvelope<"positionRevealed", {
   readonly activeSince: bigint;
   readonly unstakeEligibleAt: bigint;
   readonly settlementNonce: bigint;
+  readonly configVersion: bigint;
 }>;
 
 export type PositionSoldEvent = ProtocolEventEnvelope<"positionSold", {
@@ -169,6 +172,7 @@ export type RandomnessRequestedEvent = ProtocolEventEnvelope<"randomnessRequeste
   readonly callbackId: Uint8Array | null;
   readonly registryRootSnapshot: Uint8Array;
   readonly registryVersionSnapshot: bigint;
+  readonly configVersionSnapshot: bigint;
   readonly commitment: Uint8Array;
 }>;
 

@@ -17,6 +17,7 @@ import {
   MIN_STAKE_SECONDS,
   POT_FILL_SECONDS,
   PROBABILITY_DENOMINATOR,
+  PROTOCOL_CONFIG_V2,
   RUNWAY_EPOCHS,
   SUIT_EQUAL_SPLIT_BPS,
   SUIT_PROPORTIONAL_SPLIT_BPS,
@@ -718,5 +719,35 @@ describe("Protocol v1.3 simulator invariants", () => {
     expect(simulator.state.cowboyUnmaterializedLiabilityAtomic).toBe(0n);
     // The full emission is split 90/10; with no Cowboys, the 90% stays free and only the suit 10% is reserved.
     expect(simulator.state.suitVaultLiabilityAtomic).toBeGreaterThan(0n);
+  });
+
+  it("V2 config produces different reveal outcomes than V1 for the same deterministic random value", () => {
+    let foundDifference = false;
+    for (let seed = 0; seed < 64; seed++) {
+      const v1Sim = new EconomicSimulator(config);
+      const v2Sim = new EconomicSimulator(config);
+      v2Sim.state.protocolConfigs.set(2n, PROTOCOL_CONFIG_V2);
+      v2Sim.state.currentConfigVersion = 2n;
+
+      v1Sim.apply({ type: "stake", settlementId: "s", positionId: "p", owner: "alice", openedAt: now });
+      v2Sim.apply({ type: "stake", settlementId: "s", positionId: "p", owner: "alice", openedAt: now });
+
+      const output = new Uint8Array(32).fill(seed);
+      v1Sim.apply({ type: "reveal", settlementId: "r", positionId: "p", randomOutput: output });
+      v2Sim.apply({ type: "reveal", settlementId: "r", positionId: "p", randomOutput: output });
+
+      const p1 = v1Sim.state.positions.get("p")!;
+      const p2 = v2Sim.state.positions.get("p")!;
+      if (
+        p1.role !== p2.role ||
+        p1.suit !== p2.suit ||
+        p1.bullTier !== p2.bullTier ||
+        p1.accrualWeight !== p2.accrualWeight
+      ) {
+        foundDifference = true;
+        break;
+      }
+    }
+    expect(foundDifference).toBe(true);
   });
 });
