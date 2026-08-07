@@ -949,11 +949,12 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     return false;
   }
 
-  // The localnet `sendAndConfirm` path can occasionally surface a dropped or
-  // race-lost short-epoch transaction as an unparseable `Unknown action` error.
-  // Treat it like an `EpochsNotClosed` race so the helper can close again and
-  // retry; if the issue is real it will still fail after maxAttempts.
-  function isSendTransactionRace(err: unknown): boolean {
+  // Shape-only check for the Anchor/web3.js wrapper bug that produces an
+  // unparseable `Unknown action 'undefined'` object. This is *not* enough to
+  // justify a retry; runWhenEpochsClosed additionally verifies that a new epoch
+  // became elapsed and was closed before classifying the failure as the
+  // short-epoch race.
+  function isUnknownActionSendTransactionError(err: unknown): boolean {
     if (typeof err !== "object" || err === null) return false;
     const e = err as { signature?: unknown; transactionMessage?: unknown; message?: string };
     return (
@@ -970,14 +971,76 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       try {
         return await op();
       } catch (err) {
-        if (isEpochsNotClosed(err) || isSendTransactionRace(err)) {
+        if (isEpochsNotClosed(err)) {
           lastErr = err;
           continue;
+        }
+        if (isUnknownActionSendTransactionError(err)) {
+          const epochBefore = (await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState))
+            .currentEpoch;
+          try {
+            await ensureEpochsClosed();
+          } catch (_closeErr) {
+            // Catch-up itself failed; don't mask the original error.
+            throw err;
+          }
+          const epochAfter = (await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState))
+            .currentEpoch;
+          if (epochAfter.gt(epochBefore)) {
+            lastErr = err;
+            continue;
+          }
+          // No elapsed epoch was closed, so this is not the short-epoch race.
+          throw err;
         }
         throw err;
       }
     }
     throw lastErr;
+  }
+
+  function extractCustomProgramError(err: unknown): number | null {
+    if (err === null || typeof err !== "object") return null;
+    const e = err as Record<string, unknown>;
+
+    if (Array.isArray(e["InstructionError"]) && e["InstructionError"].length === 2) {
+      const detail = e["InstructionError"][1];
+      if (typeof detail === "object" && detail !== null && "Custom" in detail) {
+        const custom = (detail as Record<string, unknown>)["Custom"];
+        if (typeof custom === "number") return custom;
+        if (typeof custom === "string") return parseInt(custom, 10);
+      }
+    }
+
+    const wrapped = e["Err"];
+    if (wrapped !== null && typeof wrapped === "object") {
+      return extractCustomProgramError(wrapped);
+    }
+
+    return null;
+  }
+
+  async function assertSimulatedEpochsNotClosed(builder: () => any): Promise<void> {
+    const tx = await builder().transaction();
+    tx.feePayer = provider.wallet.publicKey;
+    const { blockhash } = await provider.connection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+    await provider.wallet.signTransaction(tx);
+    const sim = await provider.connection.simulateTransaction(tx, [payer]);
+
+    expect(sim.value.err).not.toBeNull();
+
+    const customCode = extractCustomProgramError(sim.value.err);
+    expect(customCode).toBe(6027);
+
+    expect(sim.value.logs).not.toBeNull();
+    const hasEpochsNotClosed = (sim.value.logs ?? []).some(
+      (log: string) =>
+        log.includes("EpochsNotClosed") ||
+        log.includes("All elapsed epochs must be closed") ||
+        log.includes("custom program error: 0x178b"),
+    );
+    expect(hasEpochsNotClosed).toBe(true);
   }
 
   async function claimPositionRaw(positionId: BN, owner = payer, ownerAnsem = payerAnsemAccount) {
@@ -1505,7 +1568,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       payer.publicKey,
     );
 
-    async function attemptClaim() {
+    function claimPositionBuilder() {
       return rodeoCoreProgram.methods
         .claimPosition()
         .accounts({
@@ -1522,8 +1585,11 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           systemProgram: web3.SystemProgram.programId,
           clock: web3.SYSVAR_CLOCK_PUBKEY,
         })
-        .signers([payer])
-        .rpc();
+        .signers([payer]);
+    }
+
+    async function attemptClaim() {
+      return claimPositionBuilder().rpc();
     }
 
     // Let an epoch elapse without closing it.
@@ -1533,9 +1599,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const vaultBefore = await getAccount(provider.connection, rewardVault);
     const ownerBefore = await getAccount(provider.connection, payerAnsemAccount);
 
-    const err = await attemptClaim().catch((e) => e);
-    expect(err).toBeInstanceOf(Error);
-    expect(isEpochsNotClosed(err) || isSendTransactionRace(err)).toBe(true);
+    // Simulate the actual instruction to prove the on-chain guard returns
+    // EpochsNotClosed before any state change.
+    await assertSimulatedEpochsNotClosed(claimPositionBuilder);
 
     const posAfterFailure = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     const rewardAfterFailure = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
@@ -1570,7 +1636,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const fundAmount = new BN(1_000_000_000);
     await fundRewardVault(fundAmount);
 
-    async function attemptRecognize() {
+    function recognizeRewardsBuilder() {
       return rodeoCoreProgram.methods
         .recognizeRewards(fundAmount)
         .accounts({
@@ -1580,7 +1646,11 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           rewardVault,
           clock: web3.SYSVAR_CLOCK_PUBKEY,
         })
-        .rpc();
+        .signers([payer]);
+    }
+
+    async function attemptRecognize() {
+      return recognizeRewardsBuilder().rpc();
     }
 
     // Let an epoch elapse without closing it.
@@ -1589,9 +1659,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const vaultBefore = await getAccount(provider.connection, rewardVault);
 
-    const err = await attemptRecognize().catch((e) => e);
-    expect(err).toBeInstanceOf(Error);
-    expect(isEpochsNotClosed(err) || isSendTransactionRace(err)).toBe(true);
+    // Simulate the actual instruction to prove the on-chain guard returns
+    // EpochsNotClosed before any state change.
+    await assertSimulatedEpochsNotClosed(recognizeRewardsBuilder);
 
     const rewardAfterFailure = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const vaultAfterFailure = await getAccount(provider.connection, rewardVault);
@@ -1685,6 +1755,55 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     );
     expect(epochsClosed.lastClosedTimestamp.gtn(startEpoch)).toBe(true);
   }, 60_000);
+
+  it("rethrows Unknown action 'undefined' when no epoch is available to close", async () => {
+    const err = new Error("Unknown action 'undefined'");
+    (err as any).signature = undefined;
+    (err as any).transactionMessage = undefined;
+    (err as any).transactionLogs = undefined;
+    (err as any).logs = undefined;
+
+    await expect(
+      runWhenEpochsClosed(async () => {
+        throw err;
+      }),
+    ).rejects.toThrow("Unknown action 'undefined'");
+  }, 30_000);
+
+  it("retries Unknown action 'undefined' when a newly elapsed epoch is demonstrably closed", async () => {
+    let calls = 0;
+    const err = new Error("Unknown action 'undefined'");
+    (err as any).signature = undefined;
+    (err as any).transactionMessage = undefined;
+
+    const op = async () => {
+      calls++;
+      if (calls === 1) {
+        // Let an epoch elapse before throwing so the helper's catch-up can
+        // close it and the next attempt can succeed.
+        await sleep(2_500);
+        throw err;
+      }
+      return "ok";
+    };
+
+    const result = await runWhenEpochsClosed(op, 4);
+    expect(result).toBe("ok");
+    expect(calls).toBe(2);
+  }, 60_000);
+
+  it("bounds runWhenEpochsClosed retries and rethrows the last error", async () => {
+    let calls = 0;
+    const err = Object.assign(new Error("EpochsNotClosed"), {
+      error: { errorCode: { code: "EpochsNotClosed" } },
+    });
+    const op = async () => {
+      calls++;
+      throw err;
+    };
+    await expect(runWhenEpochsClosed(op, 3)).rejects.toThrow("EpochsNotClosed");
+    expect(calls).toBe(3);
+  }, 30_000);
 });
 
 describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", () => {

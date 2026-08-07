@@ -893,5 +893,53 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       throw new Error("Unexpected event reason shape");
     }
   }
+
+  it("recognize_rewards preserves every liability bucket in the production-length profile", async () => {
+    // The claim profile is built with production-length epochs, so no epoch
+    // can elapse. Recognition therefore must not touch any liability bucket.
+    const fundAmount = new BN(5_000_000_000);
+    await fundRewardVault(fundAmount);
+
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    await rodeoCoreProgram.methods
+      .recognizeRewards(fundAmount)
+      .accounts({
+        caller: payer.publicKey,
+        globalConfig,
+        rewardState,
+        rewardVault,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      })
+      .rpc();
+
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultAfter = await getAccount(provider.connection, rewardVault);
+
+    expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.add(fundAmount).toString(),
+    );
+    expect(vaultAfter.amount.toString()).toBe(vaultBefore.amount.toString());
+
+    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBefore.totalAnsemLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.cowboyUnmaterializedLiabilityAtomic.toString()).toBe(
+      rewardBefore.cowboyUnmaterializedLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBefore.positionClaimableLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.bullPoolLiabilityAtomic.toString()).toBe(
+      rewardBefore.bullPoolLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.bullPoolUnallocatedLiabilityAtomic.toString()).toBe(
+      rewardBefore.bullPoolUnallocatedLiabilityAtomic.toString(),
+    );
+    expect(rewardAfter.suitVaultLiabilityAtomic.toString()).toBe(
+      rewardBefore.suitVaultLiabilityAtomic.toString(),
+    );
+  }, 30_000);
 });
 
