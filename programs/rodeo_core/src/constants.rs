@@ -84,13 +84,13 @@ pub const SEED_CLAIM_COOLDOWN: &[u8] = b"claim_cooldown";
 pub const SEED_RANDOMNESS: &[u8] = b"randomness";
 pub const SEED_PROTOCOL_CONFIG: &[u8] = b"protocol-config";
 
-pub const ACCOUNT_VERSION_GLOBAL_CONFIG: u8 = 1;
+pub const ACCOUNT_VERSION_GLOBAL_CONFIG: u8 = 2;
 pub const ACCOUNT_VERSION_REWARD_STATE: u8 = 3;
 pub const ACCOUNT_VERSION_GLOBAL_GAME_STATE: u8 = 3;
 pub const ACCOUNT_VERSION_BULL_ACCUMULATOR: u8 = 3;
-pub const ACCOUNT_VERSION_POSITION: u8 = 3;
+pub const ACCOUNT_VERSION_POSITION: u8 = 4;
 pub const ACCOUNT_VERSION_WALLET_CLAIM_COOLDOWN: u8 = 1;
-pub const ACCOUNT_VERSION_PENDING_RANDOMNESS: u8 = 3;
+pub const ACCOUNT_VERSION_PENDING_RANDOMNESS: u8 = 4;
 pub const ACCOUNT_VERSION_PROTOCOL_CONFIG: u8 = 1;
 
 // Compile-time guards for the production-safe default configuration. These are

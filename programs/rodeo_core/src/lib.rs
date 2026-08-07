@@ -2283,13 +2283,13 @@ mod tests {
 
     #[test]
     fn account_versions_match_protocol_definition() {
-        assert_eq!(ACCOUNT_VERSION_GLOBAL_CONFIG, 1);
+        assert_eq!(ACCOUNT_VERSION_GLOBAL_CONFIG, 2);
         assert_eq!(ACCOUNT_VERSION_REWARD_STATE, 3);
         assert_eq!(ACCOUNT_VERSION_GLOBAL_GAME_STATE, 3);
         assert_eq!(ACCOUNT_VERSION_BULL_ACCUMULATOR, 3);
-        assert_eq!(ACCOUNT_VERSION_POSITION, 3);
+        assert_eq!(ACCOUNT_VERSION_POSITION, 4);
         assert_eq!(ACCOUNT_VERSION_WALLET_CLAIM_COOLDOWN, 1);
-        assert_eq!(ACCOUNT_VERSION_PENDING_RANDOMNESS, 3);
+        assert_eq!(ACCOUNT_VERSION_PENDING_RANDOMNESS, 4);
         assert_eq!(ACCOUNT_VERSION_PROTOCOL_CONFIG, 1);
     }
 

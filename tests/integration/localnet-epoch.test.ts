@@ -13,7 +13,16 @@ import {
   mintTo,
   setAuthority,
 } from "@solana/spl-token";
-import { POT_FILL_SECONDS } from "@rodeo/protocol-definition";
+import {
+  POT_FILL_SECONDS,
+  PROTOCOL_CONFIG_V1,
+  PROTOCOL_CONFIG_V2,
+  RandomnessDomain,
+  mapBullTier,
+  mapCowboyKind,
+  mapRole,
+  mapSuit,
+} from "@rodeo/protocol-definition";
 import { beforeAll, describe, expect, it } from "vitest";
 
 const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
@@ -238,6 +247,66 @@ function programDataAddress(programId: web3.PublicKey): web3.PublicKey {
     [programId.toBuffer()],
     BPF_LOADER_UPGRADEABLE_PROGRAM_ID,
   )[0];
+}
+
+type OutcomeShape = {
+  role: string;
+  suit: string;
+  cowboyKind?: string;
+  bullTier?: number;
+};
+
+function expectedRevealOutcomes(
+  randomOutput: number[],
+  position: web3.PublicKey,
+  actionNonce: BN,
+  config: typeof PROTOCOL_CONFIG_V1,
+): OutcomeShape {
+  const output = new Uint8Array(randomOutput);
+  const posBytes = position.toBuffer();
+  const nonce = BigInt(actionNonce.toString());
+  const role = mapRole(
+    { randomOutput: output, domain: RandomnessDomain.Role, position: posBytes, actionNonce: nonce },
+    config,
+  );
+  const suit = mapSuit(
+    { randomOutput: output, domain: RandomnessDomain.Suit, position: posBytes, actionNonce: nonce },
+    config,
+  );
+  if (role === "cowboy") {
+    const rank = mapCowboyKind(
+      { randomOutput: output, domain: RandomnessDomain.CowboyKind, position: posBytes, actionNonce: nonce },
+      config,
+    );
+    return { role, suit, cowboyKind: rank };
+  }
+  const tier = mapBullTier(
+    { randomOutput: output, domain: RandomnessDomain.BullTier, position: posBytes, actionNonce: nonce },
+    config,
+  );
+  return { role, suit, bullTier: Number(tier.replace("tier", "")) };
+}
+
+function positionOutcomes(position: PositionAccount): OutcomeShape {
+  const role = position.role.cowboy ? "cowboy" : position.role.bull ? "bull" : "unassigned";
+  const suit = position.suit.hearts
+    ? "hearts"
+    : position.suit.diamonds
+      ? "diamonds"
+      : position.suit.clubs
+        ? "clubs"
+        : position.suit.spades
+          ? "spades"
+          : "unassigned";
+  if (role === "cowboy") {
+    const cowboyKind = position.cowboyKind.desperado
+      ? "desperado"
+      : position.cowboyKind.rank
+        ? `rank${position.cowboyKind.rank[0]}`
+        : "unassigned";
+    return { role, suit, cowboyKind };
+  }
+  return { role, suit, bullTier: position.bullTier };
 }
 
 async function createRevokedMint(
@@ -1915,6 +1984,22 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const v1PendingAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(v1Pending);
     expect(v1PendingAccount.configVersionSnapshot.toString()).toBe("1");
 
+    // Compute the deterministic random input and prove V1 and V2 would resolve
+    // the same input to materially different outcomes.
+    const expectedV1 = expectedRevealOutcomes(
+      v1PendingAccount.commitment,
+      v1Position,
+      v1PendingAccount.actionNonce,
+      PROTOCOL_CONFIG_V1,
+    );
+    const expectedV2 = expectedRevealOutcomes(
+      v1PendingAccount.commitment,
+      v1Position,
+      v1PendingAccount.actionNonce,
+      PROTOCOL_CONFIG_V2,
+    );
+    expect(JSON.stringify(expectedV1)).not.toBe(JSON.stringify(expectedV2));
+
     // Create and activate ProtocolConfig V2.
     const protocolConfigV2 = await fixtureCreateProtocolConfigV2(new BN(2));
     await fixtureSetCurrentConfigVersion(protocolConfigV2);
@@ -1933,6 +2018,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const settledV1 = await rodeoAccounts(rodeoCoreProgram).position.fetch(v1Position);
     expect(settledV1.revealConfigVersion.toString()).toBe("1");
     expect(settledV1.status).toHaveProperty("active");
+    const actualV1 = positionOutcomes(settledV1);
+    expect(actualV1).toEqual(expectedV1);
+    expect(actualV1).not.toEqual(expectedV2);
 
     // Settle the V2 position and verify it records version 2.
     await settleReveal(v2PositionId);

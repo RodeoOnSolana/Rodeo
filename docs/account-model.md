@@ -351,13 +351,13 @@ Current account versions (from `packages/protocol-definition/src/accounts.ts`):
 
 | Account | Version | Reason |
 | --- | --- | --- |
-| globalConfig | 1 | Initial definition. |
+| globalConfig | 2 | v2 added `current_config_version` for the versioned `ProtocolConfig` snapshot. |
 | rewardState | 3 | v2 added `last_closed_epoch_timestamp` (sole owner) and `cowboy_index_remainder_scaled`; removed `unrecognized_reward_surplus_atomic` (now computed dynamically as `reward_vault_balance - recognized_reward_balance_atomic`). v3 (1.3.2) added `cowboy_orphaned_accrual_remainder_scaled`; v1.3.3 adds `orphaned_reward_released_atomic` as a cumulative transparency counter. |
-| position | 3 | Added `bull_tier`, `cowboy_accrual_remainder_scaled`, `bull_accrual_remainder_scaled`; removed `rank_or_tier` sentinel. |
+| position | 4 | v3 added `bull_tier`, `cowboy_accrual_remainder_scaled`, `bull_accrual_remainder_scaled`; removed `rank_or_tier` sentinel. v4 added `reveal_config_version` to record the historical `ProtocolConfig` used at reveal. |
 | globalGameState | 3 | Removed `launch_timestamp`, `current_epoch`, `last_closed_epoch_timestamp` (now sole-owned by `GlobalConfig`/`RewardState`); account holds only population, power, and accounted-principal counters. |
 | bullAccumulator | 3 | v2 removed `cowboy_reward_index` (sole-owned by `RewardState`); added `bull_index_remainder_scaled` exact-rounding carry. v3 (1.3.2) added `bull_orphaned_accrual_remainder_scaled`. |
 | bullRegistry | 1 | Design-proposal placeholder; version will bump when finalized. |
-| pendingRandomness | 3 | Added `provider_program`, `provider_randomness_account`, `committed_protocol_epoch`, `timeout_timestamp`, `registry_root_snapshot`, `registry_version_snapshot`. |
+| pendingRandomness | 4 | v3 added `provider_program`, `provider_randomness_account`, `committed_protocol_epoch`, `timeout_timestamp`, `registry_root_snapshot`, `registry_version_snapshot`. v4 added `config_version_snapshot` to freeze the active `ProtocolConfig` at stake time. |
 | pendingBatch | 1 | Per-source-mint router pending account. |
 | walletClaimCooldown | 1 | Initial definition. |
 | socialResult | 2 | v2 (1.3.2) replaced singular `winning_suit` with `winning_suits_mask: u8` and added `total_amount`. |

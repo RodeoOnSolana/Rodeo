@@ -1,11 +1,11 @@
 export const ACCOUNT_VERSIONS = {
-  globalConfig: 1,
+  globalConfig: 2,
   rewardState: 3,
   globalGameState: 3,
   bullAccumulator: 3,
-  position: 3,
+  position: 4,
   walletClaimCooldown: 1,
-  pendingRandomness: 3,
+  pendingRandomness: 4,
   protocolConfig: 1,
 } as const;
 
