@@ -1291,7 +1291,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     const claimable = new BN(1_000_000_000);
     await ensureRecognizedReserve(claimable);
 
-    while (attempts < 64) {
+    while (attempts < 32) {
       attempts++;
       const prep = await prepareUnstakeReadyPosition(new BN(0));
       if (prep.role !== "cowboy") {
@@ -1335,7 +1335,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     }
 
     if (!positionId || !settleInfo) {
-      throw new Error("Failed to reveal a safe non-Desperado Cowboy after 64 attempts");
+      throw new Error("Failed to reveal a safe non-Desperado Cowboy after 32 attempts");
     }
 
     const ansemBefore = await getAccount(provider.connection, payerAnsemAccount);
