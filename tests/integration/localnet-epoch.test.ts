@@ -444,6 +444,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       "Position",
       "PendingRandomness",
       "WalletClaimCooldown",
+      "ProtocolConfig",
     ];
     expect([...accountNames].sort()).toEqual(expectedAccounts.sort());
     expect(accountNames).not.toContain("IdlTypeHolder");
@@ -920,6 +921,44 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       })
       .signers([caller])
       .rpc();
+  }
+
+  // The `test-fixtures` instructions are compiled into the epoch/claim test
+  // binaries, but they are intentionally kept out of the production IDL.
+  // Invoke them via their Anchor discriminators.
+  async function fixtureCreateProtocolConfigV2(configVersion: BN) {
+    const [protocolConfig] = deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, configVersion);
+    const discriminator = Buffer.from("638f500cc67fd541", "hex");
+    const data = Buffer.concat([discriminator, configVersion.toArrayLike(Buffer, "le", 8)]);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: false },
+        { pubkey: protocolConfig, isSigner: false, isWritable: true },
+        { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: web3.SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
+    return protocolConfig;
+  }
+
+  async function fixtureSetCurrentConfigVersion(protocolConfig: web3.PublicKey) {
+    const discriminator = Buffer.from("9994dfcd3f23596c", "hex");
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: true },
+        { pubkey: protocolConfig, isSigner: false, isWritable: false },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data: discriminator,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
   }
 
   function deriveWalletCooldown(
@@ -1877,28 +1916,8 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     expect(v1PendingAccount.configVersionSnapshot.toString()).toBe("1");
 
     // Create and activate ProtocolConfig V2.
-    const [protocolConfigV2] = deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(2));
-    await rodeoCoreProgram.methods
-      .createProtocolConfigV2Fixture(new BN(2))
-      .accounts({
-        authority: payer.publicKey,
-        globalConfig,
-        protocolConfig: protocolConfigV2,
-        systemProgram: web3.SystemProgram.programId,
-        rent: web3.SYSVAR_RENT_PUBKEY,
-      })
-      .signers([payer])
-      .rpc();
-
-    await rodeoCoreProgram.methods
-      .setCurrentConfigVersionFixture()
-      .accounts({
-        authority: payer.publicKey,
-        globalConfig,
-        protocolConfig: protocolConfigV2,
-      })
-      .signers([payer])
-      .rpc();
+    const protocolConfigV2 = await fixtureCreateProtocolConfigV2(new BN(2));
+    await fixtureSetCurrentConfigVersion(protocolConfigV2);
 
     const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
     expect(globalConfigAccount.currentConfigVersion.toString()).toBe("2");
