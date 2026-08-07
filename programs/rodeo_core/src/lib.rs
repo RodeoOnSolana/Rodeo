@@ -436,6 +436,393 @@ pub mod rodeo_core {
         Ok(())
     }
 
+    pub fn close_epochs(ctx: Context<CloseEpochs>, max_epochs: u8) -> Result<()> {
+        require!(max_epochs > 0, RodeoError::InvalidEpochBatch);
+        let to_process = max_epochs.min(CLOSE_EPOCH_BATCH_MAX);
+        let now = Clock::get()?.unix_timestamp;
+
+        let reward_state = &mut ctx.accounts.reward_state;
+        let global_game_state = &ctx.accounts.global_game_state;
+        let bull_accumulator = &mut ctx.accounts.bull_accumulator;
+        let reward_vault = &ctx.accounts.reward_vault;
+
+        require_keys_eq!(
+            reward_vault.key(),
+            ctx.accounts.global_config.reward_vault,
+            RodeoError::InvalidRewardVault
+        );
+
+        let actual_reward_vault_balance = reward_vault.amount;
+        let start_epoch = reward_state.current_epoch;
+        let mut processed: u64 = 0;
+
+        for _ in 0..to_process {
+            let next_boundary = reward_state
+                .last_closed_epoch_timestamp
+                .checked_add(EPOCH_DURATION_SECONDS)
+                .ok_or(RodeoError::ArithmeticOverflow)?;
+            if now < next_boundary {
+                break;
+            }
+
+            // Snapshot values at the epoch boundary before applying emission.
+            let snapshot_recognized = reward_state.recognized_reward_balance_atomic;
+            let snapshot_total_liability = reward_state.total_ansem_liability_atomic;
+            let snapshot_cowboy_weight = global_game_state.total_active_cowboy_weight;
+            let snapshot_bull_power = global_game_state.total_active_bull_power;
+            let snapshot_timestamp = reward_state.epoch_started_at;
+
+            let mut epoch_emission: u64 = 0;
+            let mut free_ansem: u64 = 0;
+            let mut cowboy_emission: u64 = 0;
+            let mut suit_contribution: u64 = 0;
+
+            if now >= reward_state.epoch_started_at {
+                let backed_balance = std::cmp::min(
+                    actual_reward_vault_balance,
+                    reward_state.recognized_reward_balance_atomic,
+                );
+                free_ansem = if backed_balance >= reward_state.total_ansem_liability_atomic {
+                    backed_balance - reward_state.total_ansem_liability_atomic
+                } else {
+                    0
+                };
+
+                epoch_emission = if free_ansem >= RUNWAY_EPOCHS as u64 {
+                    free_ansem / RUNWAY_EPOCHS as u64
+                } else {
+                    0
+                };
+
+                cowboy_emission = math::floor_bps(epoch_emission, EMISSION_COWBOY_BPS as u64)?;
+                suit_contribution = epoch_emission - cowboy_emission;
+            }
+
+            if epoch_emission > 0 {
+                if cowboy_emission > 0 && global_game_state.total_active_cowboy_weight > 0 {
+                    let (new_index, new_remainder) = math::increment_cowboy_index(
+                        reward_state.cowboy_reward_index,
+                        reward_state.cowboy_index_remainder_scaled,
+                        cowboy_emission,
+                        global_game_state.total_active_cowboy_weight,
+                        COWBOY_REWARD_INDEX_SCALE,
+                    )?;
+                    reward_state.cowboy_reward_index = new_index;
+                    reward_state.cowboy_index_remainder_scaled = new_remainder;
+                    reward_state.cowboy_unmaterialized_liability_atomic = math::checked_add_u64(
+                        reward_state.cowboy_unmaterialized_liability_atomic,
+                        cowboy_emission,
+                    )?;
+                    reward_state.total_ansem_liability_atomic = math::checked_add_u64(
+                        reward_state.total_ansem_liability_atomic,
+                        cowboy_emission,
+                    )?;
+                }
+
+                if suit_contribution > 0 {
+                    reward_state.suit_vault_liability_atomic = math::checked_add_u64(
+                        reward_state.suit_vault_liability_atomic,
+                        suit_contribution,
+                    )?;
+                    reward_state.total_ansem_liability_atomic = math::checked_add_u64(
+                        reward_state.total_ansem_liability_atomic,
+                        suit_contribution,
+                    )?;
+                }
+
+                reward_state.ansem_emitted_atomic =
+                    math::checked_add_u64(reward_state.ansem_emitted_atomic, epoch_emission)?;
+            }
+
+            reward_state.current_epoch = math::checked_add_u64(reward_state.current_epoch, 1)?;
+            reward_state.epoch_started_at = next_boundary;
+            reward_state.last_closed_epoch_timestamp = next_boundary;
+            processed = math::checked_add_u64(processed, 1)?;
+
+            emit!(EpochClosed {
+                epoch: reward_state.current_epoch,
+                cowboy_emission,
+                suit_vault_contribution: suit_contribution,
+                free_ansem,
+                total_cowboy_weight: snapshot_cowboy_weight,
+                total_bull_power: snapshot_bull_power,
+                recognized_reward_balance_atomic: snapshot_recognized,
+                total_ansem_liability_atomic: snapshot_total_liability,
+                snapshot_timestamp,
+            });
+        }
+
+        require!(processed > 0, RodeoError::NoElapsedEpoch);
+
+        emit!(EpochsClosed {
+            start_epoch,
+            end_epoch: reward_state.current_epoch,
+            epochs_processed: processed,
+            last_closed_timestamp: reward_state.last_closed_epoch_timestamp,
+        });
+
+        Ok(())
+    }
+
+    pub fn recognize_rewards(ctx: Context<RecognizeRewards>, amount: u64) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
+
+        let reward_state = &mut ctx.accounts.reward_state;
+        let reward_vault = &ctx.accounts.reward_vault;
+
+        require_keys_eq!(
+            reward_vault.key(),
+            ctx.accounts.global_config.reward_vault,
+            RodeoError::InvalidRewardVault
+        );
+        require_keys_eq!(
+            reward_vault.mint,
+            ctx.accounts.global_config.ansem_mint,
+            RodeoError::InvalidAnsemMint
+        );
+
+        let actual_balance = reward_vault.amount;
+        require!(
+            actual_balance >= reward_state.recognized_reward_balance_atomic,
+            RodeoError::InsufficientRecognizedRewards
+        );
+        let surplus = actual_balance - reward_state.recognized_reward_balance_atomic;
+        let to_recognize = std::cmp::min(amount, surplus);
+        require!(to_recognize > 0, RodeoError::InsufficientRecognizedRewards);
+
+        let new_recognized = reward_state
+            .recognized_reward_balance_atomic
+            .checked_add(to_recognize)
+            .ok_or(RodeoError::ArithmeticOverflow)?;
+        require!(
+            new_recognized <= actual_balance,
+            RodeoError::InsufficientRecognizedRewards
+        );
+        reward_state.recognized_reward_balance_atomic = new_recognized;
+
+        emit!(RewardFundingRecognized {
+            amount_atomic: to_recognize,
+            recognized_reward_balance_atomic: new_recognized,
+            actual_reward_vault_balance: actual_balance,
+        });
+
+        Ok(())
+    }
+
+    pub fn claim_position(ctx: Context<ClaimPosition>) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
+
+        let owner = ctx.accounts.owner.key();
+        let position = &mut ctx.accounts.position;
+        require_eq!(position.owner, owner, RodeoError::InvalidOwner);
+        require!(
+            position.status == PositionStatus::Active,
+            RodeoError::InvalidRole
+        );
+        require!(
+            !position.pending_action_active,
+            RodeoError::PendingActionBlocksClaim
+        );
+
+        // Synchronize role-specific rewards.
+        sync_cowboy_rewards(position, &mut ctx.accounts.reward_state)?;
+        sync_bull_rewards(
+            position,
+            &mut ctx.accounts.bull_accumulator,
+            &mut ctx.accounts.reward_state,
+        )?;
+
+        let claimable = position.claimable_ansem_atomic;
+        require!(claimable > 0, RodeoError::NoClaimableRewards);
+
+        // Wallet-level cooldown.
+        let cooldown = &mut ctx.accounts.wallet_claim_cooldown;
+        if cooldown.version == 0 {
+            cooldown.version = ACCOUNT_VERSION_WALLET_CLAIM_COOLDOWN;
+            cooldown.global_config = ctx.accounts.global_config.key();
+            cooldown.wallet = owner;
+            cooldown.last_claimed_at = 0;
+            cooldown.bump = ctx.bumps.wallet_claim_cooldown;
+        }
+        require!(
+            now >= cooldown
+                .last_claimed_at
+                .checked_add(CLAIM_COOLDOWN_SECONDS)
+                .ok_or(RodeoError::ArithmeticOverflow)?,
+            RodeoError::ClaimCooldownNotMet
+        );
+
+        // Validate vault and destination.
+        require_keys_eq!(
+            ctx.accounts.reward_vault.key(),
+            ctx.accounts.global_config.reward_vault,
+            RodeoError::InvalidRewardVault
+        );
+        require_keys_eq!(
+            ctx.accounts.reward_vault.mint,
+            ctx.accounts.global_config.ansem_mint,
+            RodeoError::InvalidAnsemMint
+        );
+        require_keys_eq!(
+            ctx.accounts.owner_ansem_account.mint,
+            ctx.accounts.global_config.ansem_mint,
+            RodeoError::InvalidRewardDestination
+        );
+        require_keys_eq!(
+            ctx.accounts.owner_ansem_account.owner,
+            owner,
+            RodeoError::InvalidRewardDestination
+        );
+
+        let reward_state = &mut ctx.accounts.reward_state;
+        let game_state = &ctx.accounts.global_game_state;
+        let bull_accumulator = &mut ctx.accounts.bull_accumulator;
+
+        // Pay according to role.
+        let owner_amount: u64;
+        let bull_pool_amount: u64;
+        let reward_paid_reason: RewardPaidReason;
+        match position.role {
+            Role::Cowboy => {
+                let (owner_bps, bull_pool_bps) = if position.cowboy_kind == CowboyKind::Desperado {
+                    (DESPERADO_CLAIM_OWNER_BPS, DESPERADO_CLAIM_BULL_POOL_BPS)
+                } else {
+                    (CLAIM_OWNER_BPS, CLAIM_BULL_POOL_BPS)
+                };
+                owner_amount = math::floor_bps(claimable, owner_bps)?;
+                bull_pool_amount = math::checked_sub_u64(claimable, owner_amount)?;
+                reward_paid_reason = if position.cowboy_kind == CowboyKind::Desperado {
+                    RewardPaidReason::DesperadoClaim
+                } else {
+                    RewardPaidReason::CowboyClaim
+                };
+
+                require_gte!(
+                    reward_state.position_claimable_liability_atomic,
+                    claimable,
+                    RodeoError::LiabilityUnderflow
+                );
+                require_gte!(
+                    reward_state.recognized_reward_balance_atomic,
+                    owner_amount,
+                    RodeoError::InsufficientRecognizedRewards
+                );
+                require_gte!(
+                    reward_state.total_ansem_liability_atomic,
+                    owner_amount,
+                    RodeoError::LiabilityUnderflow
+                );
+
+                reward_state.position_claimable_liability_atomic = math::checked_sub_u64(
+                    reward_state.position_claimable_liability_atomic,
+                    claimable,
+                )?;
+                reward_state.total_ansem_liability_atomic =
+                    math::checked_sub_u64(reward_state.total_ansem_liability_atomic, owner_amount)?;
+                reward_state.recognized_reward_balance_atomic = math::checked_sub_u64(
+                    reward_state.recognized_reward_balance_atomic,
+                    owner_amount,
+                )?;
+                reward_state.ansem_claimed_atomic =
+                    math::checked_add_u64(reward_state.ansem_claimed_atomic, owner_amount)?;
+
+                transfer_ansem_from_vault(
+                    owner_amount,
+                    &ctx.accounts.global_config,
+                    ctx.accounts.reward_vault.to_account_info(),
+                    ctx.accounts.owner_ansem_account.to_account_info(),
+                    ctx.accounts.token_program.to_account_info(),
+                )?;
+
+                let source = if position.cowboy_kind == CowboyKind::Desperado {
+                    BullPoolSource::DesperadoClaimTax
+                } else {
+                    BullPoolSource::CowboyClaimTax
+                };
+                distribute_bull_pool_contribution(
+                    source,
+                    bull_pool_amount,
+                    reward_state,
+                    bull_accumulator,
+                    game_state,
+                )?;
+
+                emit!(RewardPaid {
+                    position: position.key(),
+                    owner,
+                    amount_atomic: owner_amount,
+                    recognized_reward_balance_atomic: reward_state.recognized_reward_balance_atomic,
+                    reason: reward_paid_reason,
+                });
+            }
+            Role::Bull => {
+                owner_amount = claimable;
+                bull_pool_amount = 0;
+                reward_paid_reason = RewardPaidReason::BullClaim;
+
+                require_gte!(
+                    reward_state.position_claimable_liability_atomic,
+                    claimable,
+                    RodeoError::LiabilityUnderflow
+                );
+                require_gte!(
+                    reward_state.recognized_reward_balance_atomic,
+                    claimable,
+                    RodeoError::InsufficientRecognizedRewards
+                );
+                require_gte!(
+                    reward_state.total_ansem_liability_atomic,
+                    claimable,
+                    RodeoError::LiabilityUnderflow
+                );
+
+                reward_state.position_claimable_liability_atomic = math::checked_sub_u64(
+                    reward_state.position_claimable_liability_atomic,
+                    claimable,
+                )?;
+                reward_state.total_ansem_liability_atomic =
+                    math::checked_sub_u64(reward_state.total_ansem_liability_atomic, claimable)?;
+                reward_state.recognized_reward_balance_atomic = math::checked_sub_u64(
+                    reward_state.recognized_reward_balance_atomic,
+                    claimable,
+                )?;
+                reward_state.ansem_claimed_atomic =
+                    math::checked_add_u64(reward_state.ansem_claimed_atomic, claimable)?;
+
+                transfer_ansem_from_vault(
+                    claimable,
+                    &ctx.accounts.global_config,
+                    ctx.accounts.reward_vault.to_account_info(),
+                    ctx.accounts.owner_ansem_account.to_account_info(),
+                    ctx.accounts.token_program.to_account_info(),
+                )?;
+
+                emit!(RewardPaid {
+                    position: position.key(),
+                    owner,
+                    amount_atomic: claimable,
+                    recognized_reward_balance_atomic: reward_state.recognized_reward_balance_atomic,
+                    reason: reward_paid_reason,
+                });
+            }
+            _ => return err!(RodeoError::InvalidRole),
+        }
+
+        position.claimable_ansem_atomic = 0;
+        cooldown.last_claimed_at = now;
+
+        emit!(PositionClaimed {
+            position: position.key(),
+            owner,
+            owner_amount,
+            bull_pool_amount,
+        });
+
+        Ok(())
+    }
+
     /// Test-only fixture to set pause flags for localnet/CI coverage. It is
     /// compiled only when the `test-fixtures` feature is enabled and is never
     /// part of the production ABI.
@@ -448,6 +835,83 @@ pub mod rodeo_core {
         let global_config = &mut ctx.accounts.global_config;
         global_config.pause_new_stakes = pause_new_stakes;
         global_config.pause_new_reveal_requests = pause_new_reveal_requests;
+        Ok(())
+    }
+
+    /// Test-only fixture to fund the reward vault and mark those funds as
+    /// recognized, bypassing the production recognition rules. This gives the
+    /// claim-profile tests a deterministic reserve to pay out.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_recognize_rewards(
+        ctx: Context<TestFixtureRecognizeRewards>,
+        amount: u64,
+    ) -> Result<()> {
+        let cpi = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            anchor_spl::token::Transfer {
+                from: ctx.accounts.payer_ansem_account.to_account_info(),
+                to: ctx.accounts.reward_vault.to_account_info(),
+                authority: ctx.accounts.authority.to_account_info(),
+            },
+        );
+        anchor_spl::token::transfer(cpi, amount)?;
+
+        let reward_state = &mut ctx.accounts.reward_state;
+        reward_state.recognized_reward_balance_atomic =
+            math::checked_add_u64(reward_state.recognized_reward_balance_atomic, amount)?;
+        Ok(())
+    }
+
+    /// Test-only fixture to put a position into a deterministic, claim-ready
+    /// state and to credit the matching liability bucket. This removes the need
+    /// for real epoch closures in the claim-profile suite while leaving the
+    /// production claim/recognize guards untouched.
+    #[cfg(feature = "test-fixtures")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn test_fixture_prepare_position(
+        ctx: Context<TestFixturePreparePosition>,
+        position_id: u64,
+        role_code: u8,
+        cowboy_kind_code: u8,
+        accrual_weight: u32,
+        buck_power: u8,
+        claimable: u64,
+        position_claimable_liability_delta: u64,
+    ) -> Result<()> {
+        let _ = position_id;
+
+        let position = &mut ctx.accounts.position;
+        position.role = match role_code {
+            1 => Role::Cowboy,
+            2 => Role::Bull,
+            _ => Role::Unassigned,
+        };
+        position.cowboy_kind = match cowboy_kind_code {
+            0..=10 => CowboyKind::Rank(cowboy_kind_code),
+            254 => CowboyKind::Desperado,
+            _ => CowboyKind::Unassigned,
+        };
+        position.accrual_weight = accrual_weight;
+        position.buck_power = buck_power;
+        position.status = PositionStatus::Active;
+        position.pending_action_active = false;
+        position.claimable_ansem_atomic = claimable;
+        position.last_cowboy_reward_index = ctx.accounts.reward_state.cowboy_reward_index;
+        position.cowboy_accrual_remainder_scaled = 0;
+        position.last_bull_reward_per_weight =
+            ctx.accounts.bull_accumulator.reward_per_weight_scaled;
+        position.bull_accrual_remainder_scaled = 0;
+
+        let reward_state = &mut ctx.accounts.reward_state;
+        reward_state.position_claimable_liability_atomic = math::checked_add_u64(
+            reward_state.position_claimable_liability_atomic,
+            position_claimable_liability_delta,
+        )?;
+        reward_state.total_ansem_liability_atomic = math::checked_add_u64(
+            reward_state.total_ansem_liability_atomic,
+            position_claimable_liability_delta,
+        )?;
+
         Ok(())
     }
 }
@@ -464,6 +928,77 @@ pub struct TestSetPauseFlags<'info> {
         bump = global_config.bump,
     )]
     pub global_config: Account<'info, GlobalConfig>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct TestFixtureRecognizeRewards<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    #[account(
+        mut,
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Account<'info, RewardState>,
+
+    #[account(
+        mut,
+        token::mint = global_config.ansem_mint,
+        token::authority = global_config,
+    )]
+    pub reward_vault: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        token::mint = global_config.ansem_mint,
+        token::authority = authority,
+    )]
+    pub payer_ansem_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(position_id: u64)]
+pub struct TestFixturePreparePosition<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    #[account(
+        mut,
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Account<'info, RewardState>,
+
+    #[account(
+        mut,
+        seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
+        bump = bull_accumulator.bump,
+    )]
+    pub bull_accumulator: Account<'info, BullAccumulator>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POSITION, global_config.key().as_ref(), &position_id.to_le_bytes()],
+        bump = position.bump,
+    )]
+    pub position: Account<'info, Position>,
 }
 
 #[derive(Accounts)]
@@ -753,6 +1288,143 @@ pub struct RecoverRevealTimeout<'info> {
     pub clock: Sysvar<'info, Clock>,
 }
 
+#[derive(Accounts)]
+#[instruction(max_epochs: u8)]
+pub struct CloseEpochs<'info> {
+    #[account(mut)]
+    pub caller: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    #[account(
+        mut,
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Account<'info, RewardState>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
+        bump = global_game_state.bump,
+    )]
+    pub global_game_state: Account<'info, GlobalGameState>,
+
+    #[account(
+        mut,
+        seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
+        bump = bull_accumulator.bump,
+    )]
+    pub bull_accumulator: Account<'info, BullAccumulator>,
+
+    #[account(
+        mut,
+        constraint = reward_vault.key() == global_config.reward_vault @ RodeoError::InvalidRewardVault,
+    )]
+    pub reward_vault: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+    pub clock: Sysvar<'info, Clock>,
+}
+
+#[derive(Accounts)]
+#[instruction(amount: u64)]
+pub struct RecognizeRewards<'info> {
+    #[account(mut)]
+    pub caller: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    #[account(
+        mut,
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Account<'info, RewardState>,
+
+    #[account(
+        constraint = reward_vault.key() == global_config.reward_vault @ RodeoError::InvalidRewardVault,
+        constraint = reward_vault.mint == global_config.ansem_mint @ RodeoError::InvalidAnsemMint,
+    )]
+    pub reward_vault: Account<'info, TokenAccount>,
+
+    pub clock: Sysvar<'info, Clock>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimPosition<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    #[account(
+        mut,
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Account<'info, RewardState>,
+
+    #[account(
+        mut,
+        seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
+        bump = global_game_state.bump,
+    )]
+    pub global_game_state: Account<'info, GlobalGameState>,
+
+    #[account(
+        mut,
+        seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
+        bump = bull_accumulator.bump,
+    )]
+    pub bull_accumulator: Account<'info, BullAccumulator>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
+        bump = position.bump,
+    )]
+    pub position: Account<'info, Position>,
+
+    #[account(
+        init_if_needed,
+        payer = owner,
+        space = 8 + WalletClaimCooldown::INIT_SPACE,
+        seeds = [SEED_CLAIM_COOLDOWN, global_config.key().as_ref(), owner.key().as_ref()],
+        bump
+    )]
+    pub wallet_claim_cooldown: Account<'info, WalletClaimCooldown>,
+
+    #[account(
+        mut,
+        constraint = reward_vault.key() == global_config.reward_vault @ RodeoError::InvalidRewardVault,
+        constraint = reward_vault.mint == global_config.ansem_mint @ RodeoError::InvalidAnsemMint,
+    )]
+    pub reward_vault: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = owner_ansem_account.mint == global_config.ansem_mint @ RodeoError::InvalidRewardDestination,
+        constraint = owner_ansem_account.owner == owner.key() @ RodeoError::InvalidRewardDestination,
+    )]
+    pub owner_ansem_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub clock: Sysvar<'info, Clock>,
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -842,6 +1514,74 @@ pub struct RandomnessTimeoutRecovered {
     pub action_type: ActionType,
     pub action_nonce: u64,
     pub recovery_action: TimeoutRecoveryAction,
+}
+
+#[event]
+pub struct EpochClosed {
+    pub epoch: u64,
+    pub cowboy_emission: u64,
+    pub suit_vault_contribution: u64,
+    pub free_ansem: u64,
+    pub total_cowboy_weight: u128,
+    pub total_bull_power: u64,
+    pub recognized_reward_balance_atomic: u64,
+    pub total_ansem_liability_atomic: u64,
+    pub snapshot_timestamp: i64,
+}
+
+#[event]
+pub struct EpochsClosed {
+    pub start_epoch: u64,
+    pub end_epoch: u64,
+    pub epochs_processed: u64,
+    pub last_closed_timestamp: i64,
+}
+
+#[event]
+pub struct RewardFundingRecognized {
+    pub amount_atomic: u64,
+    pub recognized_reward_balance_atomic: u64,
+    pub actual_reward_vault_balance: u64,
+}
+
+#[event]
+pub struct PositionClaimed {
+    pub position: Pubkey,
+    pub owner: Pubkey,
+    pub owner_amount: u64,
+    pub bull_pool_amount: u64,
+}
+
+#[event]
+pub struct RewardPaid {
+    pub position: Pubkey,
+    pub owner: Pubkey,
+    pub amount_atomic: u64,
+    pub recognized_reward_balance_atomic: u64,
+    pub reason: RewardPaidReason,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
+pub enum RewardPaidReason {
+    CowboyClaim,
+    DesperadoClaim,
+    BullClaim,
+    UnstakeSettlement,
+    SuitReward,
+}
+
+#[event]
+pub struct BullPoolContribution {
+    pub epoch: u64,
+    pub amount_atomic: u64,
+    pub source: BullPoolSource,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
+pub enum BullPoolSource {
+    CowboyClaimTax,
+    DesperadoClaimTax,
+    UnstakeTheft,
 }
 
 #[allow(dead_code)]
@@ -961,6 +1701,24 @@ pub enum RodeoError {
     RandomnessTimeoutNotReached,
     #[msg("Randomness has already been settled for this action")]
     RandomnessAlreadyAvailable,
+    #[msg("Invalid epoch batch size")]
+    InvalidEpochBatch,
+    #[msg("No elapsed epoch to close")]
+    NoElapsedEpoch,
+    #[msg("Reward vault is invalid for the configured mint or authority")]
+    InvalidRewardVault,
+    #[msg("ANSEM mint account is invalid")]
+    InvalidAnsemMint,
+    #[msg("Reward destination account is invalid")]
+    InvalidRewardDestination,
+    #[msg("Insufficient recognized rewards for the requested operation")]
+    InsufficientRecognizedRewards,
+    #[msg("Liability underflow")]
+    LiabilityUnderflow,
+    #[msg("Invalid reward index ordering")]
+    InvalidRewardIndex,
+    #[msg("Position role is invalid for this operation")]
+    InvalidRole,
 }
 
 // ---------------------------------------------------------------------------
@@ -979,6 +1737,162 @@ fn derive_commitment(
     preimage[33..41].copy_from_slice(&action_nonce.to_le_bytes());
     preimage[41..49].copy_from_slice(&protocol_epoch.to_le_bytes());
     anchor_lang::solana_program::hash::hash(&preimage).to_bytes()
+}
+
+/// Require that all currently elapsed epochs have been closed.
+fn require_elapsed_epochs_closed(reward_state: &RewardState, now: i64) -> Result<()> {
+    let next_boundary = reward_state
+        .last_closed_epoch_timestamp
+        .checked_add(EPOCH_DURATION_SECONDS)
+        .ok_or(RodeoError::ArithmeticOverflow)?;
+    require!(now < next_boundary, RodeoError::EpochsNotClosed);
+    Ok(())
+}
+
+/// Synchronize a Cowboy (or Desperado) position with the global Cowboy reward index.
+fn sync_cowboy_rewards(position: &mut Position, reward_state: &mut RewardState) -> Result<()> {
+    if position.role != Role::Cowboy {
+        return Ok(());
+    }
+    require!(
+        reward_state.cowboy_reward_index >= position.last_cowboy_reward_index,
+        RodeoError::InvalidRewardIndex
+    );
+
+    let weight = position.accrual_weight as u128;
+    let (accrued, new_remainder) = math::accrue_cowboy(
+        reward_state.cowboy_reward_index,
+        position.last_cowboy_reward_index,
+        weight,
+        position.cowboy_accrual_remainder_scaled,
+        COWBOY_REWARD_INDEX_SCALE,
+    )?;
+
+    position.last_cowboy_reward_index = reward_state.cowboy_reward_index;
+    position.cowboy_accrual_remainder_scaled = new_remainder;
+
+    if accrued > 0 {
+        require_gte!(
+            reward_state.cowboy_unmaterialized_liability_atomic,
+            accrued,
+            RodeoError::LiabilityUnderflow
+        );
+        position.claimable_ansem_atomic =
+            math::checked_add_u64(position.claimable_ansem_atomic, accrued)?;
+        reward_state.cowboy_unmaterialized_liability_atomic =
+            math::checked_sub_u64(reward_state.cowboy_unmaterialized_liability_atomic, accrued)?;
+        reward_state.position_claimable_liability_atomic =
+            math::checked_add_u64(reward_state.position_claimable_liability_atomic, accrued)?;
+    }
+
+    Ok(())
+}
+
+/// Synchronize a Bull position with the global Bull reward-per-weight accumulator.
+fn sync_bull_rewards(
+    position: &mut Position,
+    bull_accumulator: &mut BullAccumulator,
+    reward_state: &mut RewardState,
+) -> Result<()> {
+    if position.role != Role::Bull {
+        return Ok(());
+    }
+    require!(
+        bull_accumulator.reward_per_weight_scaled >= position.last_bull_reward_per_weight,
+        RodeoError::InvalidRewardIndex
+    );
+
+    let power = position.buck_power as u128;
+    let (accrued, new_remainder) = math::accrue_bull(
+        bull_accumulator.reward_per_weight_scaled,
+        position.last_bull_reward_per_weight,
+        power,
+        position.bull_accrual_remainder_scaled,
+        REWARD_PER_WEIGHT_SCALE,
+    )?;
+
+    position.last_bull_reward_per_weight = bull_accumulator.reward_per_weight_scaled;
+    position.bull_accrual_remainder_scaled = new_remainder;
+
+    if accrued > 0 {
+        require_gte!(
+            reward_state.bull_pool_liability_atomic,
+            accrued,
+            RodeoError::LiabilityUnderflow
+        );
+        position.claimable_ansem_atomic =
+            math::checked_add_u64(position.claimable_ansem_atomic, accrued)?;
+        reward_state.bull_pool_liability_atomic =
+            math::checked_sub_u64(reward_state.bull_pool_liability_atomic, accrued)?;
+        reward_state.position_claimable_liability_atomic =
+            math::checked_add_u64(reward_state.position_claimable_liability_atomic, accrued)?;
+    }
+
+    Ok(())
+}
+
+/// Route a claim-tax contribution into the Bull reward pool, updating the
+/// accumulator when there is active Bull power.
+fn distribute_bull_pool_contribution(
+    source: BullPoolSource,
+    contribution: u64,
+    reward_state: &mut RewardState,
+    bull_accumulator: &mut BullAccumulator,
+    game_state: &GlobalGameState,
+) -> Result<()> {
+    if contribution == 0 {
+        return Ok(());
+    }
+
+    let total_power = game_state.total_active_bull_power as u128;
+    if total_power > 0 {
+        let (new_index, new_remainder) = math::increment_bull_index(
+            bull_accumulator.reward_per_weight_scaled,
+            bull_accumulator.bull_index_remainder_scaled,
+            contribution,
+            total_power,
+            REWARD_PER_WEIGHT_SCALE,
+        )?;
+        bull_accumulator.reward_per_weight_scaled = new_index;
+        bull_accumulator.bull_index_remainder_scaled = new_remainder;
+        reward_state.bull_pool_liability_atomic =
+            math::checked_add_u64(reward_state.bull_pool_liability_atomic, contribution)?;
+    } else {
+        reward_state.bull_pool_unallocated_liability_atomic = math::checked_add_u64(
+            reward_state.bull_pool_unallocated_liability_atomic,
+            contribution,
+        )?;
+    }
+
+    emit!(BullPoolContribution {
+        epoch: reward_state.current_epoch,
+        amount_atomic: contribution,
+        source,
+    });
+
+    Ok(())
+}
+
+/// Transfer ANSEM out of the program-controlled reward vault.
+fn transfer_ansem_from_vault<'info>(
+    amount: u64,
+    global_config: &Account<'info, GlobalConfig>,
+    reward_vault: AccountInfo<'info>,
+    destination: AccountInfo<'info>,
+    token_program: AccountInfo<'info>,
+) -> Result<()> {
+    let seeds: &[&[u8]] = &[SEED_GLOBAL_CONFIG, &[global_config.bump]];
+    let signer: &[&[&[u8]]] = &[seeds];
+    let transfer_ctx = CpiContext::new_with_signer(
+        token_program,
+        anchor_spl::token::Transfer {
+            from: reward_vault,
+            to: destination,
+            authority: global_config.to_account_info(),
+        },
+        signer,
+    );
+    anchor_spl::token::transfer(transfer_ctx, amount)
 }
 
 #[cfg(feature = "mock-randomness")]
@@ -1665,5 +2579,161 @@ mod tests {
     #[cfg(feature = "test-fixtures")]
     fn test_build_has_test_fixtures() {
         let _ = test_set_pause_flags as fn(Context<TestSetPauseFlags>, bool, bool) -> Result<()>;
+        let _ = test_fixture_recognize_rewards
+            as fn(Context<TestFixtureRecognizeRewards>, u64) -> Result<()>;
+        let _ = test_fixture_prepare_position
+            as fn(
+                Context<TestFixturePreparePosition>,
+                u64,
+                u8,
+                u8,
+                u32,
+                u8,
+                u64,
+                u64,
+            ) -> Result<()>;
+    }
+
+    fn dummy_position() -> state::Position {
+        state::Position {
+            version: ACCOUNT_VERSION_POSITION,
+            owner: Pubkey::default(),
+            position_id: 1,
+            principal_amount: 0,
+            role: state::Role::Cowboy,
+            status: state::PositionStatus::Active,
+            cowboy_kind: state::CowboyKind::Rank(4),
+            bull_tier: 0,
+            suit: state::Suit::Unassigned,
+            opened_at: 0,
+            active_since: 0,
+            unstake_eligible_at: 0,
+            accrual_weight: 10_000,
+            buck_power: 0,
+            last_cowboy_reward_index: 0,
+            last_bull_reward_per_weight: 0,
+            cowboy_accrual_remainder_scaled: 0,
+            bull_accrual_remainder_scaled: 0,
+            claimable_ansem_atomic: 0,
+            settlement_nonce: 0,
+            state_version: 0,
+            listing_nonce: 0,
+            receipt_asset: Pubkey::default(),
+            pending_action_active: false,
+            pending_action_type: state::ActionType::Reveal,
+            pending_action_nonce: 0,
+            next_action_nonce: 0,
+            bump: 0,
+        }
+    }
+
+    fn dummy_reward_state() -> state::RewardState {
+        state::RewardState {
+            version: ACCOUNT_VERSION_REWARD_STATE,
+            global_config: Pubkey::default(),
+            current_epoch: 0,
+            epoch_started_at: 0,
+            last_closed_epoch_timestamp: 0,
+            total_ansem_liability_atomic: 0,
+            cowboy_unmaterialized_liability_atomic: 100_000,
+            position_claimable_liability_atomic: 0,
+            bull_pool_liability_atomic: 0,
+            bull_pool_unallocated_liability_atomic: 0,
+            suit_vault_liability_atomic: 0,
+            recognized_reward_balance_atomic: 0,
+            ansem_emitted_atomic: 0,
+            ansem_claimed_atomic: 0,
+            orphaned_reward_released_atomic: 0,
+            cowboy_reward_index: COWBOY_REWARD_INDEX_SCALE * 5,
+            cowboy_index_remainder_scaled: 0,
+            cowboy_orphaned_accrual_remainder_scaled: 0,
+            suit_epoch: 0,
+            bump: 0,
+        }
+    }
+
+    #[test]
+    fn sync_cowboy_rewards_accrues_exact_amount() {
+        let mut pos = dummy_position();
+        let mut reward = dummy_reward_state();
+        sync_cowboy_rewards(&mut pos, &mut reward).unwrap();
+
+        // Index delta = 5 * scale; weight = 10_000 => accrued = 5 * 10_000 = 50_000.
+        assert_eq!(pos.claimable_ansem_atomic, 50_000);
+        assert_eq!(reward.cowboy_unmaterialized_liability_atomic, 50_000);
+        assert_eq!(reward.position_claimable_liability_atomic, 50_000);
+        assert_eq!(pos.last_cowboy_reward_index, reward.cowboy_reward_index);
+    }
+
+    #[test]
+    fn sync_cowboy_rewards_preserves_total_liability() {
+        let mut pos = dummy_position();
+        let mut reward = dummy_reward_state();
+        let before = reward.total_ansem_liability_atomic;
+        sync_cowboy_rewards(&mut pos, &mut reward).unwrap();
+        assert_eq!(reward.total_ansem_liability_atomic, before);
+    }
+
+    fn dummy_bull_accumulator() -> state::BullAccumulator {
+        state::BullAccumulator {
+            version: ACCOUNT_VERSION_BULL_ACCUMULATOR,
+            global_config: Pubkey::default(),
+            reward_per_weight_scaled: REWARD_PER_WEIGHT_SCALE * 3,
+            bull_index_remainder_scaled: 0,
+            bull_orphaned_accrual_remainder_scaled: 0,
+            bump: 0,
+        }
+    }
+
+    #[test]
+    fn sync_bull_rewards_accrues_exact_amount() {
+        let mut pos = dummy_position();
+        pos.role = state::Role::Bull;
+        pos.buck_power = 4;
+        let mut reward = dummy_reward_state();
+        reward.bull_pool_liability_atomic = 12;
+        let mut acc = dummy_bull_accumulator();
+        sync_bull_rewards(&mut pos, &mut acc, &mut reward).unwrap();
+
+        // Index delta = 3 * scale; power = 4 => accrued = 12.
+        assert_eq!(pos.claimable_ansem_atomic, 12);
+        assert_eq!(reward.bull_pool_liability_atomic, 0);
+        assert_eq!(reward.position_claimable_liability_atomic, 12);
+        assert_eq!(
+            pos.last_bull_reward_per_weight,
+            acc.reward_per_weight_scaled
+        );
+    }
+
+    #[test]
+    fn distribute_bull_pool_contribution_updates_accumulator() {
+        let mut reward = dummy_reward_state();
+        let mut acc = dummy_bull_accumulator();
+        let game = state::GlobalGameState {
+            version: ACCOUNT_VERSION_GLOBAL_GAME_STATE,
+            global_config: Pubkey::default(),
+            total_completed_reveals: 0,
+            live_position_count: 0,
+            active_cowboy_count: 0,
+            active_bull_count: 1,
+            total_active_cowboy_weight: 0,
+            total_active_bull_power: 4,
+            accounted_principal_atomic: 0,
+            bump: 0,
+        };
+        distribute_bull_pool_contribution(
+            BullPoolSource::CowboyClaimTax,
+            12,
+            &mut reward,
+            &mut acc,
+            &game,
+        )
+        .unwrap();
+
+        assert_eq!(reward.bull_pool_liability_atomic, 12);
+        assert_eq!(
+            acc.reward_per_weight_scaled,
+            REWARD_PER_WEIGHT_SCALE * 3 + (12 * REWARD_PER_WEIGHT_SCALE / 4)
+        );
     }
 }

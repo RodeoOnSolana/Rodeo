@@ -10,6 +10,391 @@ export const rodeoCoreIdl = {
   },
   "instructions": [
     {
+      "name": "claim_position",
+      "discriminator": [
+        168,
+        90,
+        89,
+        44,
+        203,
+        246,
+        210,
+        46
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "global_game_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  103,
+                  97,
+                  109,
+                  101,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bull_accumulator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  97,
+                  99,
+                  99,
+                  117,
+                  109,
+                  117,
+                  108,
+                  97,
+                  116,
+                  111,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "account",
+                "path": "position.position_id",
+                "account": "Position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wallet_claim_cooldown",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  108,
+                  97,
+                  105,
+                  109,
+                  45,
+                  99,
+                  111,
+                  111,
+                  108,
+                  100,
+                  111,
+                  119,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_vault",
+          "writable": true
+        },
+        {
+          "name": "owner_ansem_account",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "close_epochs",
+      "discriminator": [
+        104,
+        146,
+        11,
+        55,
+        102,
+        32,
+        206,
+        240
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "global_game_state",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  103,
+                  97,
+                  109,
+                  101,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bull_accumulator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  97,
+                  99,
+                  99,
+                  117,
+                  109,
+                  117,
+                  108,
+                  97,
+                  116,
+                  111,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_vault",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "max_epochs",
+          "type": "u8"
+        }
+      ]
+    },
+    {
       "name": "initialize_protocol",
       "discriminator": [
         188,
@@ -252,6 +637,93 @@ export const rodeoCoreIdl = {
         {
           "name": "emergency_guardians",
           "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "recognize_rewards",
+      "discriminator": [
+        253,
+        223,
+        175,
+        255,
+        104,
+        38,
+        36,
+        191
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_vault"
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
         }
       ]
     },
@@ -874,9 +1346,74 @@ export const rodeoCoreIdl = {
         31,
         251
       ]
+    },
+    {
+      "name": "WalletClaimCooldown",
+      "discriminator": [
+        217,
+        2,
+        100,
+        244,
+        15,
+        245,
+        114,
+        125
+      ]
     }
   ],
   "events": [
+    {
+      "name": "BullPoolContribution",
+      "discriminator": [
+        72,
+        124,
+        112,
+        142,
+        19,
+        157,
+        250,
+        245
+      ]
+    },
+    {
+      "name": "EpochClosed",
+      "discriminator": [
+        21,
+        4,
+        48,
+        56,
+        29,
+        169,
+        77,
+        42
+      ]
+    },
+    {
+      "name": "EpochsClosed",
+      "discriminator": [
+        131,
+        172,
+        20,
+        52,
+        234,
+        209,
+        20,
+        117
+      ]
+    },
+    {
+      "name": "PositionClaimed",
+      "discriminator": [
+        149,
+        250,
+        141,
+        45,
+        210,
+        198,
+        94,
+        148
+      ]
+    },
     {
       "name": "PositionOwnerChanged",
       "discriminator": [
@@ -966,6 +1503,32 @@ export const rodeoCoreIdl = {
         74,
         178,
         144
+      ]
+    },
+    {
+      "name": "RewardFundingRecognized",
+      "discriminator": [
+        199,
+        179,
+        185,
+        118,
+        43,
+        161,
+        249,
+        222
+      ]
+    },
+    {
+      "name": "RewardPaid",
+      "discriminator": [
+        132,
+        160,
+        190,
+        117,
+        215,
+        177,
+        19,
+        95
       ]
     }
   ],
@@ -1229,6 +1792,51 @@ export const rodeoCoreIdl = {
       "code": 6051,
       "name": "RandomnessAlreadyAvailable",
       "msg": "Randomness has already been settled for this action"
+    },
+    {
+      "code": 6052,
+      "name": "InvalidEpochBatch",
+      "msg": "Invalid epoch batch size"
+    },
+    {
+      "code": 6053,
+      "name": "NoElapsedEpoch",
+      "msg": "No elapsed epoch to close"
+    },
+    {
+      "code": 6054,
+      "name": "InvalidRewardVault",
+      "msg": "Reward vault is invalid for the configured mint or authority"
+    },
+    {
+      "code": 6055,
+      "name": "InvalidAnsemMint",
+      "msg": "ANSEM mint account is invalid"
+    },
+    {
+      "code": 6056,
+      "name": "InvalidRewardDestination",
+      "msg": "Reward destination account is invalid"
+    },
+    {
+      "code": 6057,
+      "name": "InsufficientRecognizedRewards",
+      "msg": "Insufficient recognized rewards for the requested operation"
+    },
+    {
+      "code": 6058,
+      "name": "LiabilityUnderflow",
+      "msg": "Liability underflow"
+    },
+    {
+      "code": 6059,
+      "name": "InvalidRewardIndex",
+      "msg": "Invalid reward index ordering"
+    },
+    {
+      "code": 6060,
+      "name": "InvalidRole",
+      "msg": "Position role is invalid for this operation"
     }
   ],
   "types": [
@@ -1284,6 +1892,48 @@ export const rodeoCoreIdl = {
       }
     },
     {
+      "name": "BullPoolContribution",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "source",
+            "type": {
+              "defined": {
+                "name": "BullPoolContributionSource"
+              }
+            }
+          },
+          {
+            "name": "amount_atomic",
+            "type": "u64"
+          },
+          {
+            "name": "total_active_bull_power",
+            "type": "u64"
+          },
+          {
+            "name": "reward_per_weight_scaled_after",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BullPoolContributionSource",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "CowboyClaimTax"
+          },
+          {
+            "name": "DesperadoClaimTax"
+          }
+        ]
+      }
+    },
+    {
       "name": "CowboyKind",
       "type": {
         "kind": "enum",
@@ -1299,6 +1949,46 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "Desperado"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EpochClosed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "epoch_emission",
+            "type": "u64"
+          },
+          {
+            "name": "recognized_reward_balance_atomic",
+            "type": "u64"
+          },
+          {
+            "name": "total_ansem_liability_atomic",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EpochsClosed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "count",
+            "type": "u64"
+          },
+          {
+            "name": "last_closed_epoch_timestamp",
+            "type": "i64"
           }
         ]
       }
@@ -1675,6 +2365,34 @@ export const rodeoCoreIdl = {
       }
     },
     {
+      "name": "PositionClaimed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "role",
+            "type": {
+              "defined": {
+                "name": "Role"
+              }
+            }
+          },
+          {
+            "name": "amount_atomic",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "PositionOwnerChanged",
       "type": {
         "kind": "struct",
@@ -2039,6 +2757,48 @@ export const rodeoCoreIdl = {
       }
     },
     {
+      "name": "RewardFundingRecognized",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount_atomic",
+            "type": "u64"
+          },
+          {
+            "name": "new_recognized_balance_atomic",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RewardPaid",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "position",
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "recipient",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount_atomic",
+            "type": "u64"
+          },
+          {
+            "name": "remaining_recognized_balance_atomic",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "RewardState",
       "type": {
         "kind": "struct",
@@ -2176,6 +2936,34 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "CancelUnstake"
+          }
+        ]
+      }
+    },
+    {
+      "name": "WalletClaimCooldown",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "global_config",
+            "type": "pubkey"
+          },
+          {
+            "name": "wallet",
+            "type": "pubkey"
+          },
+          {
+            "name": "last_claimed_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
           }
         ]
       }

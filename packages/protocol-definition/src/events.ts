@@ -70,14 +70,23 @@ export type PositionGiftedEvent = ProtocolEventEnvelope<"positionGifted", {
 
 export type RewardFundingRecognizedEvent = ProtocolEventEnvelope<"rewardFundingRecognized", {
   readonly amountAtomic: bigint;
-  readonly newRecognizedBalanceAtomic: bigint;
+  readonly recognizedRewardBalanceAtomic: bigint;
+  readonly actualRewardVaultBalance: bigint;
 }>;
 
+export type RewardPaidReason =
+  | "cowboyClaim"
+  | "desperadoClaim"
+  | "bullClaim"
+  | "unstakeSettlement"
+  | "suitReward";
+
 export type RewardPaidEvent = ProtocolEventEnvelope<"rewardPaid", {
-  readonly position: string | null;
-  readonly recipient: string;
+  readonly position: string;
+  readonly owner: string;
   readonly amountAtomic: bigint;
-  readonly remainingRecognizedBalanceAtomic: bigint;
+  readonly recognizedRewardBalanceAtomic: bigint;
+  readonly reason: RewardPaidReason;
 }>;
 
 export type SuitRewardClaimedEvent = ProtocolEventEnvelope<"suitRewardClaimed", {
@@ -102,8 +111,39 @@ export type ReceiptBurnedEvent = ProtocolEventEnvelope<"receiptBurned", {
 
 export type EpochClosedEvent = ProtocolEventEnvelope<"epochClosed", {
   readonly epoch: bigint;
+  readonly cowboyEmission: bigint;
+  readonly suitVaultContribution: bigint;
+  readonly freeAnsem: bigint;
+  readonly totalCowboyWeight: bigint;
+  readonly totalBullPower: bigint;
   readonly recognizedRewardBalanceAtomic: bigint;
   readonly totalAnsemLiabilityAtomic: bigint;
+  readonly snapshotTimestamp: bigint;
+}>;
+
+export type EpochsClosedEvent = ProtocolEventEnvelope<"epochsClosed", {
+  readonly startEpoch: bigint;
+  readonly endEpoch: bigint;
+  readonly epochsProcessed: bigint;
+  readonly lastClosedTimestamp: bigint;
+}>;
+
+export type PositionClaimedEvent = ProtocolEventEnvelope<"positionClaimed", {
+  readonly position: string;
+  readonly owner: string;
+  readonly ownerAmount: bigint;
+  readonly bullPoolAmount: bigint;
+}>;
+
+export type BullPoolSource =
+  | "cowboyClaimTax"
+  | "desperadoClaimTax"
+  | "unstakeTheft";
+
+export type BullPoolContributionEvent = ProtocolEventEnvelope<"bullPoolContribution", {
+  readonly epoch: bigint;
+  readonly amountAtomic: bigint;
+  readonly source: BullPoolSource;
 }>;
 
 export type ListingCreatedEvent = ProtocolEventEnvelope<"listingCreated", {
@@ -152,6 +192,9 @@ export type RodeoProtocolEvent =
   | ReceiptCreatedEvent
   | ReceiptBurnedEvent
   | EpochClosedEvent
+  | EpochsClosedEvent
+  | PositionClaimedEvent
+  | BullPoolContributionEvent
   | ListingCreatedEvent
   | ListingCancelledEvent
   | RandomnessRequestedEvent

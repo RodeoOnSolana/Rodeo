@@ -2,14 +2,26 @@ pub const RODEO_DECIMALS_MAX: u8 = 9;
 pub const RODEO_TOTAL_SUPPLY_WHOLE: u64 = 1_000_000_000;
 pub const STAKE_AMOUNT_WHOLE_RODEO: u64 = 100_000;
 
+#[cfg(feature = "test-short-epoch")]
+pub const EPOCH_DURATION_SECONDS: i64 = 2;
+#[cfg(not(feature = "test-short-epoch"))]
 pub const EPOCH_DURATION_SECONDS: i64 = 6 * 60 * 60;
+
 pub const RUNWAY_WINDOW_SECONDS: i64 = 10 * 24 * 60 * 60;
 pub const RUNWAY_EPOCHS: u64 = (RUNWAY_WINDOW_SECONDS / EPOCH_DURATION_SECONDS) as u64;
+
+#[cfg(feature = "test-short-epoch")]
+pub const POT_FILL_SECONDS: i64 = 2;
+#[cfg(not(feature = "test-short-epoch"))]
 pub const POT_FILL_SECONDS: i64 = 12 * 60 * 60;
 pub const SUIT_EPOCH_DAYS: u64 = 7;
 pub const SUIT_EPOCHS: u64 = SUIT_EPOCH_DAYS * 24 * 60 * 60 / (EPOCH_DURATION_SECONDS as u64);
 
 pub const MIN_STAKE_SECONDS: i64 = 24 * 60 * 60;
+
+#[cfg(feature = "test-short-claim-cooldown")]
+pub const CLAIM_COOLDOWN_SECONDS: i64 = 2;
+#[cfg(not(feature = "test-short-claim-cooldown"))]
 pub const CLAIM_COOLDOWN_SECONDS: i64 = 60 * 60;
 #[cfg(feature = "test-short-timeout")]
 pub const RANDOMNESS_TIMEOUT_SECONDS: i64 = 2;
@@ -68,7 +80,7 @@ pub const SEED_BULL_ACCUMULATOR: &[u8] = b"bull-accumulator";
 pub const SEED_PRINCIPAL_VAULT: &[u8] = b"principal-vault";
 pub const SEED_REWARD_VAULT: &[u8] = b"reward-vault";
 pub const SEED_POSITION: &[u8] = b"position";
-pub const SEED_CLAIM_COOLDOWN: &[u8] = b"claim-cooldown";
+pub const SEED_CLAIM_COOLDOWN: &[u8] = b"claim_cooldown";
 pub const SEED_RANDOMNESS: &[u8] = b"randomness";
 
 pub const ACCOUNT_VERSION_GLOBAL_CONFIG: u8 = 1;
@@ -95,3 +107,18 @@ const _: () = assert!(USE_MOCK_RANDOMNESS);
 const _: () = assert!(!USE_TEST_FIXTURES);
 #[cfg(feature = "test-fixtures")]
 const _: () = assert!(USE_TEST_FIXTURES);
+
+#[cfg(not(feature = "test-short-epoch"))]
+const _: () = assert!(EPOCH_DURATION_SECONDS == 6 * 60 * 60);
+#[cfg(feature = "test-short-epoch")]
+const _: () = assert!(EPOCH_DURATION_SECONDS == 2);
+
+#[cfg(not(feature = "test-short-epoch"))]
+const _: () = assert!(POT_FILL_SECONDS == 12 * 60 * 60);
+#[cfg(feature = "test-short-epoch")]
+const _: () = assert!(POT_FILL_SECONDS == 2);
+
+#[cfg(not(feature = "test-short-claim-cooldown"))]
+const _: () = assert!(CLAIM_COOLDOWN_SECONDS == 60 * 60);
+#[cfg(feature = "test-short-claim-cooldown")]
+const _: () = assert!(CLAIM_COOLDOWN_SECONDS == 2);

@@ -56,6 +56,9 @@ importers:
       '@coral-xyz/anchor':
         specifier: 0.31.1
         version: 0.31.1(bufferutil@4.1.0)(typescript@5.8.3)(utf-8-validate@6.0.6)
+      '@rodeo/protocol-definition':
+        specifier: workspace:*
+        version: link:../../packages/protocol-definition
       '@rodeo/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk

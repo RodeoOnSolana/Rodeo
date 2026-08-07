@@ -12,7 +12,7 @@ export const PDA_SEEDS = {
   principalVault: "principal-vault",
   rewardVault: "reward-vault",
   position: "position",
-  claimCooldown: "claim-cooldown",
+  claimCooldown: "claim_cooldown",
   randomness: "randomness",
 } as const;
 

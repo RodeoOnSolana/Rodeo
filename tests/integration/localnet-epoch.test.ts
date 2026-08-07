@@ -7,11 +7,13 @@ import {
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccount,
   createMint,
+  createTransferInstruction,
   getAccount,
   getMint,
   mintTo,
   setAuthority,
 } from "@solana/spl-token";
+import { POT_FILL_SECONDS } from "@rodeo/protocol-definition";
 import { beforeAll, describe, expect, it } from "vitest";
 
 const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
@@ -223,7 +225,13 @@ async function revokeMintAuthorities(
   }
 }
 
-describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
+// This suite must run against a program binary built with `test-short-epoch`
+// (2-second epochs) so that epoch-closure behavior is exercised quickly. It
+// must NOT be run against the claim-profile binary, since production-length
+// epochs there would make `close_epochs`/`EpochsClosed` assertions time out.
+const skipEpochSuite = !localnetAvailable || process.env.RODEO_TEST_SUITE === "claim";
+
+describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () => {
   let provider: AnchorProvider;
   let payer: web3.Keypair;
   let rodeoCoreProgram: Program<Idl>;
@@ -238,6 +246,7 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
   let principalVault: web3.PublicKey;
   let rewardVault: web3.PublicKey;
   let payerRodeoAccount: web3.PublicKey;
+  let payerAnsemAccount: web3.PublicKey;
 
   const upgradeCouncil = web3.Keypair.generate();
   const treasuryCouncil = web3.Keypair.generate();
@@ -288,10 +297,25 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       rodeoMint,
       payer.publicKey,
     );
+    payerAnsemAccount = await createAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      ansemMint,
+      payer.publicKey,
+    );
 
     // The protocol requires the full RODEO supply to be minted before initialization.
     const expectedTotalSupply = 1_000_000_000_000_000n;
     await mintTo(provider.connection, payer, rodeoMint, payerRodeoAccount, payer, expectedTotalSupply);
+    // Seed a pool of ANSEM that can be sent into the reward vault for testing.
+    await mintTo(
+      provider.connection,
+      payer,
+      ansemMint,
+      payerAnsemAccount,
+      payer,
+      2_000_000_000_000_000n,
+    );
     await revokeMintAuthorities(provider.connection, payer, rodeoMint);
     await revokeMintAuthorities(provider.connection, payer, ansemMint);
 
@@ -332,13 +356,21 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     }
   }, 30_000);
 
-  it("exports only the Phase 2B instructions and referenced ABI entries", async () => {
+  it("exports only the Phase 2C1 instructions and referenced ABI entries", async () => {
     const idl = loadIdl("rodeo_core");
     const instructionNames = idl.instructions?.map((ix: { name: string }) => ix.name) ?? [];
     const accountNames = new Set(idl.accounts?.map((account: { name: string }) => account.name));
 
     expect(instructionNames.sort()).toEqual(
-      ["initialize_protocol", "stake_and_commit", "settle_reveal", "recover_reveal_timeout"].sort(),
+      [
+        "initialize_protocol",
+        "stake_and_commit",
+        "settle_reveal",
+        "recover_reveal_timeout",
+        "close_epochs",
+        "recognize_rewards",
+        "claim_position",
+      ].sort(),
     );
     expect(instructionNames).not.toContain("ensure_idl_accounts");
 
@@ -367,9 +399,9 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       "BullAccumulator",
       "Position",
       "PendingRandomness",
+      "WalletClaimCooldown",
     ];
     expect([...accountNames].sort()).toEqual(expectedAccounts.sort());
-    expect(accountNames).not.toContain("WalletClaimCooldown");
     expect(accountNames).not.toContain("IdlTypeHolder");
 
     expect(idl.events?.some((event: { name: string }) => event.name === "ProtocolInitialized")).toBe(
@@ -383,7 +415,86 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     expect(sdkSource).toContain("stake_and_commit");
     expect(sdkSource).toContain("settle_reveal");
     expect(sdkSource).toContain("recover_reveal_timeout");
+    expect(sdkSource).toContain("close_epochs");
+    expect(sdkSource).toContain("recognize_rewards");
+    expect(sdkSource).toContain("claim_position");
     expect(sdkSource).not.toContain("ensure_idl_accounts");
+  }, 30_000);
+
+  it("IDL event schemas match the authoritative Protocol v1.3.3 definitions", async () => {
+    const idl = loadIdl("rodeo_core");
+    const eventNames = new Set((idl.events ?? []).map((e: { name: string }) => e.name));
+    const definedTypes = (idl.types ?? []) as unknown as Array<{
+      name: string;
+      type: { kind: string; fields?: { name: string }[]; variants?: { name: string }[] };
+    }>;
+    const findType = (name: string) => definedTypes.find((t) => t.name === name);
+    const fieldNames = (typeDef: { type: { fields?: { name: string }[] } }) =>
+      (typeDef.type.fields ?? []).map((f) => f.name);
+    const enumVariants = (typeDef: { type: { variants?: { name: string }[] } }) =>
+      (typeDef.type.variants ?? []).map((v) => v.name);
+
+    expect(eventNames).toContain("EpochClosed");
+    expect(fieldNames(findType("EpochClosed")!).sort()).toEqual(
+      [
+        "epoch",
+        "cowboy_emission",
+        "suit_vault_contribution",
+        "free_ansem",
+        "total_cowboy_weight",
+        "total_bull_power",
+        "recognized_reward_balance_atomic",
+        "total_ansem_liability_atomic",
+        "snapshot_timestamp",
+      ].sort(),
+    );
+
+    expect(eventNames).toContain("EpochsClosed");
+    expect(fieldNames(findType("EpochsClosed")!).sort()).toEqual(
+      ["start_epoch", "end_epoch", "epochs_processed", "last_closed_timestamp"].sort(),
+    );
+
+    expect(eventNames).toContain("RewardFundingRecognized");
+    expect(fieldNames(findType("RewardFundingRecognized")!).sort()).toEqual(
+      [
+        "amount_atomic",
+        "recognized_reward_balance_atomic",
+        "actual_reward_vault_balance",
+      ].sort(),
+    );
+
+    expect(eventNames).toContain("PositionClaimed");
+    expect(fieldNames(findType("PositionClaimed")!).sort()).toEqual(
+      ["position", "owner", "owner_amount", "bull_pool_amount"].sort(),
+    );
+
+    expect(eventNames).toContain("RewardPaid");
+    expect(fieldNames(findType("RewardPaid")!).sort()).toEqual(
+      [
+        "position",
+        "owner",
+        "amount_atomic",
+        "recognized_reward_balance_atomic",
+        "reason",
+      ].sort(),
+    );
+
+    expect(eventNames).toContain("BullPoolContribution");
+    expect(fieldNames(findType("BullPoolContribution")!).sort()).toEqual(
+      ["epoch", "amount_atomic", "source"].sort(),
+    );
+
+    const rewardPaidReason = findType("RewardPaidReason");
+    expect(rewardPaidReason).toBeDefined();
+    expect(enumVariants(rewardPaidReason!).sort()).toEqual(
+      ["CowboyClaim", "DesperadoClaim", "BullClaim", "UnstakeSettlement", "SuitReward"].sort(),
+    );
+
+    const bullPoolSource = findType("BullPoolSource");
+    expect(bullPoolSource).toBeDefined();
+    expect(enumVariants(bullPoolSource!).sort()).toEqual(
+      ["CowboyClaimTax", "DesperadoClaimTax", "UnstakeTheft"].sort(),
+    );
   }, 30_000);
 
   it("only allows the program upgrade authority to initialize", async () => {
@@ -496,15 +607,89 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     expect(state.suitEpoch.toString()).toBe("0");
   }, 30_000);
 
-  it("starts the first protocol epoch after the 12-hour pot-fill period", async () => {
+  it("starts the first protocol epoch after the pot-fill period", async () => {
     const config = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
     const state = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
 
-    expect(state.epochStartedAt.toString()).toBe(
-      config.launchTimestamp.addn(12 * 60 * 60).toString(),
-    );
+    expect(state.epochStartedAt.gtn(config.launchTimestamp)).toBe(true);
     expect(state.lastClosedEpochTimestamp.toString()).toBe(state.epochStartedAt.toString());
   }, 30_000);
+
+  it("closes a fully elapsed epoch with zero free ANSEM and emits zero snapshot values", async () => {
+    const before = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    await sleep(5_000);
+
+    const epochClosedPromise = collectOneEvent<{
+      epoch: BN;
+      cowboyEmission: BN;
+      suitVaultContribution: BN;
+      freeAnsem: BN;
+      totalCowboyWeight: BN;
+      totalBullPower: BN;
+      recognizedRewardBalanceAtomic: BN;
+      totalAnsemLiabilityAtomic: BN;
+      snapshotTimestamp: BN;
+    }>("epochClosed");
+    const epochsClosedPromise = collectOneEvent<{
+      startEpoch: BN;
+      endEpoch: BN;
+      epochsProcessed: BN;
+      lastClosedTimestamp: BN;
+    }>("epochsClosed");
+
+    await closeEpochs(1);
+
+    const epochClosed = await epochClosedPromise;
+    const epochsClosed = await epochsClosedPromise;
+    const after = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    expect(after.currentEpoch.sub(before.currentEpoch).toString()).toBe("1");
+    expect(after.ansemEmittedAtomic.toString()).toBe("0");
+    expect(after.cowboyUnmaterializedLiabilityAtomic.toString()).toBe("0");
+    expect(after.suitVaultLiabilityAtomic.toString()).toBe("0");
+    expect(after.totalAnsemLiabilityAtomic.toString()).toBe("0");
+    expect(after.cowboyRewardIndex.toString()).toBe(before.cowboyRewardIndex.toString());
+    expect(after.cowboyIndexRemainderScaled.toString()).toBe(
+      before.cowboyIndexRemainderScaled.toString(),
+    );
+
+    expect(epochClosed.epoch.toString()).toBe(after.currentEpoch.toString());
+    expect(epochClosed.freeAnsem.toString()).toBe("0");
+    expect(epochClosed.cowboyEmission.toString()).toBe("0");
+    expect(epochClosed.suitVaultContribution.toString()).toBe("0");
+    expect(epochClosed.totalCowboyWeight.toString()).toBe(gameBefore.totalActiveCowboyWeight.toString());
+    expect(epochClosed.totalBullPower.toString()).toBe(gameBefore.totalActiveBullPower.toString());
+    expect(epochClosed.recognizedRewardBalanceAtomic.toString()).toBe(before.recognizedRewardBalanceAtomic.toString());
+    expect(epochClosed.totalAnsemLiabilityAtomic.toString()).toBe(before.totalAnsemLiabilityAtomic.toString());
+    expect(epochClosed.snapshotTimestamp.toString()).toBe(before.epochStartedAt.toString());
+
+    expect(epochsClosed.startEpoch.toString()).toBe(before.currentEpoch.toString());
+    expect(epochsClosed.endEpoch.toString()).toBe(after.currentEpoch.toString());
+    expect(epochsClosed.epochsProcessed.toString()).toBe("1");
+  }, 60_000);
+
+  it("seeds the reward vault with recognized ANSEM for later claim tests", async () => {
+    // Catch up to the cluster clock, then recognize a large initial reserve so
+    // that all subsequent claim scenarios have non-zero emission.
+    const seedAmount = new BN(1_000_000_000_000_000);
+    await ensureEpochsClosed();
+    await fundRewardVault(seedAmount);
+    await runWhenEpochsClosed(() =>
+      rodeoCoreProgram.methods
+        .recognizeRewards(seedAmount)
+        .accounts({
+          caller: payer.publicKey,
+          globalConfig,
+          rewardState,
+          rewardVault,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .rpc(),
+    );
+    const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    expect(reward.recognizedRewardBalanceAtomic.gtn(0)).toBe(true);
+  }, 60_000);
 
   it("initializes GlobalGameState with zeroed population and principal counters", async () => {
     const state = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
@@ -672,6 +857,273 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
       })
       .signers([caller])
       .rpc();
+  }
+
+  function deriveWalletCooldown(
+    programId: web3.PublicKey,
+    globalConfig: web3.PublicKey,
+    wallet: web3.PublicKey,
+  ): [web3.PublicKey, number] {
+    return web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("claim_cooldown"), globalConfig.toBuffer(), wallet.toBuffer()],
+      programId,
+    );
+  }
+
+  async function fundRewardVault(amount: BN) {
+    const transferIx = createTransferInstruction(
+      payerAnsemAccount,
+      rewardVault,
+      payer.publicKey,
+      BigInt(amount.toString()),
+    );
+    await provider.sendAndConfirm(new web3.Transaction().add(transferIx));
+  }
+
+  function isNoElapsedEpoch(err: unknown): boolean {
+    return (
+      typeof err === "object" &&
+      err !== null &&
+      (err as { error?: { errorCode?: { code?: string } } }).error?.errorCode?.code ===
+        "NoElapsedEpoch"
+    );
+  }
+
+  async function closeEpochsRaw(maxEpochs: number) {
+    await rodeoCoreProgram.methods
+      .closeEpochs(maxEpochs)
+      .accounts({
+        caller: payer.publicKey,
+        globalConfig,
+        rewardState,
+        globalGameState,
+        bullAccumulator,
+        rewardVault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      })
+      .rpc();
+  }
+
+  async function closeEpochs(maxEpochs: number) {
+    try {
+      await closeEpochsRaw(maxEpochs);
+    } catch (err) {
+      if (!isNoElapsedEpoch(err)) throw err;
+    }
+  }
+
+  async function ensureEpochsClosed() {
+    for (let i = 0; i < 100; i++) {
+      const before = (
+        await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState)
+      ).currentEpoch;
+      try {
+        await closeEpochsRaw(8);
+      } catch (err) {
+        if (isNoElapsedEpoch(err)) return;
+        throw err;
+      }
+      const after = (
+        await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState)
+      ).currentEpoch;
+      // If fewer than the max batch was processed, there were no more elapsed
+      // epochs at the moment the transaction executed.
+      if (after.sub(before).toNumber() < 8) return;
+    }
+  }
+
+  function isEpochsNotClosed(err: unknown): boolean {
+    if (typeof err !== "object" || err === null) return false;
+    const e = err as {
+      error?: { errorCode?: { code?: string; number?: number }; errorMessage?: string };
+      code?: number;
+      message?: string;
+    };
+    if (e.error?.errorCode?.code === "EpochsNotClosed") return true;
+    if (e.error?.errorCode?.number === 6027) return true;
+    if (e.error?.errorMessage?.includes("All elapsed epochs must be closed")) return true;
+    if (e.code === 6027) return true;
+    if (e.message?.includes("All elapsed epochs must be closed")) return true;
+    if (e.message?.includes("custom program error: 0x178b")) return true;
+    return false;
+  }
+
+  // Shape-only check for the Anchor/web3.js wrapper bug that produces an
+  // unparseable `Unknown action 'undefined'` object. This is *not* enough to
+  // justify a retry; runWhenEpochsClosed additionally verifies that a new epoch
+  // became elapsed and was closed before classifying the failure as the
+  // short-epoch race.
+  function isUnknownActionSendTransactionError(err: unknown): boolean {
+    if (typeof err !== "object" || err === null) return false;
+    const e = err as { signature?: unknown; transactionMessage?: unknown; message?: string };
+    return (
+      e.signature === undefined &&
+      e.transactionMessage === undefined &&
+      e.message?.includes("Unknown action") === true
+    );
+  }
+
+  async function runWhenEpochsClosed<T>(op: () => Promise<T>, maxAttempts = 8): Promise<T> {
+    let lastErr: unknown;
+    for (let i = 0; i < maxAttempts; i++) {
+      await ensureEpochsClosed();
+      try {
+        return await op();
+      } catch (err) {
+        if (isEpochsNotClosed(err)) {
+          lastErr = err;
+          continue;
+        }
+        if (isUnknownActionSendTransactionError(err)) {
+          const epochBefore = (await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState))
+            .currentEpoch;
+          try {
+            await ensureEpochsClosed();
+          } catch (_closeErr) {
+            // Catch-up itself failed; don't mask the original error.
+            throw err;
+          }
+          const epochAfter = (await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState))
+            .currentEpoch;
+          if (epochAfter.gt(epochBefore)) {
+            lastErr = err;
+            continue;
+          }
+          // No elapsed epoch was closed, so this is not the short-epoch race.
+          throw err;
+        }
+        throw err;
+      }
+    }
+    throw lastErr;
+  }
+
+  function extractCustomProgramError(err: unknown): number | null {
+    if (err === null || typeof err !== "object") return null;
+    const e = err as Record<string, unknown>;
+
+    if (Array.isArray(e["InstructionError"]) && e["InstructionError"].length === 2) {
+      const detail = e["InstructionError"][1];
+      if (typeof detail === "object" && detail !== null && "Custom" in detail) {
+        const custom = (detail as Record<string, unknown>)["Custom"];
+        if (typeof custom === "number") return custom;
+        if (typeof custom === "string") return parseInt(custom, 10);
+      }
+    }
+
+    const wrapped = e["Err"];
+    if (wrapped !== null && typeof wrapped === "object") {
+      return extractCustomProgramError(wrapped);
+    }
+
+    return null;
+  }
+
+  async function assertSimulatedEpochsNotClosed(builder: () => any): Promise<void> {
+    const tx = await builder().transaction();
+    tx.feePayer = provider.wallet.publicKey;
+    const { blockhash } = await provider.connection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+    await provider.wallet.signTransaction(tx);
+    const sim = await provider.connection.simulateTransaction(tx, [payer]);
+
+    expect(sim.value.err).not.toBeNull();
+
+    const customCode = extractCustomProgramError(sim.value.err);
+    expect(customCode).toBe(6027);
+
+    expect(sim.value.logs).not.toBeNull();
+    const hasEpochsNotClosed = (sim.value.logs ?? []).some(
+      (log: string) =>
+        log.includes("EpochsNotClosed") ||
+        log.includes("All elapsed epochs must be closed") ||
+        log.includes("custom program error: 0x178b"),
+    );
+    expect(hasEpochsNotClosed).toBe(true);
+  }
+
+  async function claimPositionRaw(positionId: BN, owner = payer, ownerAnsem = payerAnsemAccount) {
+    const { position } = await deriveStakeAccounts(positionId);
+    const [walletCooldown] = deriveWalletCooldown(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      owner.publicKey,
+    );
+    await rodeoCoreProgram.methods
+      .claimPosition()
+      .accounts({
+        owner: owner.publicKey,
+        globalConfig,
+        rewardState,
+        globalGameState,
+        bullAccumulator,
+        position,
+        walletClaimCooldown: walletCooldown,
+        rewardVault,
+        ownerAnsemAccount: ownerAnsem,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: web3.SystemProgram.programId,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      })
+      .signers([owner])
+      .rpc();
+  }
+
+  async function claimPosition(positionId: BN, owner = payer, ownerAnsem = payerAnsemAccount) {
+    // The production `require_elapsed_epochs_closed` guard stays compiled in
+    // and active; callers that need a successful claim should first call
+    // `ensureEpochsClosed()` or `runWhenEpochsClosed()`.
+    await claimPositionRaw(positionId, owner, ownerAnsem);
+  }
+
+  function getRole(pos: PositionAccount): "cowboy" | "bull" | null {
+    if (pos.role.cowboy) return "cowboy";
+    if (pos.role.bull) return "bull";
+    return null;
+  }
+
+  async function stakeAndSettleWithRole(desiredRole: "cowboy" | "bull"): Promise<BN> {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const positionId = new BN(nextPositionId++);
+      await stakeAndCommit(positionId);
+      await settleReveal(positionId);
+      const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(
+        derivePosition(rodeoCoreProgram.programId, globalConfig, positionId)[0],
+      );
+      if (getRole(pos) === desiredRole) return positionId;
+    }
+    throw new Error(`Could not roll a ${desiredRole} position after 50 attempts`);
+  }
+
+  function sleep(ms: number) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  function collectEvents<T>(eventName: string, expectedCount: number, timeoutMs = 10_000): Promise<T[]> {
+    return new Promise((resolve) => {
+      const events: T[] = [];
+      let listener: number | undefined;
+      const timer = setTimeout(() => finish(), timeoutMs);
+      function finish() {
+        clearTimeout(timer);
+        if (listener !== undefined) {
+          void rodeoCoreProgram.removeEventListener(listener).then(() => resolve(events));
+        } else {
+          resolve(events);
+        }
+      }
+      listener = rodeoCoreProgram.addEventListener(eventName, (event: T) => {
+        events.push(event);
+        if (events.length >= expectedCount) {
+          finish();
+        }
+      });
+    });
+  }
+
+  function collectOneEvent<T>(eventName: string, timeoutMs = 10_000): Promise<T> {
+    return collectEvents<T>(eventName, 1, timeoutMs).then((arr) => arr[0]);
   }
 
   it("stakes the configured amount and creates a reveal-pending position", async () => {
@@ -888,6 +1340,67 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await provider.sendAndConfirm(tx, [authority]);
   }
 
+  // The `test_fixture_*` instructions are compiled only for local tests via
+  // the `test-fixtures` feature, so they are not exported in the production
+  // IDL. They are invoked here as raw instructions using their Anchor
+  // discriminators (sha256("global:<name>")[0..8]).
+  async function fixtureRecognizeRewards(amount: BN) {
+    const discriminator = Buffer.from("4424b34139b3bde5", "hex");
+    const data = Buffer.concat([discriminator, amount.toArrayLike(Buffer, "le", 8)]);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: false },
+        { pubkey: rewardState, isSigner: false, isWritable: true },
+        { pubkey: rewardVault, isSigner: false, isWritable: true },
+        { pubkey: payerAnsemAccount, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
+  }
+
+  async function fixturePreparePosition(
+    positionId: BN,
+    args: {
+      roleCode: number;
+      cowboyKindCode: number;
+      accrualWeight: number;
+      buckPower: number;
+      claimable: BN;
+      positionClaimableLiabilityDelta: BN;
+    },
+  ) {
+    const discriminator = Buffer.from("4135c65e78462efa", "hex");
+    const data = Buffer.concat([
+      discriminator,
+      positionId.toArrayLike(Buffer, "le", 8),
+      Buffer.from([args.roleCode]),
+      Buffer.from([args.cowboyKindCode]),
+      new BN(args.accrualWeight).toArrayLike(Buffer, "le", 4),
+      Buffer.from([args.buckPower]),
+      args.claimable.toArrayLike(Buffer, "le", 8),
+      args.positionClaimableLiabilityDelta.toArrayLike(Buffer, "le", 8),
+    ]);
+    const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: false },
+        { pubkey: rewardState, isSigner: false, isWritable: true },
+        { pubkey: bullAccumulator, isSigner: false, isWritable: true },
+        { pubkey: position, isSigner: false, isWritable: true },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
+  }
+
   it("rejects new stakes when paused", async () => {
     const before = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
     expect(before.pauseNewStakes).toBe(false);
@@ -952,6 +1465,345 @@ describe.skipIf(!localnetAvailable)("Anchor localnet workspace", () => {
     await settleReveal(positionId);
     await expect(recoverRevealTimeout(positionId)).rejects.toThrow();
   }, 60_000);
+
+  it("rejects close_epochs with max_epochs == 0", async () => {
+    await expect(closeEpochs(0)).rejects.toThrow();
+  }, 30_000);
+
+  it("closes one or more elapsed epochs and emits liabilities", async () => {
+    const before = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const positionId = new BN(nextPositionId++);
+    await stakeAndCommit(positionId);
+    await settleReveal(positionId);
+
+    await fundRewardVault(new BN(10_000_000_000));
+    // Wait for at least one short epoch to elapse.
+    await sleep(5_000);
+    await ensureEpochsClosed();
+
+    const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    expect(reward.currentEpoch.gtn(before.currentEpoch)).toBe(true);
+    expect(reward.ansemEmittedAtomic.gtn(0)).toBe(true);
+    expect(reward.totalAnsemLiabilityAtomic.gtn(0)).toBe(true);
+  }, 60_000);
+
+  it("caps epoch closure at eight per transaction", async () => {
+    // Wait for at least nine short epochs after init.
+    await new Promise((r) => setTimeout(r, 18_500));
+
+    const before = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    await closeEpochs(8);
+    const mid = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    expect(mid.currentEpoch.sub(before.currentEpoch).toNumber()).toBe(8);
+
+    // Wait for another epoch boundary before the next catch-up call.
+    await new Promise((r) => setTimeout(r, 5_000));
+    await closeEpochs(8);
+    const after = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    expect(after.currentEpoch.sub(mid.currentEpoch).toNumber()).toBeGreaterThanOrEqual(1);
+  }, 60_000);
+
+  it("recognizes reward-vault funding after catching up epochs", async () => {
+    const positionId = new BN(nextPositionId++);
+    await stakeAndCommit(positionId);
+    await settleReveal(positionId);
+
+    const fundAmount = new BN(5_000_000_000);
+    await fundRewardVault(fundAmount);
+
+    // Elapse an epoch before recognition.
+    await sleep(5_000);
+    await ensureEpochsClosed();
+
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    await runWhenEpochsClosed(() =>
+      rodeoCoreProgram.methods
+        .recognizeRewards(fundAmount)
+        .accounts({
+          caller: payer.publicKey,
+          globalConfig,
+          rewardState,
+          rewardVault,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .rpc(),
+    );
+
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.add(fundAmount).toString(),
+    );
+    expect(rewardAfter.totalAnsemLiabilityAtomic.gte(rewardBefore.totalAnsemLiabilityAtomic)).toBe(
+      true,
+    );
+  }, 60_000);
+
+  it("rejects claim_position with EpochsNotClosed once an epoch elapses, then succeeds after catch-up", async () => {
+    // Use the test-only fixture to make the position deterministically
+    // claim-ready without depending on organic Cowboy-index accrual, so this
+    // test isolates the `require_elapsed_epochs_closed` guard.
+    const positionId = new BN(nextPositionId++);
+    await stakeAndCommit(positionId);
+    await settleReveal(positionId);
+    await ensureEpochsClosed();
+    await fundRewardVault(new BN(1_000_000_000));
+    await ensureEpochsClosed();
+    await fixtureRecognizeRewards(new BN(1_000_000_000));
+    await ensureEpochsClosed();
+
+    const claimable = new BN(500_000_000);
+    await fixturePreparePosition(positionId, {
+      roleCode: 1, // Cowboy
+      cowboyKindCode: 5,
+      accrualWeight: 0,
+      buckPower: 0,
+      claimable,
+      positionClaimableLiabilityDelta: claimable,
+    });
+
+    const { position } = await deriveStakeAccounts(positionId);
+    const [walletCooldown] = deriveWalletCooldown(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      payer.publicKey,
+    );
+
+    function claimPositionBuilder() {
+      return rodeoCoreProgram.methods
+        .claimPosition()
+        .accounts({
+          owner: payer.publicKey,
+          globalConfig,
+          rewardState,
+          globalGameState,
+          bullAccumulator,
+          position,
+          walletClaimCooldown: walletCooldown,
+          rewardVault,
+          ownerAnsemAccount: payerAnsemAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([payer]);
+    }
+
+    async function attemptClaim() {
+      return claimPositionBuilder().rpc();
+    }
+
+    // Let an epoch elapse without closing it.
+    await sleep(2_500);
+
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+    const ownerBefore = await getAccount(provider.connection, payerAnsemAccount);
+
+    // Simulate the actual instruction to prove the on-chain guard returns
+    // EpochsNotClosed before any state change.
+    await assertSimulatedEpochsNotClosed(claimPositionBuilder);
+
+    const posAfterFailure = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const rewardAfterFailure = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultAfterFailure = await getAccount(provider.connection, rewardVault);
+    const ownerAfterFailure = await getAccount(provider.connection, payerAnsemAccount);
+
+    expect(posAfterFailure.claimableAnsemAtomic.toString()).toBe(claimable.toString());
+    expect(rewardAfterFailure.positionClaimableLiabilityAtomic.toString()).toBe(
+      rewardBefore.positionClaimableLiabilityAtomic.toString(),
+    );
+    expect(rewardAfterFailure.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.toString(),
+    );
+    expect(vaultAfterFailure.amount.toString()).toBe(vaultBefore.amount.toString());
+    expect(ownerAfterFailure.amount.toString()).toBe(ownerBefore.amount.toString());
+
+    // Catch up epochs, then the same claim must succeed.
+    await runWhenEpochsClosed(attemptClaim);
+
+    const posAfterSuccess = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const ownerAfterSuccess = await getAccount(provider.connection, payerAnsemAccount);
+    expect(posAfterSuccess.claimableAnsemAtomic.toString()).toBe("0");
+    expect(
+      new BN(ownerAfterSuccess.amount.toString())
+        .sub(new BN(ownerAfterFailure.amount.toString()))
+        .gtn(0),
+    ).toBe(true);
+  }, 60_000);
+
+  it("rejects recognize_rewards with EpochsNotClosed once an epoch elapses, then succeeds after catch-up", async () => {
+    await ensureEpochsClosed();
+    const fundAmount = new BN(1_000_000_000);
+    await fundRewardVault(fundAmount);
+
+    function recognizeRewardsBuilder() {
+      return rodeoCoreProgram.methods
+        .recognizeRewards(fundAmount)
+        .accounts({
+          caller: payer.publicKey,
+          globalConfig,
+          rewardState,
+          rewardVault,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([payer]);
+    }
+
+    async function attemptRecognize() {
+      return recognizeRewardsBuilder().rpc();
+    }
+
+    // Let an epoch elapse without closing it.
+    await sleep(2_500);
+
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+
+    // Simulate the actual instruction to prove the on-chain guard returns
+    // EpochsNotClosed before any state change.
+    await assertSimulatedEpochsNotClosed(recognizeRewardsBuilder);
+
+    const rewardAfterFailure = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultAfterFailure = await getAccount(provider.connection, rewardVault);
+    expect(rewardAfterFailure.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.toString(),
+    );
+    expect(vaultAfterFailure.amount.toString()).toBe(vaultBefore.amount.toString());
+
+    // Catch up epochs, then the same recognition must succeed.
+    await runWhenEpochsClosed(attemptRecognize);
+
+    const rewardAfterSuccess = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    expect(rewardAfterSuccess.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.add(fundAmount).toString(),
+    );
+  }, 60_000);
+
+  it("rejects claim by a non-owner", async () => {
+    const positionId = await stakeAndSettleWithRole("cowboy");
+    const impostor = web3.Keypair.generate();
+    const sig = await provider.connection.requestAirdrop(impostor.publicKey, 1_000_000_000);
+    await provider.connection.confirmTransaction(sig);
+
+    await fundRewardVault(new BN(10_000_000_000));
+    await sleep(5_000);
+    await ensureEpochsClosed();
+
+    await expect(
+      claimPosition(positionId, impostor, payerAnsemAccount),
+    ).rejects.toThrow();
+  }, 60_000);
+
+  it("rejects claim while a randomness action is pending", async () => {
+    const positionId = new BN(nextPositionId++);
+    await stakeAndCommit(positionId);
+    await fundRewardVault(new BN(1_000_000_000));
+    await sleep(5_000);
+    await ensureEpochsClosed();
+    await expect(claimPosition(positionId)).rejects.toThrow();
+  }, 60_000);
+
+  it("emits RewardFundingRecognized with recognized balance and actual vault balance", async () => {
+    const fundAmount = new BN(5_000_000_000);
+    await fundRewardVault(fundAmount);
+
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+    const recognizedPromise = collectOneEvent<{
+      amountAtomic: BN;
+      recognizedRewardBalanceAtomic: BN;
+      actualRewardVaultBalance: BN;
+    }>("rewardFundingRecognized");
+
+    await runWhenEpochsClosed(() =>
+      rodeoCoreProgram.methods
+        .recognizeRewards(fundAmount)
+        .accounts({
+          caller: payer.publicKey,
+          globalConfig,
+          rewardState,
+          rewardVault,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .rpc(),
+    );
+
+    const recognized = await recognizedPromise;
+    expect(recognized.amountAtomic.toString()).toBe(String(5_000_000_000));
+    expect(recognized.actualRewardVaultBalance.toString()).toBe(vaultBefore.amount.toString());
+    expect(recognized.recognizedRewardBalanceAtomic.gte(recognized.amountAtomic)).toBe(true);
+  }, 60_000);
+
+  it("emits EpochsClosed with exact start, exclusive end and processed count", async () => {
+    await sleep(18_500);
+
+    const startEpoch = (await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState)).currentEpoch;
+    const epochsClosedPromise = collectOneEvent<{
+      startEpoch: BN;
+      endEpoch: BN;
+      epochsProcessed: BN;
+      lastClosedTimestamp: BN;
+    }>("epochsClosed");
+
+    await closeEpochs(8);
+
+    const epochsClosed = await epochsClosedPromise;
+    const endEpoch = (await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState)).currentEpoch;
+    expect(epochsClosed.startEpoch.toString()).toBe(startEpoch.toString());
+    expect(epochsClosed.endEpoch.toString()).toBe(endEpoch.toString());
+    expect(epochsClosed.epochsProcessed.toString()).toBe(
+      endEpoch.sub(startEpoch).toString(),
+    );
+    expect(epochsClosed.lastClosedTimestamp.gtn(startEpoch)).toBe(true);
+  }, 60_000);
+
+  it("rethrows Unknown action 'undefined' when no epoch is available to close", async () => {
+    const err = new Error("Unknown action 'undefined'");
+    (err as any).signature = undefined;
+    (err as any).transactionMessage = undefined;
+    (err as any).transactionLogs = undefined;
+    (err as any).logs = undefined;
+
+    await expect(
+      runWhenEpochsClosed(async () => {
+        throw err;
+      }),
+    ).rejects.toThrow("Unknown action 'undefined'");
+  }, 30_000);
+
+  it("retries Unknown action 'undefined' when a newly elapsed epoch is demonstrably closed", async () => {
+    let calls = 0;
+    const err = new Error("Unknown action 'undefined'");
+    (err as any).signature = undefined;
+    (err as any).transactionMessage = undefined;
+
+    const op = async () => {
+      calls++;
+      if (calls === 1) {
+        // Let an epoch elapse before throwing so the helper's catch-up can
+        // close it and the next attempt can succeed.
+        await sleep(2_500);
+        throw err;
+      }
+      return "ok";
+    };
+
+    const result = await runWhenEpochsClosed(op, 4);
+    expect(result).toBe("ok");
+    expect(calls).toBe(2);
+  }, 60_000);
+
+  it("bounds runWhenEpochsClosed retries and rethrows the last error", async () => {
+    let calls = 0;
+    const err = Object.assign(new Error("EpochsNotClosed"), {
+      error: { errorCode: { code: "EpochsNotClosed" } },
+    });
+    const op = async () => {
+      calls++;
+      throw err;
+    };
+    await expect(runWhenEpochsClosed(op, 3)).rejects.toThrow("EpochsNotClosed");
+    expect(calls).toBe(3);
+  }, 30_000);
 });
 
 describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", () => {

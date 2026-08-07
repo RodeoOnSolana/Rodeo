@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: ubuntu-24.04
@@ -142,8 +146,23 @@ jobs:
           solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
           solana config set --url localhost
 
-      - name: Build test program binary
-        run: anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-fixtures
+      # Epoch-closure profile: 2-second epochs so close_epochs, batched
+      # closure, and the EpochsNotClosed guard can be exercised quickly.
+      # `require_elapsed_epochs_closed` remains compiled in and active; only
+      # the epoch duration itself is shortened.
+      - name: Build epoch-profile test program binary
+        run: anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-epoch,test-short-claim-cooldown,test-fixtures
 
-      - name: Anchor localnet integration tests
-        run: anchor test --skip-build --no-idl
+      - name: Anchor localnet integration tests (epoch profile)
+        run: RODEO_TEST_SUITE=epoch anchor test --skip-build --no-idl
+
+      # Claim/recognition profile: production-length epochs, so a real epoch
+      # can never elapse mid-test. `require_elapsed_epochs_closed` remains
+      # compiled in and active but never trips. Deterministic claim-ready
+      # state is established via the test-only `test-fixtures` instructions
+      # instead of waiting on organic epoch emissions.
+      - name: Build claim-profile test program binary
+        run: anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-claim-cooldown,test-fixtures
+
+      - name: Anchor localnet integration tests (claim profile)
+        run: RODEO_TEST_SUITE=claim anchor test --skip-build --no-idl
