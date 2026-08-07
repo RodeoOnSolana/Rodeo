@@ -3714,7 +3714,7 @@ mod tests {
         let context = probability::RandomnessSampleContext {
             random_output: [0u8; 32],
             domain: probability::RandomnessDomain::UnstakeTheft,
-            position: [0u8; 32],
+            position: Pubkey::default(),
             action_nonce: 0,
         };
 
