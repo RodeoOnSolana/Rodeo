@@ -2022,6 +2022,17 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     expect(actualV1).toEqual(expectedV1);
     expect(actualV1).not.toEqual(expectedV2);
 
+    // Diagnostic log for exact Position A deterministic random input and outcomes.
+    console.log("historical-config Position A reveal vector", {
+      positionA: v1Position.toBase58(),
+      actionNonce: v1PendingAccount.actionNonce.toNumber(),
+      committedProtocolEpoch: v1PendingAccount.committedProtocolEpoch.toNumber(),
+      randomInput: Buffer.from(v1PendingAccount.commitment).toString("hex"),
+      expectedV1,
+      expectedV2,
+      actualV1,
+    });
+
     // Settle the V2 position and verify it records version 2.
     await settleReveal(v2PositionId);
     const [v2Position] = derivePosition(rodeoCoreProgram.programId, globalConfig, v2PositionId);
