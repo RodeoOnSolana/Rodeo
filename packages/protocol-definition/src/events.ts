@@ -176,6 +176,44 @@ export type RandomnessRequestedEvent = ProtocolEventEnvelope<"randomnessRequeste
   readonly commitment: Uint8Array;
 }>;
 
+export type RandomnessSettledEvent = ProtocolEventEnvelope<"randomnessSettled", {
+  readonly position: string;
+  readonly actionType: "reveal" | "unstake";
+  readonly actionNonce: bigint;
+  readonly settlementNonce: bigint;
+}>;
+
+export type RandomnessTimeoutRecoveredEvent = ProtocolEventEnvelope<"randomnessTimeoutRecovered", {
+  readonly position: string;
+  readonly actionType: "reveal" | "unstake";
+  readonly actionNonce: bigint;
+  readonly recoveryAction: "closeAndRefundPrincipal" | "cancelUnstake";
+}>;
+
+export type UnstakeRequestedEvent = ProtocolEventEnvelope<"unstakeRequested", {
+  readonly position: string;
+  readonly owner: string;
+  readonly actionNonce: bigint;
+  readonly requestedAt: bigint;
+  readonly configVersion: bigint;
+}>;
+
+export type AnsemUnstakeFate = "toOwner" | "toBullPool" | "immune";
+
+export type PositionUnstakedEvent = ProtocolEventEnvelope<"positionUnstaked", {
+  readonly position: string;
+  readonly owner: string;
+  readonly principalAmount: bigint;
+  readonly principalReturned: bigint;
+  readonly principalBurned: bigint;
+  readonly ansemFate: AnsemUnstakeFate;
+  readonly synchronizedAnsem: bigint;
+  readonly ansemPaidToOwner: bigint;
+  readonly ansemRoutedToBullPool: bigint;
+  readonly settlementNonce: bigint;
+  readonly configVersion: bigint;
+}>;
+
 export type OrphanedRewardReleasedEvent = ProtocolEventEnvelope<"orphanedRewardReleased", {
   readonly rewardSource: "cowboy" | "bull";
   readonly amountAtomic: bigint;
@@ -202,4 +240,8 @@ export type RodeoProtocolEvent =
   | ListingCreatedEvent
   | ListingCancelledEvent
   | RandomnessRequestedEvent
+  | RandomnessSettledEvent
+  | RandomnessTimeoutRecoveredEvent
+  | UnstakeRequestedEvent
+  | PositionUnstakedEvent
   | OrphanedRewardReleasedEvent;
