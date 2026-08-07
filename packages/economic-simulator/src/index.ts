@@ -71,6 +71,7 @@ export interface PositionState {
   pendingActionActive: boolean;
   pendingActionType: "reveal" | "unstake" | null;
   pendingActionNonce: bigint;
+  pendingActionConfigVersion: bigint;
   nextActionNonce: bigint;
   settlementNonce: bigint;
   stateVersion: bigint;
@@ -178,6 +179,7 @@ export type SimulationEvent =
   | { readonly type: "claimBull"; readonly settlementId: string; readonly positionId: string; readonly claimedAt: bigint }
   | { readonly type: "requestUnstake"; readonly settlementId: string; readonly positionId: string; readonly requestedAt: bigint }
   | { readonly type: "settleUnstake"; readonly settlementId: string; readonly positionId: string; readonly fate: UnstakeFate }
+  | { readonly type: "recoverUnstakeTimeout"; readonly settlementId: string; readonly positionId: string; readonly recoveredAt: bigint }
   | { readonly type: "marketSale"; readonly settlementId: string; readonly positionId: string; readonly priceLamports: bigint; readonly claimedAt: bigint }
   | { readonly type: "gift"; readonly settlementId: string; readonly positionId: string; readonly newOwner: string; readonly claimedAt: bigint }
   | { readonly type: "externalRevenue"; readonly settlementId: string; readonly revenueLamports: bigint }
@@ -281,6 +283,9 @@ export class EconomicSimulator {
       case "settleUnstake":
         this.settleUnstake(event);
         break;
+      case "recoverUnstakeTimeout":
+        this.recoverUnstakeTimeout(event);
+        break;
       case "marketSale":
         this.marketSale(event);
         break;
@@ -359,6 +364,7 @@ export class EconomicSimulator {
       pendingActionActive: true,
       pendingActionType: "reveal",
       pendingActionNonce: 0n,
+      pendingActionConfigVersion: 0n,
       nextActionNonce: 1n,
       settlementNonce: 0n,
       stateVersion: 0n,
@@ -404,6 +410,8 @@ export class EconomicSimulator {
     position.status = "active";
     position.pendingActionActive = false;
     position.pendingActionType = null;
+    position.pendingActionNonce = 0n;
+    position.pendingActionConfigVersion = 0n;
     position.settlementNonce = checkedAdd(position.settlementNonce, 1n);
     position.activeSince = this.state.now;
     position.unstakeEligibleAt = checkedAdd(position.activeSince, MIN_STAKE_SECONDS);
@@ -591,6 +599,7 @@ export class EconomicSimulator {
     position.pendingActionActive = true;
     position.pendingActionType = "unstake";
     position.pendingActionNonce = position.nextActionNonce;
+    position.pendingActionConfigVersion = this.state.currentConfigVersion;
     position.nextActionNonce = checkedAdd(position.nextActionNonce, 1n);
   }
 
@@ -602,7 +611,10 @@ export class EconomicSimulator {
     this.applyCowboyRewardDelta(position);
     this.applyBullRewardDelta(position);
 
-    const config = this.state.protocolConfigs.get(position.revealConfigVersion) ?? this.state.protocolConfigs.get(this.state.currentConfigVersion)!;
+    const configVersion = position.pendingActionConfigVersion;
+    const config = this.state.protocolConfigs.get(configVersion);
+    if (!config) throw new Error(`Unknown protocol config version: ${configVersion}`);
+
     const principal = position.principalAtomic;
     const returned = mulDivFloor(principal, config.unstakeReturnBps, BPS_DENOMINATOR);
     const burned = checkedSub(principal, returned);
@@ -611,38 +623,37 @@ export class EconomicSimulator {
     this.state.accountedPrincipalAtomic = checkedSub(this.state.accountedPrincipalAtomic, principal);
     this.state.rodeoBurnedAtomic = checkedAdd(this.state.rodeoBurnedAtomic, burned);
     this.state.livePositionCount = checkedSub(this.state.livePositionCount, 1n);
-    if (position.role === "cowboy") {
-      this.state.activeCowboyCount = checkedSub(this.state.activeCowboyCount, 1n);
-      this.state.totalActiveCowboyWeight = checkedSub(this.state.totalActiveCowboyWeight, position.accrualWeight);
-    } else if (position.role === "bull") {
-      this.state.activeBullCount = checkedSub(this.state.activeBullCount, 1n);
-      this.state.totalActiveBullPower = checkedSub(this.state.totalActiveBullPower, BigInt(position.buckPower));
-    }
 
+    const pending = position.claimableAnsemAtomic;
     if (position.role === "cowboy" && !isDesperado(position)) {
-      const pending = position.claimableAnsemAtomic;
-      if (pending > 0n) {
-        this.state.positionClaimableLiabilityAtomic = checkedSub(this.state.positionClaimableLiabilityAtomic, pending);
-        if (event.fate.ansemToBullPool) {
-          this.distributeToBullPool(pending);
-        } else {
+      this.state.positionClaimableLiabilityAtomic = checkedSub(this.state.positionClaimableLiabilityAtomic, pending);
+      if (event.fate.ansemToBullPool) {
+        this.distributeToBullPool(pending);
+      } else {
+        if (pending > 0n) {
           this.state.totalAnsemLiabilityAtomic = checkedSub(this.state.totalAnsemLiabilityAtomic, pending);
           this.state.rewardVaultAnsemAtomic = checkedSub(this.state.rewardVaultAnsemAtomic, pending);
           this.state.recognizedRewardBalanceAtomic = checkedSub(this.state.recognizedRewardBalanceAtomic, pending);
           this.state.ansemClaimedAtomic = checkedAdd(this.state.ansemClaimedAtomic, pending);
         }
-        position.claimableAnsemAtomic = 0n;
       }
     } else if (position.role === "bull" || isDesperado(position)) {
-      const pending = position.claimableAnsemAtomic;
       if (pending > 0n) {
         this.state.positionClaimableLiabilityAtomic = checkedSub(this.state.positionClaimableLiabilityAtomic, pending);
         this.state.totalAnsemLiabilityAtomic = checkedSub(this.state.totalAnsemLiabilityAtomic, pending);
         this.state.rewardVaultAnsemAtomic = checkedSub(this.state.rewardVaultAnsemAtomic, pending);
         this.state.recognizedRewardBalanceAtomic = checkedSub(this.state.recognizedRewardBalanceAtomic, pending);
         this.state.ansemClaimedAtomic = checkedAdd(this.state.ansemClaimedAtomic, pending);
-        position.claimableAnsemAtomic = 0n;
       }
+    }
+    position.claimableAnsemAtomic = 0n;
+
+    if (position.role === "cowboy") {
+      this.state.activeCowboyCount = checkedSub(this.state.activeCowboyCount, 1n);
+      this.state.totalActiveCowboyWeight = checkedSub(this.state.totalActiveCowboyWeight, position.accrualWeight);
+    } else if (position.role === "bull") {
+      this.state.activeBullCount = checkedSub(this.state.activeBullCount, 1n);
+      this.state.totalActiveBullPower = checkedSub(this.state.totalActiveBullPower, BigInt(position.buckPower));
     }
 
     // Move any sub-atomic per-position carry into the global orphaned remainder
@@ -661,6 +672,16 @@ export class EconomicSimulator {
 
     position.principalAtomic = 0n;
     this.state.positions.delete(position.id);
+  }
+
+  private recoverUnstakeTimeout(event: Extract<SimulationEvent, { type: "recoverUnstakeTimeout" }>): void {
+    const position = this.position(event.positionId);
+    if (!position.pendingActionActive || position.pendingActionType !== "unstake") throw new Error("No pending unstake action");
+
+    position.pendingActionActive = false;
+    position.pendingActionType = null;
+    position.pendingActionNonce = 0n;
+    position.pendingActionConfigVersion = 0n;
   }
 
   private marketSale(event: Extract<SimulationEvent, { type: "marketSale" }>): void {

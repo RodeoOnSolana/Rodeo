@@ -2846,7 +2846,11 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
                     });
                 }
 
-                AnsemUnstakeFate::ToOwner
+                if position.cowboy_kind == CowboyKind::Desperado {
+                    AnsemUnstakeFate::Immune
+                } else {
+                    AnsemUnstakeFate::ToOwner
+                }
             }
         }
         Role::Bull => {
@@ -2969,10 +2973,10 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
         principal_burned: burned,
         ansem_fate,
         synchronized_ansem: claimable,
-        ansem_paid_to_owner: if ansem_fate == AnsemUnstakeFate::ToOwner {
-            claimable
-        } else {
+        ansem_paid_to_owner: if ansem_fate == AnsemUnstakeFate::ToBullPool {
             0
+        } else {
+            claimable
         },
         ansem_routed_to_bull_pool: if ansem_fate == AnsemUnstakeFate::ToBullPool {
             claimable
