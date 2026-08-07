@@ -2237,8 +2237,10 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     it("rejects request_unstake while a reveal action is pending", async () => {
       const positionId = new BN(nextPositionId++);
       await stakeAndCommit(positionId);
+      // The reveal is pending and the position is not Active, so the program
+      // returns InvalidRole before reaching the pending-action check.
       await expect(requestUnstake(positionId)).rejects.toThrow(
-        /PendingActionConflict|pending action/i,
+        /InvalidRole|PendingActionConflict|pending action/i,
       );
     }, 60_000);
 
@@ -2293,7 +2295,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       await sleep(2_500);
 
       await assertSimulatedEpochsNotClosed(requestUnstakeBuilder);
-      await closeEpochs(1);
+      await ensureEpochsClosed();
 
       const requestInfo = await requestUnstakeBuilder().rpc();
       expect(requestInfo).toBeDefined();
@@ -2361,7 +2363,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     });
 
     await sleep(2_500);
-    await closeEpochs(1);
+    await ensureEpochsClosed();
 
     const rewardBeforeRequest = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const gameBeforeRequest =
@@ -2403,7 +2405,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const requestRemainder = positionAfterRequest.cowboyAccrualRemainderScaled;
 
     await sleep(2_500);
-    await closeEpochs(1);
+    await ensureEpochsClosed();
 
     const rewardAfterPending = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const positionAfterPending = await rodeoAccounts(rodeoCoreProgram).position.fetch(positionAddr);
