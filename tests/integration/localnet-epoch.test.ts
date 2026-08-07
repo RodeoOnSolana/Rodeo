@@ -2369,7 +2369,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const gameBeforeRequest =
       await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
 
-    const requestInfo = await requestUnstake(positionId);
+    const requestInfo = await runWhenEpochsClosed(() => requestUnstake(positionId));
     const positionAddr = requestInfo.position;
 
     const positionAfterRequest = await rodeoAccounts(rodeoCoreProgram).position.fetch(positionAddr);
