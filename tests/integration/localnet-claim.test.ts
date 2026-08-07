@@ -22,7 +22,7 @@ import {
   mintTo,
   setAuthority,
 } from "@solana/spl-token";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
   "BPFLoaderUpgradeab1e11111111111111111111111",
@@ -289,6 +289,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
   let rodeoMint: web3.PublicKey;
   let ansemMint: web3.PublicKey;
   let globalConfig: web3.PublicKey;
+  let protocolConfigV1: web3.PublicKey;
   let rewardState: web3.PublicKey;
   let globalGameState: web3.PublicKey;
   let bullAccumulator: web3.PublicKey;
@@ -369,7 +370,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     await revokeMintAuthorities(provider.connection, payer, ansemMint);
 
     const programData = programDataAddress(rodeoCoreProgram.programId);
-    const [protocolConfig] = deriveProtocolConfig(
+    [protocolConfigV1] = deriveProtocolConfig(
       rodeoCoreProgram.programId,
       globalConfig,
       new BN(1),
@@ -394,13 +395,20 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         bullAccumulator,
         principalVault,
         rewardVault,
-        protocolConfig,
+        protocolConfig: protocolConfigV1,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: web3.SystemProgram.programId,
         rent: web3.SYSVAR_RENT_PUBKEY,
       })
       .rpc();
   }, 60_000);
+
+  beforeEach(async () => {
+    if (!localnetAvailable) return;
+    // Some tests switch the active ProtocolConfig to V2; reset to V1 before
+    // every test so helpers and assertions that assume V1 stay consistent.
+    await fixtureSetCurrentConfigVersion(protocolConfigV1);
+  }, 30_000);
 
   const stakeAmountAtomic = new BN(100_000_000_000);
   const REWARD_PER_WEIGHT_SCALE = new BN("1000000000000000000");
