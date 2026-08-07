@@ -3688,4 +3688,57 @@ mod tests {
             REWARD_PER_WEIGHT_SCALE * 3 + (12 * REWARD_PER_WEIGHT_SCALE / 4)
         );
     }
+
+    #[test]
+    fn derive_commitment_is_deterministic_and_domain_separated() {
+        let position = Pubkey::new_from_array([1u8; 32]);
+        let nonce1 = 1u64;
+        let nonce2 = 2u64;
+        let epoch1 = 0u64;
+
+        let a = derive_commitment(position, ActionType::Unstake, nonce1, epoch1);
+        let b = derive_commitment(position, ActionType::Unstake, nonce1, epoch1);
+        let c = derive_commitment(position, ActionType::Reveal, nonce1, epoch1);
+        let d = derive_commitment(position, ActionType::Unstake, nonce2, epoch1);
+
+        assert_eq!(a, b, "same inputs must produce same commitment");
+        assert_ne!(a, c, "action type changes commitment");
+        assert_ne!(a, d, "action nonce changes commitment");
+        assert_eq!(a.len(), 32, "commitment is a 32-byte SHA-256 digest");
+    }
+
+    #[test]
+    fn map_unstake_theft_flag_is_deterministic() {
+        let config = probability::protocol_config_v1(Pubkey::default(), 0);
+
+        let context = probability::RandomnessSampleContext {
+            random_output: [0u8; 32],
+            domain: probability::RandomnessDomain::UnstakeTheft,
+            position: [0u8; 32],
+            action_nonce: 0,
+        };
+
+        let a = probability::map_unstake_theft_flag(context, &config).unwrap();
+        let b = probability::map_unstake_theft_flag(context, &config).unwrap();
+        assert_eq!(a, b, "same context must produce same theft flag");
+    }
+
+    #[test]
+    fn unstake_rodeo_split_uses_config_version() {
+        let mut v1 = probability::protocol_config_v1(Pubkey::default(), 0);
+        v1.unstake_tax_bps = 500;
+        v1.unstake_return_bps = 9_500;
+
+        let mut v2 = v1.clone();
+        v2.unstake_tax_bps = 2_000;
+        v2.unstake_return_bps = 8_000;
+
+        let principal = 100_000_000_000u64;
+        let v1_returned = math::floor_bps(principal, v1.unstake_return_bps).unwrap();
+        let v2_returned = math::floor_bps(principal, v2.unstake_return_bps).unwrap();
+
+        assert_eq!(v1_returned, 95_000_000_000);
+        assert_eq!(v2_returned, 80_000_000_000);
+        assert!(v2_returned < v1_returned, "V2 tax must return less RODEO");
+    }
 }
