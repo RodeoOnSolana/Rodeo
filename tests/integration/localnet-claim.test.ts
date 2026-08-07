@@ -359,6 +359,11 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     await revokeMintAuthorities(provider.connection, payer, ansemMint);
 
     const programData = programDataAddress(rodeoCoreProgram.programId);
+    const [protocolConfig] = deriveProtocolConfig(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      new BN(1),
+    );
 
     await rodeoCoreProgram.methods
       .initializeProtocol(
@@ -379,6 +384,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         bullAccumulator,
         principalVault,
         rewardVault,
+        protocolConfig,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: web3.SystemProgram.programId,
         rent: web3.SYSVAR_RENT_PUBKEY,

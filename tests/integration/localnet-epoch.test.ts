@@ -358,6 +358,11 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     await revokeMintAuthorities(provider.connection, payer, ansemMint);
 
     const programData = programDataAddress(rodeoCoreProgram.programId);
+    const [protocolConfig] = deriveProtocolConfig(
+      rodeoCoreProgram.programId,
+      globalConfig,
+      new BN(1),
+    );
 
     await rodeoCoreProgram.methods
       .initializeProtocol(
@@ -378,6 +383,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         bullAccumulator,
         principalVault,
         rewardVault,
+        protocolConfig,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: web3.SystemProgram.programId,
         rent: web3.SYSVAR_RENT_PUBKEY,
@@ -562,6 +568,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           bullAccumulator,
           principalVault,
           rewardVault,
+          protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -594,6 +601,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           bullAccumulator,
           principalVault,
           rewardVault,
+          protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -784,6 +792,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           bullAccumulator,
           principalVault,
           rewardVault,
+          protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -1998,6 +2007,7 @@ describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", (
           bullAccumulator: accounts.bullAccumulator,
           principalVault: accounts.principalVault,
           rewardVault: accounts.rewardVault,
+          protocolConfig: deriveProtocolConfig(program.programId, accounts.globalConfig, new BN(1))[0],
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
