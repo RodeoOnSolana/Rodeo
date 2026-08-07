@@ -742,7 +742,7 @@ pub mod rodeo_core {
 
                 transfer_ansem_from_vault(
                     owner_amount,
-                    &ctx.accounts.global_config,
+                    &*ctx.accounts.global_config,
                     ctx.accounts.reward_vault.to_account_info(),
                     ctx.accounts.owner_ansem_account.to_account_info(),
                     ctx.accounts.token_program.to_account_info(),
@@ -805,7 +805,7 @@ pub mod rodeo_core {
 
                 transfer_ansem_from_vault(
                     claimable,
-                    &ctx.accounts.global_config,
+                    &*ctx.accounts.global_config,
                     ctx.accounts.reward_vault.to_account_info(),
                     ctx.accounts.owner_ansem_account.to_account_info(),
                     ctx.accounts.token_program.to_account_info(),
@@ -948,7 +948,7 @@ pub mod rodeo_core {
         config.bull_tier_weights = [3_300_000, 1_375_000, 550_000, 275_000];
 
         probability::validate_protocol_config(&config)?;
-        *ctx.accounts.protocol_config = config;
+        ctx.accounts.protocol_config.set_inner(config);
 
         Ok(())
     }
@@ -975,7 +975,7 @@ pub struct TestSetPauseFlags<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -988,14 +988,14 @@ pub struct TestFixtureRecognizeRewards<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         mut,
@@ -1025,28 +1025,28 @@ pub struct TestFixturePreparePosition<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         mut,
         seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
         bump = bull_accumulator.bump,
     )]
-    pub bull_accumulator: Account<'info, BullAccumulator>,
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
 
     #[account(
         mut,
         seeds = [SEED_POSITION, global_config.key().as_ref(), &position_id.to_le_bytes()],
         bump = position.bump,
     )]
-    pub position: Account<'info, Position>,
+    pub position: Box<Account<'info, Position>>,
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -1060,7 +1060,7 @@ pub struct CreateProtocolConfigFixture<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         init,
@@ -1073,7 +1073,7 @@ pub struct CreateProtocolConfigFixture<'info> {
         ],
         bump,
     )]
-    pub protocol_config: Account<'info, ProtocolConfig>,
+    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
 
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
@@ -1090,7 +1090,7 @@ pub struct SetCurrentConfigVersionFixture<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         seeds = [
@@ -1100,7 +1100,7 @@ pub struct SetCurrentConfigVersionFixture<'info> {
         ],
         bump = protocol_config.bump,
     )]
-    pub protocol_config: Account<'info, ProtocolConfig>,
+    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
 }
 
 #[derive(Accounts)]
@@ -1138,7 +1138,7 @@ pub struct InitializeProtocol<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         init,
@@ -1147,7 +1147,7 @@ pub struct InitializeProtocol<'info> {
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         init,
@@ -1156,7 +1156,7 @@ pub struct InitializeProtocol<'info> {
         seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
         bump
     )]
-    pub global_game_state: Account<'info, GlobalGameState>,
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
     #[account(
         init,
@@ -1165,7 +1165,7 @@ pub struct InitializeProtocol<'info> {
         seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
         bump
     )]
-    pub bull_accumulator: Account<'info, BullAccumulator>,
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
 
     #[account(
         init,
@@ -1174,7 +1174,7 @@ pub struct InitializeProtocol<'info> {
         seeds = [SEED_PROTOCOL_CONFIG, global_config.key().as_ref(), &[1, 0, 0, 0, 0, 0, 0, 0]],
         bump
     )]
-    pub protocol_config: Account<'info, ProtocolConfig>,
+    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
 
     #[account(
         init,
@@ -1218,7 +1218,7 @@ pub struct StakeAndCommit<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         seeds = [
@@ -1229,7 +1229,7 @@ pub struct StakeAndCommit<'info> {
         bump = protocol_config.bump,
         constraint = protocol_config.config_version == global_config.current_config_version @ RodeoError::InvalidProbabilityTable,
     )]
-    pub protocol_config: Account<'info, ProtocolConfig>,
+    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
 
     #[account(
         mut,
@@ -1247,7 +1247,7 @@ pub struct StakeAndCommit<'info> {
         seeds = [SEED_POSITION, global_config.key().as_ref(), &position_id.to_le_bytes()],
         bump
     )]
-    pub position: Account<'info, Position>,
+    pub position: Box<Account<'info, Position>>,
 
     #[account(
         init,
@@ -1261,20 +1261,20 @@ pub struct StakeAndCommit<'info> {
         ],
         bump
     )]
-    pub pending_randomness: Account<'info, PendingRandomness>,
+    pub pending_randomness: Box<Account<'info, PendingRandomness>>,
 
     #[account(
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         mut,
         seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
         bump = global_game_state.bump,
     )]
-    pub global_game_state: Account<'info, GlobalGameState>,
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -1291,28 +1291,28 @@ pub struct SettleReveal<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
         seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
         bump = global_game_state.bump,
     )]
-    pub global_game_state: Account<'info, GlobalGameState>,
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
     #[account(
         mut,
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         mut,
         seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
         bump = bull_accumulator.bump,
     )]
-    pub bull_accumulator: Account<'info, BullAccumulator>,
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
 
     #[account(
         mut,
@@ -1321,7 +1321,7 @@ pub struct SettleReveal<'info> {
         constraint = position.pending_action_active @ RodeoError::PendingActionConflict,
         constraint = position.pending_action_type == ActionType::Reveal @ RodeoError::WrongActionType,
     )]
-    pub position: Account<'info, Position>,
+    pub position: Box<Account<'info, Position>>,
 
     #[account(
         mut,
@@ -1336,7 +1336,7 @@ pub struct SettleReveal<'info> {
         constraint = pending_randomness.action_type == ActionType::Reveal @ RodeoError::WrongActionType,
         constraint = pending_randomness.action_nonce == position.pending_action_nonce @ RodeoError::InvalidPendingRandomness,
     )]
-    pub pending_randomness: Account<'info, PendingRandomness>,
+    pub pending_randomness: Box<Account<'info, PendingRandomness>>,
 
     #[account(
         seeds = [
@@ -1347,7 +1347,7 @@ pub struct SettleReveal<'info> {
         bump = protocol_config.bump,
         constraint = protocol_config.config_version == pending_randomness.config_version_snapshot @ RodeoError::InvalidProbabilityTable,
     )]
-    pub protocol_config: Account<'info, ProtocolConfig>,
+    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
 
     pub clock: Sysvar<'info, Clock>,
 }
@@ -1366,7 +1366,7 @@ pub struct RecoverRevealTimeout<'info> {
         constraint = position.pending_action_active @ RodeoError::InvalidPendingRandomness,
         constraint = position.pending_action_type == ActionType::Reveal @ RodeoError::WrongActionType,
     )]
-    pub position: Account<'info, Position>,
+    pub position: Box<Account<'info, Position>>,
 
     #[account(
         mut,
@@ -1382,13 +1382,13 @@ pub struct RecoverRevealTimeout<'info> {
         constraint = pending_randomness.action_type == ActionType::Reveal @ RodeoError::WrongActionType,
         constraint = pending_randomness.action_nonce == position.pending_action_nonce @ RodeoError::InvalidPendingRandomness,
     )]
-    pub pending_randomness: Account<'info, PendingRandomness>,
+    pub pending_randomness: Box<Account<'info, PendingRandomness>>,
 
     #[account(
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
@@ -1414,7 +1414,7 @@ pub struct RecoverRevealTimeout<'info> {
         seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
         bump = global_game_state.bump,
     )]
-    pub global_game_state: Account<'info, GlobalGameState>,
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -1431,27 +1431,27 @@ pub struct CloseEpochs<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
         bump = global_game_state.bump,
     )]
-    pub global_game_state: Account<'info, GlobalGameState>,
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
     #[account(
         mut,
         seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
         bump = bull_accumulator.bump,
     )]
-    pub bull_accumulator: Account<'info, BullAccumulator>,
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
 
     #[account(
         mut,
@@ -1473,14 +1473,14 @@ pub struct RecognizeRewards<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         constraint = reward_vault.key() == global_config.reward_vault @ RodeoError::InvalidRewardVault,
@@ -1500,35 +1500,35 @@ pub struct ClaimPosition<'info> {
         seeds = [SEED_GLOBAL_CONFIG],
         bump = global_config.bump,
     )]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
         bump = reward_state.bump,
     )]
-    pub reward_state: Account<'info, RewardState>,
+    pub reward_state: Box<Account<'info, RewardState>>,
 
     #[account(
         mut,
         seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
         bump = global_game_state.bump,
     )]
-    pub global_game_state: Account<'info, GlobalGameState>,
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
     #[account(
         mut,
         seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
         bump = bull_accumulator.bump,
     )]
-    pub bull_accumulator: Account<'info, BullAccumulator>,
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
 
     #[account(
         mut,
         seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
         bump = position.bump,
     )]
-    pub position: Account<'info, Position>,
+    pub position: Box<Account<'info, Position>>,
 
     #[account(
         init_if_needed,
@@ -2036,7 +2036,7 @@ fn transfer_ansem_from_vault<'info>(
 fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
     use crate::probability;
 
-    let config = &ctx.accounts.protocol_config;
+    let config: &ProtocolConfig = &**ctx.accounts.protocol_config;
 
     let position_key = ctx.accounts.position.key();
     let action_type = ctx.accounts.pending_randomness.action_type;
