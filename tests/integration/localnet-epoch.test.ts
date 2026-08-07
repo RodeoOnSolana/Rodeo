@@ -683,7 +683,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   it("initializes GlobalConfig with computed atomic values and governance addresses", async () => {
     const config = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
 
-    expect(config.version).toBe(1);
+    expect(config.version).toBe(2);
     expect(config.rodeoMint.toBase58()).toBe(rodeoMint.toBase58());
     expect(config.ansemMint.toBase58()).toBe(ansemMint.toBase58());
     expect(config.rodeoDecimals).toBe(6);
