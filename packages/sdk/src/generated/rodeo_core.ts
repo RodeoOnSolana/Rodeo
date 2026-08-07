@@ -191,7 +191,7 @@ export const rodeoCoreIdl = {
                   97,
                   105,
                   109,
-                  45,
+                  95,
                   99,
                   111,
                   111,
@@ -558,6 +558,10 @@ export const rodeoCoreIdl = {
               }
             ]
           }
+        },
+        {
+          "name": "protocol_config",
+          "writable": true
         },
         {
           "name": "principal_vault",
@@ -1063,6 +1067,42 @@ export const rodeoCoreIdl = {
           "writable": true
         },
         {
+          "name": "protocol_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "account",
+                "path": "pending_randomness.config_version_snapshot",
+                "account": "PendingRandomness"
+              }
+            ]
+          }
+        },
+        {
           "name": "clock",
           "address": "SysvarC1ock11111111111111111111111111111111"
         }
@@ -1112,6 +1152,42 @@ export const rodeoCoreIdl = {
                   105,
                   103
                 ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "protocol_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "account",
+                "path": "global_config.current_config_version",
+                "account": "GlobalConfig"
               }
             ]
           }
@@ -1332,6 +1408,19 @@ export const rodeoCoreIdl = {
         64,
         247,
         208
+      ]
+    },
+    {
+      "name": "ProtocolConfig",
+      "discriminator": [
+        207,
+        91,
+        250,
+        28,
+        152,
+        179,
+        215,
+        209
       ]
     },
     {
@@ -1897,30 +1986,26 @@ export const rodeoCoreIdl = {
         "kind": "struct",
         "fields": [
           {
-            "name": "source",
-            "type": {
-              "defined": {
-                "name": "BullPoolContributionSource"
-              }
-            }
+            "name": "epoch",
+            "type": "u64"
           },
           {
             "name": "amount_atomic",
             "type": "u64"
           },
           {
-            "name": "total_active_bull_power",
-            "type": "u64"
-          },
-          {
-            "name": "reward_per_weight_scaled_after",
-            "type": "u128"
+            "name": "source",
+            "type": {
+              "defined": {
+                "name": "BullPoolSource"
+              }
+            }
           }
         ]
       }
     },
     {
-      "name": "BullPoolContributionSource",
+      "name": "BullPoolSource",
       "type": {
         "kind": "enum",
         "variants": [
@@ -1929,6 +2014,9 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "DesperadoClaimTax"
+          },
+          {
+            "name": "UnstakeTheft"
           }
         ]
       }
@@ -1963,7 +2051,23 @@ export const rodeoCoreIdl = {
             "type": "u64"
           },
           {
-            "name": "epoch_emission",
+            "name": "cowboy_emission",
+            "type": "u64"
+          },
+          {
+            "name": "suit_vault_contribution",
+            "type": "u64"
+          },
+          {
+            "name": "free_ansem",
+            "type": "u64"
+          },
+          {
+            "name": "total_cowboy_weight",
+            "type": "u128"
+          },
+          {
+            "name": "total_bull_power",
             "type": "u64"
           },
           {
@@ -1973,6 +2077,10 @@ export const rodeoCoreIdl = {
           {
             "name": "total_ansem_liability_atomic",
             "type": "u64"
+          },
+          {
+            "name": "snapshot_timestamp",
+            "type": "i64"
           }
         ]
       }
@@ -1983,11 +2091,19 @@ export const rodeoCoreIdl = {
         "kind": "struct",
         "fields": [
           {
-            "name": "count",
+            "name": "start_epoch",
             "type": "u64"
           },
           {
-            "name": "last_closed_epoch_timestamp",
+            "name": "end_epoch",
+            "type": "u64"
+          },
+          {
+            "name": "epochs_processed",
+            "type": "u64"
+          },
+          {
+            "name": "last_closed_timestamp",
             "type": "i64"
           }
         ]
@@ -2065,6 +2181,10 @@ export const rodeoCoreIdl = {
           {
             "name": "emergency_guardians",
             "type": "pubkey"
+          },
+          {
+            "name": "current_config_version",
+            "type": "u64"
           },
           {
             "name": "bump",
@@ -2214,6 +2334,10 @@ export const rodeoCoreIdl = {
             "type": "u64"
           },
           {
+            "name": "config_version_snapshot",
+            "type": "u64"
+          },
+          {
             "name": "settled",
             "type": "bool"
           },
@@ -2358,6 +2482,10 @@ export const rodeoCoreIdl = {
             "type": "u64"
           },
           {
+            "name": "reveal_config_version",
+            "type": "u64"
+          },
+          {
             "name": "bump",
             "type": "u8"
           }
@@ -2378,15 +2506,11 @@ export const rodeoCoreIdl = {
             "type": "pubkey"
           },
           {
-            "name": "role",
-            "type": {
-              "defined": {
-                "name": "Role"
-              }
-            }
+            "name": "owner_amount",
+            "type": "u64"
           },
           {
-            "name": "amount_atomic",
+            "name": "bull_pool_amount",
             "type": "u64"
           }
         ]
@@ -2486,6 +2610,10 @@ export const rodeoCoreIdl = {
           {
             "name": "settlement_nonce",
             "type": "u64"
+          },
+          {
+            "name": "config_version",
+            "type": "u64"
           }
         ]
       }
@@ -2542,6 +2670,127 @@ export const rodeoCoreIdl = {
       }
     },
     {
+      "name": "ProtocolConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "global_config",
+            "type": "pubkey"
+          },
+          {
+            "name": "config_version",
+            "type": "u64"
+          },
+          {
+            "name": "role_weights",
+            "type": {
+              "array": [
+                "u64",
+                2
+              ]
+            }
+          },
+          {
+            "name": "cowboy_rank_weights",
+            "type": {
+              "array": [
+                "u64",
+                8
+              ]
+            }
+          },
+          {
+            "name": "bull_tier_weights",
+            "type": {
+              "array": [
+                "u64",
+                4
+              ]
+            }
+          },
+          {
+            "name": "suit_weights",
+            "type": {
+              "array": [
+                "u64",
+                4
+              ]
+            }
+          },
+          {
+            "name": "mint_theft_weights",
+            "type": {
+              "array": [
+                "u64",
+                2
+              ]
+            }
+          },
+          {
+            "name": "unstake_theft_weights",
+            "type": {
+              "array": [
+                "u64",
+                2
+              ]
+            }
+          },
+          {
+            "name": "cowboy_accrual_weights",
+            "type": {
+              "array": [
+                "u32",
+                8
+              ]
+            }
+          },
+          {
+            "name": "bull_buck_powers",
+            "type": {
+              "array": [
+                "u8",
+                4
+              ]
+            }
+          },
+          {
+            "name": "min_reveals_for_theft",
+            "type": "u64"
+          },
+          {
+            "name": "min_bulls_for_theft",
+            "type": "u64"
+          },
+          {
+            "name": "unstake_tax_bps",
+            "type": "u64"
+          },
+          {
+            "name": "unstake_return_bps",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "_reserved",
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
       "name": "ProtocolInitialized",
       "type": {
         "kind": "struct",
@@ -2560,6 +2809,10 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "bull_accumulator",
+            "type": "pubkey"
+          },
+          {
+            "name": "protocol_config",
             "type": "pubkey"
           },
           {
@@ -2609,6 +2862,10 @@ export const rodeoCoreIdl = {
           {
             "name": "emergency_guardians",
             "type": "pubkey"
+          },
+          {
+            "name": "current_config_version",
+            "type": "u64"
           }
         ]
       }
@@ -2682,6 +2939,10 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "registry_version_snapshot",
+            "type": "u64"
+          },
+          {
+            "name": "config_version_snapshot",
             "type": "u64"
           },
           {
@@ -2766,7 +3027,11 @@ export const rodeoCoreIdl = {
             "type": "u64"
           },
           {
-            "name": "new_recognized_balance_atomic",
+            "name": "recognized_reward_balance_atomic",
+            "type": "u64"
+          },
+          {
+            "name": "actual_reward_vault_balance",
             "type": "u64"
           }
         ]
@@ -2779,12 +3044,10 @@ export const rodeoCoreIdl = {
         "fields": [
           {
             "name": "position",
-            "type": {
-              "option": "pubkey"
-            }
+            "type": "pubkey"
           },
           {
-            "name": "recipient",
+            "name": "owner",
             "type": "pubkey"
           },
           {
@@ -2792,8 +3055,39 @@ export const rodeoCoreIdl = {
             "type": "u64"
           },
           {
-            "name": "remaining_recognized_balance_atomic",
+            "name": "recognized_reward_balance_atomic",
             "type": "u64"
+          },
+          {
+            "name": "reason",
+            "type": {
+              "defined": {
+                "name": "RewardPaidReason"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "RewardPaidReason",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "CowboyClaim"
+          },
+          {
+            "name": "DesperadoClaim"
+          },
+          {
+            "name": "BullClaim"
+          },
+          {
+            "name": "UnstakeSettlement"
+          },
+          {
+            "name": "SuitReward"
           }
         ]
       }
