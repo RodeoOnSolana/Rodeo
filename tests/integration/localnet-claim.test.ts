@@ -640,16 +640,42 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     const positionId = new BN(nextPositionId++);
     await stakeAndCommit(positionId);
     await settleReveal(positionId);
+    const { position } = await deriveStakeAccounts(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     await fixturePreparePosition(positionId, {
       roleCode: role === "cowboy" ? 1 : 2,
-      cowboyKindCode,
-      accrualWeight: 0,
-      buckPower: 0,
+      cowboyKindCode: role === "cowboy" ? cowboyKindCode : 0,
+      accrualWeight: pos.accrualWeight,
+      buckPower: pos.buckPower,
       claimable,
       positionClaimableLiabilityDelta: claimable,
     });
-    const { position } = await deriveStakeAccounts(positionId);
     return { positionId, position };
+  }
+
+  async function unstakeAllBulls() {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    if (game.activeBullCount.isZero()) return;
+
+    for (let id = 1; id < nextPositionId; id++) {
+      const positionId = new BN(id);
+      const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
+      const pos = await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(position);
+      if (!pos) continue;
+      if (!pos.status.active || !pos.role.bull) continue;
+
+      await fixturePreparePosition(positionId, {
+        roleCode: 2,
+        cowboyKindCode: 0,
+        accrualWeight: pos.accrualWeight,
+        buckPower: pos.buckPower,
+        claimable: pos.claimableAnsemAtomic,
+        positionClaimableLiabilityDelta: new BN(0),
+      });
+
+      const { actionNonce } = await requestUnstake(positionId);
+      await settleUnstake(positionId, actionNonce);
+    }
   }
 
   async function ensureRecognizedReserve(amount: BN) {
@@ -915,6 +941,9 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       globalConfig,
       configVersion,
     );
+    const info = await provider.connection.getAccountInfo(protocolConfig);
+    if (info !== null) return protocolConfig;
+
     const discriminator = Buffer.from("638f500cc67fd541", "hex");
     const data = Buffer.concat([discriminator, configVersion.toArrayLike(Buffer, "le", 8)]);
     const ix = new web3.TransactionInstruction({
@@ -1807,6 +1836,8 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
   }, 180_000);
 
   it("stolen Cowboy with zero active Bulls routes to unallocated liability", async () => {
+    await unstakeAllBulls();
+
     const claimable = new BN(1_000_000_000);
     const { positionId, position } = await findPositionForUnstake(
       (_id, _pos, _role, cowboyKind, stolen) => cowboyKind !== "desperado" && stolen,
@@ -1923,7 +1954,9 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     expect(new BN(ownerAnsemAfter.amount.toString()).toString()).toBe(
       new BN(ownerAnsemBefore.amount.toString()).add(claimable).toString(),
     );
-    expect(vaultAfter.amount.toString()).toBe(vaultBefore.amount.toString());
+    expect(vaultAfter.amount.toString()).toBe(
+      new BN(vaultBefore.amount.toString()).sub(claimable).toString(),
+    );
     expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
       rewardBefore.recognizedRewardBalanceAtomic.sub(claimable).toString(),
     );
@@ -2330,7 +2363,9 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     expect(new BN(ownerAnsemAfterA.amount.toString()).sub(new BN(ownerAnsemBeforeA.amount.toString())).toString()).toBe(
       claimable.toString(),
     );
-    expect(vaultAfterA.amount.toString()).toBe(vaultBeforeA.amount.toString());
+    expect(vaultAfterA.amount.toString()).toBe(
+      new BN(vaultBeforeA.amount.toString()).sub(claimable).toString(),
+    );
     expect(rewardAfterA.positionClaimableLiabilityAtomic.toString()).toBe(
       rewardBeforeA.positionClaimableLiabilityAtomic.sub(claimable).toString(),
     );
