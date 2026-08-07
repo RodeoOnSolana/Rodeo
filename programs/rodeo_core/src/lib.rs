@@ -174,7 +174,7 @@ pub mod rodeo_core {
             probability::protocol_config_v1(global_config.key(), ctx.bumps.protocol_config);
         v1_config.config_version = 1;
         probability::validate_protocol_config(&v1_config)?;
-        *protocol_config = v1_config;
+        protocol_config.set_inner(v1_config);
 
         emit!(ProtocolInitialized {
             global_config: global_config.key(),
@@ -456,7 +456,6 @@ pub mod rodeo_core {
 
         let reward_state = &mut ctx.accounts.reward_state;
         let global_game_state = &ctx.accounts.global_game_state;
-        let bull_accumulator = &mut ctx.accounts.bull_accumulator;
         let reward_vault = &ctx.accounts.reward_vault;
 
         require_keys_eq!(
@@ -699,7 +698,7 @@ pub mod rodeo_core {
         let reward_paid_reason: RewardPaidReason;
         match position.role {
             Role::Cowboy => {
-                let (owner_bps, bull_pool_bps) = if position.cowboy_kind == CowboyKind::Desperado {
+                let (owner_bps, _bull_pool_bps) = if position.cowboy_kind == CowboyKind::Desperado {
                     (DESPERADO_CLAIM_OWNER_BPS, DESPERADO_CLAIM_BULL_POOL_BPS)
                 } else {
                     (CLAIM_OWNER_BPS, CLAIM_BULL_POOL_BPS)
