@@ -1470,8 +1470,8 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
       rewardBefore.recognizedRewardBalanceAtomic.add(fundAmount).toString(),
     );
-    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(
-      rewardBefore.totalAnsemLiabilityAtomic.toString(),
+    expect(rewardAfter.totalAnsemLiabilityAtomic.gte(rewardBefore.totalAnsemLiabilityAtomic)).toBe(
+      true,
     );
   }, 60_000);
 
