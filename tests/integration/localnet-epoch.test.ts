@@ -2442,22 +2442,6 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const gameBeforeSettle =
       await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
 
-    console.log("pending-unstake accrual state", {
-      preRequestClaimable: preRequestClaimable.toString(),
-      preRequestPositionLiability: preRequestPositionLiability.toString(),
-      preRequestTotalLiability: preRequestTotalLiability.toString(),
-      lastCowboyIndexAtRequest: lastCowboyIndexAtRequest.toString(),
-      requestRemainder: requestRemainder.toString(),
-      rewardAfterPendingCowboyRewardIndex: rewardAfterPending.cowboyRewardIndex.toString(),
-      rewardAfterPendingCowboyUnmaterializedLiabilityAtomic:
-        rewardAfterPending.cowboyUnmaterializedLiabilityAtomic.toString(),
-      indexDelta: indexDelta.toString(),
-      postRequestAccrual: postRequestAccrual.toString(),
-      expectedSynchronized: expectedSynchronized.toString(),
-      gameBeforeSettleActiveCowboyCount: gameBeforeSettle.activeCowboyCount.toString(),
-      gameBeforeSettleTotalActiveCowboyWeight: gameBeforeSettle.totalActiveCowboyWeight.toString(),
-    });
-
     await settleUnstake(positionId, requestInfo.actionNonce);
 
     const positionUnstaked = await positionUnstakedPromise;
@@ -2465,38 +2449,6 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const rewardAfterSettle = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const gameAfterSettle =
       await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
-
-    console.log("pending-unstake settled state", {
-      ansemBeforeSettle: ansemBeforeSettle.amount.toString(),
-      ansemAfterSettle: ansemAfterSettle.amount.toString(),
-      ansemDelta: new BN(ansemAfterSettle.amount.toString())
-        .sub(new BN(ansemBeforeSettle.amount.toString()))
-        .toString(),
-      synchronizedAnsem: positionUnstaked.synchronizedAnsem.toString(),
-      ansemPaidToOwner: positionUnstaked.ansemPaidToOwner.toString(),
-      ansemRoutedToBullPool: positionUnstaked.ansemRoutedToBullPool.toString(),
-      rewardBeforeSettleRecognized: rewardBeforeSettle.recognizedRewardBalanceAtomic.toString(),
-      rewardAfterSettleRecognized: rewardAfterSettle.recognizedRewardBalanceAtomic.toString(),
-      recognizedDelta: rewardBeforeSettle.recognizedRewardBalanceAtomic
-        .sub(rewardAfterSettle.recognizedRewardBalanceAtomic)
-        .toString(),
-      rewardBeforeSettleTotalLiability: rewardBeforeSettle.totalAnsemLiabilityAtomic.toString(),
-      rewardAfterSettleTotalLiability: rewardAfterSettle.totalAnsemLiabilityAtomic.toString(),
-      totalLiabilityDelta: rewardBeforeSettle.totalAnsemLiabilityAtomic
-        .sub(rewardAfterSettle.totalAnsemLiabilityAtomic)
-        .toString(),
-      rewardAfterSettleCowboyUnmaterializedLiability:
-        rewardAfterSettle.cowboyUnmaterializedLiabilityAtomic.toString(),
-      rewardBeforeSettlePositionClaimableLiability:
-        rewardBeforeSettle.positionClaimableLiabilityAtomic.toString(),
-      rewardAfterSettlePositionClaimableLiability:
-        rewardAfterSettle.positionClaimableLiabilityAtomic.toString(),
-      positionClaimableLiabilityDelta: rewardBeforeSettle.positionClaimableLiabilityAtomic
-        .sub(rewardAfterSettle.positionClaimableLiabilityAtomic)
-        .toString(),
-      gameAfterSettleActiveCowboyCount: gameAfterSettle.activeCowboyCount.toString(),
-      gameAfterSettleTotalActiveCowboyWeight: gameAfterSettle.totalActiveCowboyWeight.toString(),
-    });
 
     expect(positionUnstaked.synchronizedAnsem.toString()).toBe(expectedSynchronized.toString());
     expect(positionUnstaked.ansemPaidToOwner.toString()).toBe(expectedSynchronized.toString());
