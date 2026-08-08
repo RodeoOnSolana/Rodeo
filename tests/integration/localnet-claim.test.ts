@@ -852,7 +852,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
 
   async function findCowboyPosition(
     cowboyKindCode = 5,
-    maxAttempts = 1000,
+    maxAttempts = 10000,
   ): Promise<{ positionId: BN; position: web3.PublicKey }> {
     const desiredKind =
       cowboyKindCode === 254 ? "desperado" : `rank${cowboyKindCode}`;
@@ -1953,10 +1953,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
 
   it("Desperado exit is immune to unstake theft and receives full ANSEM", async () => {
     const claimable = new BN(1_000_000_000);
-    const { positionId, position } = await findPositionForUnstake(
-      (_id, _pos, _role, cowboyKind, _stolen) => cowboyKind === "desperado",
-      5000,
-    );
+    const { positionId, position } = await findCowboyPosition(254, 20000);
     await ensureRecognizedReserve(claimable);
     await prepareUnstakeReadyPositionById(positionId, claimable);
 
