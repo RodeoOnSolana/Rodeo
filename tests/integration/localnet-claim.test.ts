@@ -637,14 +637,26 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     claimable: BN,
     cowboyKindCode = 5,
   ): Promise<{ positionId: BN; position: web3.PublicKey }> {
-    const positionId = new BN(nextPositionId++);
+    // Search for a position that will naturally reveal into the desired role
+    // (and cowboy kind, when relevant). This keeps the GlobalGameState bull /
+    // cowboy counters in sync with the position state instead of forcing a
+    // role via the fixture and leaving game_state counters stale.
+    const { positionId, position } =
+      role === "bull"
+        ? await findBullPosition()
+        : await findCowboyPosition(cowboyKindCode);
+
     await stakeAndCommit(positionId);
     await settleReveal(positionId);
-    const { position } = await deriveStakeAccounts(positionId);
     const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const actualCowboyKindCode = pos.cowboyKind.desperado
+      ? 254
+      : pos.cowboyKind.rank
+        ? pos.cowboyKind.rank[0]
+        : 0;
     await fixturePreparePosition(positionId, {
-      roleCode: role === "cowboy" ? 1 : 2,
-      cowboyKindCode: role === "cowboy" ? cowboyKindCode : 0,
+      roleCode: pos.role.cowboy ? 1 : pos.role.bull ? 2 : 0,
+      cowboyKindCode: actualCowboyKindCode,
       accrualWeight: pos.accrualWeight,
       buckPower: pos.buckPower,
       claimable,
@@ -836,6 +848,23 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       }
     }
     throw new Error("Could not find a Bull position");
+  }
+
+  async function findCowboyPosition(
+    cowboyKindCode = 5,
+    maxAttempts = 1000,
+  ): Promise<{ positionId: BN; position: web3.PublicKey }> {
+    const desiredKind =
+      cowboyKindCode === 254 ? "desperado" : `rank${cowboyKindCode}`;
+    for (let i = 0; i < maxAttempts; i++) {
+      const positionId = new BN(nextPositionId++);
+      const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
+      if (expectedRevealRole(position) !== "cowboy") continue;
+      if (expectedCowboyKind(position) === desiredKind) {
+        return { positionId, position };
+      }
+    }
+    throw new Error("Could not find a Cowboy position");
   }
 
   async function requestUnstake(positionId: BN, owner = payer) {
