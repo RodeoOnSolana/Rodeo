@@ -861,6 +861,13 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
       if (expectedRevealRole(position) !== "cowboy") continue;
       if (expectedCowboyKind(position) === desiredKind) {
+        console.log("findCowboyPosition result", {
+          cowboyKindCode,
+          desiredKind,
+          attempts: i + 1,
+          positionId: positionId.toString(),
+          position: position.toBase58(),
+        });
         return { positionId, position };
       }
     }
@@ -1851,6 +1858,32 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     expect(unassignedPosition).toBeNull();
 
     const positionUnstaked = await positionUnstakedPromise;
+    console.log("stolen Cowboy active Bulls state", {
+      cowboyPositionId: cowboyPositionId.toString(),
+      cowboyPosition: cowboyPosition.toBase58(),
+      bullPositionId: bullPositionId.toString(),
+      claimable: claimable.toString(),
+      totalPower: totalPower.toString(),
+      increment: increment.toString(),
+      newRemainder: newRemainder.toString(),
+      gameBeforeActiveBullCount: gameBefore.activeBullCount.toString(),
+      gameBeforeTotalActiveBullPower: gameBefore.totalActiveBullPower.toString(),
+      gameAfterActiveBullCount: gameAfter.activeBullCount.toString(),
+      gameAfterTotalActiveBullPower: gameAfter.totalActiveBullPower.toString(),
+      rewardBeforePositionClaimableLiability:
+        rewardBefore.positionClaimableLiabilityAtomic.toString(),
+      rewardAfterPositionClaimableLiability:
+        rewardAfter.positionClaimableLiabilityAtomic.toString(),
+      rewardBeforeBullPoolLiability: rewardBefore.bullPoolLiabilityAtomic.toString(),
+      rewardAfterBullPoolLiability: rewardAfter.bullPoolLiabilityAtomic.toString(),
+      rewardBeforeTotalAnsemLiability: rewardBefore.totalAnsemLiabilityAtomic.toString(),
+      rewardAfterTotalAnsemLiability: rewardAfter.totalAnsemLiabilityAtomic.toString(),
+      bullBeforeRewardPerWeightScaled: bullBefore.rewardPerWeightScaled.toString(),
+      bullAfterRewardPerWeightScaled: bullAfter.rewardPerWeightScaled.toString(),
+      bullAfterBullIndexRemainderScaled: bullAfter.bullIndexRemainderScaled.toString(),
+      ansemPaidToOwner: positionUnstaked.ansemPaidToOwner.toString(),
+      ansemRoutedToBullPool: positionUnstaked.ansemRoutedToBullPool.toString(),
+    });
     ansemFateKey(positionUnstaked.ansemFate, "toBullPool");
     expect(positionUnstaked.ansemPaidToOwner.toString()).toBe("0");
     expect(positionUnstaked.ansemRoutedToBullPool.toString()).toBe(claimable.toString());
@@ -1939,6 +1972,29 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     expect(unassignedPosition).toBeNull();
 
     const positionUnstaked = await positionUnstakedPromise;
+    console.log("stolen Cowboy zero active Bulls state", {
+      positionId: positionId.toString(),
+      position: position.toBase58(),
+      claimable: claimable.toString(),
+      gameBeforeActiveBullCount: gameBefore.activeBullCount.toString(),
+      gameBeforeTotalActiveBullPower: gameBefore.totalActiveBullPower.toString(),
+      gameAfterActiveBullCount: gameAfter.activeBullCount.toString(),
+      gameAfterTotalActiveBullPower: gameAfter.totalActiveBullPower.toString(),
+      rewardBeforePositionClaimableLiability:
+        rewardBefore.positionClaimableLiabilityAtomic.toString(),
+      rewardAfterPositionClaimableLiability:
+        rewardAfter.positionClaimableLiabilityAtomic.toString(),
+      rewardBeforeBullPoolLiability: rewardBefore.bullPoolLiabilityAtomic.toString(),
+      rewardAfterBullPoolLiability: rewardAfter.bullPoolLiabilityAtomic.toString(),
+      rewardBeforeBullPoolUnallocatedLiability:
+        rewardBefore.bullPoolUnallocatedLiabilityAtomic.toString(),
+      rewardAfterBullPoolUnallocatedLiability:
+        rewardAfter.bullPoolUnallocatedLiabilityAtomic.toString(),
+      rewardBeforeTotalAnsemLiability: rewardBefore.totalAnsemLiabilityAtomic.toString(),
+      rewardAfterTotalAnsemLiability: rewardAfter.totalAnsemLiabilityAtomic.toString(),
+      ansemPaidToOwner: positionUnstaked.ansemPaidToOwner.toString(),
+      ansemRoutedToBullPool: positionUnstaked.ansemRoutedToBullPool.toString(),
+    });
     ansemFateKey(positionUnstaked.ansemFate, "toBullPool");
     expect(positionUnstaked.ansemPaidToOwner.toString()).toBe("0");
     expect(positionUnstaked.ansemRoutedToBullPool.toString()).toBe(claimable.toString());
@@ -1963,6 +2019,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
     const principalVaultBefore = await getAccount(provider.connection, principalVault);
     const rodeoBefore = await getAccount(provider.connection, payerRodeoAccount);
+    const desperadoPosBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
 
     const positionUnstakedPromise = collectOneEvent<PositionUnstakedEvent>("positionUnstaked");
 
@@ -2024,6 +2081,24 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     expect(unassignedPosition).toBeNull();
 
     const positionUnstaked = await positionUnstakedPromise;
+    console.log("Desperado exit state", {
+      positionId: positionId.toString(),
+      position: position.toBase58(),
+      roleCowboy: !!desperadoPosBefore.role.cowboy,
+      roleBull: !!desperadoPosBefore.role.bull,
+      cowboyKindDesperado: !!desperadoPosBefore.cowboyKind.desperado,
+      cowboyKindRank: desperadoPosBefore.cowboyKind.rank?.[0] ?? null,
+      accrualWeight: desperadoPosBefore.accrualWeight.toString(),
+      gameBeforeActiveCowboyCount: gameBefore.activeCowboyCount.toString(),
+      gameBeforeTotalActiveCowboyWeight: gameBefore.totalActiveCowboyWeight.toString(),
+      gameAfterActiveCowboyCount: gameAfter.activeCowboyCount.toString(),
+      gameAfterTotalActiveCowboyWeight: gameAfter.totalActiveCowboyWeight.toString(),
+      returned: returned.toString(),
+      burned: burned.toString(),
+      ansemPaidToOwner: positionUnstaked.ansemPaidToOwner.toString(),
+      ansemRoutedToBullPool: positionUnstaked.ansemRoutedToBullPool.toString(),
+      ansemFate: JSON.stringify(positionUnstaked.ansemFate),
+    });
     ansemFateKey(positionUnstaked.ansemFate, "immune");
     expect(positionUnstaked.ansemPaidToOwner.toString()).toBe(claimable.toString());
     expect(positionUnstaked.ansemRoutedToBullPool.toString()).toBe("0");
@@ -2109,6 +2184,41 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     expect(payout.toString()).toBe(expectedPayout.toString());
     expect(payout.gtn(0)).toBe(true);
 
+    console.log("Bull settlement state", {
+      bullPositionId: bullPositionId.toString(),
+      bullPosition: bullPosition.toBase58(),
+      stolenAmount: stolenAmount.toString(),
+      totalPower: totalPower.toString(),
+      bullPower: bullPower.toString(),
+      rewardBeforeCowboyBullPoolLiability:
+        rewardBeforeCowboy.bullPoolLiabilityAtomic.toString(),
+      rewardBeforeBullBullPoolLiability:
+        rewardBeforeBull.bullPoolLiabilityAtomic.toString(),
+      rewardAfterBullBullPoolLiability:
+        rewardAfterBull.bullPoolLiabilityAtomic.toString(),
+      rewardBeforeBullPositionClaimableLiability:
+        rewardBeforeBull.positionClaimableLiabilityAtomic.toString(),
+      rewardAfterBullPositionClaimableLiability:
+        rewardAfterBull.positionClaimableLiabilityAtomic.toString(),
+      rewardBeforeBullTotalAnsemLiability:
+        rewardBeforeBull.totalAnsemLiabilityAtomic.toString(),
+      rewardAfterBullTotalAnsemLiability:
+        rewardAfterBull.totalAnsemLiabilityAtomic.toString(),
+      rewardBeforeBullRecognized: rewardBeforeBull.recognizedRewardBalanceAtomic.toString(),
+      rewardAfterBullRecognized: rewardAfterBull.recognizedRewardBalanceAtomic.toString(),
+      rewardBeforeBullAnsemClaimed: rewardBeforeBull.ansemClaimedAtomic.toString(),
+      rewardAfterBullAnsemClaimed: rewardAfterBull.ansemClaimedAtomic.toString(),
+      gameBeforeCowboyActiveBullCount: gameBeforeCowboy.activeBullCount.toString(),
+      gameBeforeCowboyTotalActiveBullPower: gameBeforeCowboy.totalActiveBullPower.toString(),
+      gameAfterBullActiveBullCount: gameAfterBull.activeBullCount.toString(),
+      gameAfterBullTotalActiveBullPower: gameAfterBull.totalActiveBullPower.toString(),
+      deltaIndex: deltaIndex.toString(),
+      expectedPayout: expectedPayout.toString(),
+      payout: payout.toString(),
+      ownerAnsemBeforeBull: ownerAnsemBeforeBull.amount.toString(),
+      ownerAnsemAfterBull: ownerAnsemAfterBull.amount.toString(),
+    });
+
     expect(new BN(ownerAnsemAfterBull.amount.toString()).toString()).toBe(
       new BN(ownerAnsemBeforeBull.amount.toString()).add(payout).toString(),
     );
@@ -2188,6 +2298,35 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     );
 
     const returned = stakeAmountAtomic.muln(9_500).divn(10_000);
+    console.log("zero-ANSEM unstake state", {
+      positionId: positionId.toString(),
+      position: position.toBase58(),
+      posBeforeClaimable: posBefore.claimableAnsemAtomic.toString(),
+      ownerAnsemBefore: ownerAnsemBefore.amount.toString(),
+      ownerAnsemAfter: ownerAnsemAfter.amount.toString(),
+      vaultBefore: vaultBefore.amount.toString(),
+      vaultAfter: vaultAfter.amount.toString(),
+      rewardBeforeRecognized: rewardBefore.recognizedRewardBalanceAtomic.toString(),
+      rewardAfterRecognized: rewardAfter.recognizedRewardBalanceAtomic.toString(),
+      rewardBeforeTotalAnsemLiability: rewardBefore.totalAnsemLiabilityAtomic.toString(),
+      rewardAfterTotalAnsemLiability: rewardAfter.totalAnsemLiabilityAtomic.toString(),
+      rewardBeforePositionClaimableLiability:
+        rewardBefore.positionClaimableLiabilityAtomic.toString(),
+      rewardAfterPositionClaimableLiability:
+        rewardAfter.positionClaimableLiabilityAtomic.toString(),
+      rewardBeforeAnsemClaimed: rewardBefore.ansemClaimedAtomic.toString(),
+      rewardAfterAnsemClaimed: rewardAfter.ansemClaimedAtomic.toString(),
+      principalVaultBefore: principalVaultBefore.amount.toString(),
+      principalVaultAfter: principalVaultAfter.amount.toString(),
+      rodeoBefore: rodeoBefore.amount.toString(),
+      rodeoAfter: rodeoAfter.amount.toString(),
+      returned: returned.toString(),
+      burned: stakeAmountAtomic.sub(returned).toString(),
+      gameBeforeLivePositionCount: gameBefore.livePositionCount.toString(),
+      gameAfterLivePositionCount: gameAfter.livePositionCount.toString(),
+      gameBeforeActiveCowboyCount: gameBefore.activeCowboyCount.toString(),
+      gameAfterActiveCowboyCount: gameAfter.activeCowboyCount.toString(),
+    });
     expect(new BN(principalVaultAfter.amount.toString()).toString()).toBe(
       new BN(principalVaultBefore.amount.toString()).sub(stakeAmountAtomic).toString(),
     );
