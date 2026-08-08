@@ -198,7 +198,10 @@ export const PROTOCOL_CONFIG_V1: ProtocolConfig = createProtocolConfig({
   configVersion: 1n,
 });
 
-/** V2 ProtocolConfig fixture: altered role, cowboy rank, and bull tier distributions. */
+/** V2 ProtocolConfig fixture: altered role, cowboy rank, bull tier, unstake
+ *  economics, and unstake theft table. Used to prove historical snapshot
+ *  behavior on localnet and in the simulator.
+ */
 export const PROTOCOL_CONFIG_V2: ProtocolConfig = createProtocolConfig({
   globalConfig: ZERO_PROTOCOL_CONFIG_PUBKEY,
   configVersion: 2n,
@@ -214,6 +217,9 @@ export const PROTOCOL_CONFIG_V2: ProtocolConfig = createProtocolConfig({
     2_500n,
   ],
   bullTierWeights: [3_300_000n, 1_375_000n, 550_000n, 275_000n],
+  unstakeTheftWeights: [5_000_000n, 5_000_000n],
+  unstakeTaxBps: 2_000n,
+  unstakeReturnBps: 8_000n,
 });
 
 export function protocolConfigToRoleTable(

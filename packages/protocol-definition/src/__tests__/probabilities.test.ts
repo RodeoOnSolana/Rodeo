@@ -230,7 +230,7 @@ describe("ProtocolConfig fixtures", () => {
     ]);
     expect(PROTOCOL_CONFIG_V2.suitWeights).toEqual(PROTOCOL_CONFIG_V1.suitWeights);
     expect(PROTOCOL_CONFIG_V2.mintTheftWeights).toEqual(PROTOCOL_CONFIG_V1.mintTheftWeights);
-    expect(PROTOCOL_CONFIG_V2.unstakeTheftWeights).toEqual(PROTOCOL_CONFIG_V1.unstakeTheftWeights);
+    expect(PROTOCOL_CONFIG_V2.unstakeTheftWeights).toEqual([5_000_000n, 5_000_000n]);
     expect(PROTOCOL_CONFIG_V2.cowboyAccrualWeights).toEqual(PROTOCOL_CONFIG_V1.cowboyAccrualWeights);
     expect(PROTOCOL_CONFIG_V2.bullBuckPowers).toEqual(PROTOCOL_CONFIG_V1.bullBuckPowers);
   });

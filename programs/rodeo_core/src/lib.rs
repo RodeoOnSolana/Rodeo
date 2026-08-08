@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{Mint, Token, TokenAccount};
+use anchor_spl::token::{Burn, Mint, Token, TokenAccount, Transfer};
 
 declare_id!("EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z");
 
@@ -835,6 +835,198 @@ pub mod rodeo_core {
         Ok(())
     }
 
+    pub fn request_unstake(ctx: Context<RequestUnstake>) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
+
+        let owner = ctx.accounts.owner.key();
+        let position = &mut ctx.accounts.position;
+
+        require_eq!(position.owner, owner, RodeoError::InvalidOwner);
+        require!(
+            position.status == PositionStatus::Active,
+            RodeoError::InvalidRole
+        );
+        require!(
+            !position.pending_action_active,
+            RodeoError::PendingActionConflict
+        );
+        require!(
+            now >= position.unstake_eligible_at,
+            RodeoError::MinimumStakePeriodNotMet
+        );
+
+        // Synchronize current role rewards before opening the pending action.
+        sync_cowboy_rewards(position, &mut ctx.accounts.reward_state)?;
+        sync_bull_rewards(
+            position,
+            &mut ctx.accounts.bull_accumulator,
+            &mut ctx.accounts.reward_state,
+        )?;
+
+        let action_nonce = position.next_action_nonce;
+        let clock = Clock::get()?;
+        let protocol_epoch = ctx.accounts.reward_state.current_epoch;
+
+        let commitment = derive_commitment(
+            position.key(),
+            ActionType::Unstake,
+            action_nonce,
+            protocol_epoch,
+        );
+
+        position.pending_action_active = true;
+        position.pending_action_type = ActionType::Unstake;
+        position.pending_action_nonce = action_nonce;
+        position.next_action_nonce = math::checked_add_u64(action_nonce, 1)?;
+
+        let pending_randomness = &mut ctx.accounts.pending_randomness;
+        pending_randomness.version = ACCOUNT_VERSION_PENDING_RANDOMNESS;
+        pending_randomness.position = position.key();
+        pending_randomness.action_type = ActionType::Unstake;
+        pending_randomness.action_nonce = action_nonce;
+        pending_randomness.provider_program = Pubkey::default();
+        pending_randomness.provider_randomness_account = Pubkey::default();
+        pending_randomness.commitment = commitment;
+        pending_randomness.committed_slot = clock.slot;
+        pending_randomness.committed_protocol_epoch = protocol_epoch;
+        pending_randomness.timeout_timestamp = now
+            .checked_add(RANDOMNESS_TIMEOUT_SECONDS)
+            .ok_or(RodeoError::ArithmeticOverflow)?;
+        pending_randomness.registry_root_snapshot = [0u8; 32];
+        pending_randomness.registry_version_snapshot = 0;
+        pending_randomness.config_version_snapshot =
+            ctx.accounts.global_config.current_config_version;
+        pending_randomness.settled = false;
+        pending_randomness.bump = ctx.bumps.pending_randomness;
+
+        emit!(UnstakeRequested {
+            position: position.key(),
+            owner,
+            action_nonce,
+            requested_at: now,
+            config_version: pending_randomness.config_version_snapshot,
+        });
+        emit!(RandomnessRequested {
+            position: position.key(),
+            action_type: ActionType::Unstake,
+            action_nonce,
+            committed_slot: clock.slot,
+            committed_protocol_epoch: protocol_epoch,
+            timeout_timestamp: pending_randomness.timeout_timestamp,
+            provider_program: Pubkey::default(),
+            provider_randomness_account: Pubkey::default(),
+            vrf_key: None,
+            callback_id: None,
+            registry_root_snapshot: [0u8; 32],
+            registry_version_snapshot: 0,
+            config_version_snapshot: pending_randomness.config_version_snapshot,
+            commitment,
+        });
+
+        Ok(())
+    }
+
+    pub fn settle_unstake(mut ctx: Context<SettleUnstake>) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
+
+        let position = &ctx.accounts.position;
+        let pending_randomness = &ctx.accounts.pending_randomness;
+
+        require!(
+            position.pending_action_active,
+            RodeoError::PendingActionConflict
+        );
+        require!(
+            position.pending_action_type == ActionType::Unstake,
+            RodeoError::WrongActionType
+        );
+        require!(
+            position.status == PositionStatus::Active,
+            RodeoError::InvalidRole
+        );
+        require!(
+            pending_randomness.position == position.key(),
+            RodeoError::InvalidPendingRandomness
+        );
+        require!(
+            pending_randomness.action_type == ActionType::Unstake,
+            RodeoError::WrongActionType
+        );
+        require!(
+            pending_randomness.action_nonce == position.pending_action_nonce,
+            RodeoError::InvalidPendingRandomness
+        );
+        require!(
+            !pending_randomness.settled,
+            RodeoError::RandomnessAlreadyAvailable
+        );
+
+        #[cfg(feature = "mock-randomness")]
+        return settle_unstake_mock(&mut ctx);
+
+        #[cfg(not(feature = "mock-randomness"))]
+        {
+            // Production builds require a verified randomness proof. The Switchboard
+            // adapter is intentionally not implemented in Phase 2C2B.
+            err!(RodeoError::RandomnessNotReady)
+        }
+    }
+
+    pub fn recover_unstake_timeout(ctx: Context<RecoverUnstakeTimeout>) -> Result<()> {
+        let position = &ctx.accounts.position;
+        let pending_randomness = &ctx.accounts.pending_randomness;
+        let now = Clock::get()?.unix_timestamp;
+
+        require!(
+            position.status == PositionStatus::Active,
+            RodeoError::InvalidRole
+        );
+        require!(
+            position.pending_action_active,
+            RodeoError::PendingActionConflict
+        );
+        require!(
+            position.pending_action_type == ActionType::Unstake,
+            RodeoError::WrongActionType
+        );
+        require!(
+            pending_randomness.position == position.key(),
+            RodeoError::InvalidPendingRandomness
+        );
+        require!(
+            pending_randomness.action_type == ActionType::Unstake,
+            RodeoError::WrongActionType
+        );
+        require!(
+            pending_randomness.action_nonce == position.pending_action_nonce,
+            RodeoError::InvalidPendingRandomness
+        );
+        require!(
+            !pending_randomness.settled,
+            RodeoError::RandomnessAlreadyAvailable
+        );
+        require!(
+            now >= pending_randomness.timeout_timestamp,
+            RodeoError::RandomnessTimeoutNotReached
+        );
+
+        let position = &mut ctx.accounts.position;
+        position.pending_action_active = false;
+        position.pending_action_type = ActionType::Reveal;
+        position.pending_action_nonce = 0;
+
+        emit!(RandomnessTimeoutRecovered {
+            position: position.key(),
+            action_type: ActionType::Unstake,
+            action_nonce: pending_randomness.action_nonce,
+            recovery_action: TimeoutRecoveryAction::CancelUnstake,
+        });
+
+        Ok(())
+    }
+
     /// Test-only fixture to set pause flags for localnet/CI coverage. It is
     /// compiled only when the `test-fixtures` feature is enabled and is never
     /// part of the production ABI.
@@ -907,6 +1099,7 @@ pub mod rodeo_core {
         position.buck_power = buck_power;
         position.status = PositionStatus::Active;
         position.pending_action_active = false;
+        position.unstake_eligible_at = 0;
         position.claimable_ansem_atomic = claimable;
         position.last_cowboy_reward_index = ctx.accounts.reward_state.cowboy_reward_index;
         position.cowboy_accrual_remainder_scaled = 0;
@@ -946,6 +1139,12 @@ pub mod rodeo_core {
             2_023_875, 1_124_375, 584_675, 359_800, 224_875, 134_925, 44_975, 2_500,
         ];
         config.bull_tier_weights = [3_300_000, 1_375_000, 550_000, 275_000];
+
+        // Make V2 materially different for unstake settlement in both
+        // dimensions: principal split (20/80) and theft probability (50/50).
+        config.unstake_tax_bps = 2_000;
+        config.unstake_return_bps = 8_000;
+        config.unstake_theft_weights = [5_000_000, 5_000_000];
 
         probability::validate_protocol_config(&config)?;
         ctx.accounts.protocol_config.set_inner(config);
@@ -1558,6 +1757,230 @@ pub struct ClaimPosition<'info> {
     pub clock: Sysvar<'info, Clock>,
 }
 
+#[derive(Accounts)]
+pub struct RequestUnstake<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        seeds = [
+            SEED_PROTOCOL_CONFIG,
+            global_config.key().as_ref(),
+            &global_config.current_config_version.to_le_bytes(),
+        ],
+        bump = protocol_config.bump,
+        constraint = protocol_config.config_version == global_config.current_config_version @ RodeoError::InvalidProbabilityTable,
+    )]
+    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
+        bump = position.bump,
+        constraint = position.status == PositionStatus::Active @ RodeoError::InvalidRole,
+        constraint = !position.pending_action_active @ RodeoError::PendingActionConflict,
+        constraint = position.owner == owner.key() @ RodeoError::InvalidOwner,
+    )]
+    pub position: Box<Account<'info, Position>>,
+
+    #[account(
+        init,
+        payer = owner,
+        space = 8 + PendingRandomness::INIT_SPACE,
+        seeds = [
+            SEED_RANDOMNESS,
+            position.key().as_ref(),
+            &[ActionType::Unstake as u8],
+            &position.next_action_nonce.to_le_bytes(),
+        ],
+        bump
+    )]
+    pub pending_randomness: Box<Account<'info, PendingRandomness>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Box<Account<'info, RewardState>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
+        bump = bull_accumulator.bump,
+    )]
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
+
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+    pub clock: Sysvar<'info, Clock>,
+}
+
+#[derive(Accounts)]
+pub struct SettleUnstake<'info> {
+    #[account(mut)]
+    pub settler: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
+        bump = global_game_state.bump,
+    )]
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Box<Account<'info, RewardState>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
+        bump = bull_accumulator.bump,
+    )]
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
+
+    #[account(
+        mut,
+        close = owner,
+        seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
+        bump = position.bump,
+        constraint = position.status == PositionStatus::Active @ RodeoError::InvalidRole,
+        constraint = position.pending_action_active @ RodeoError::PendingActionConflict,
+        constraint = position.pending_action_type == ActionType::Unstake @ RodeoError::WrongActionType,
+    )]
+    pub position: Box<Account<'info, Position>>,
+
+    #[account(
+        mut,
+        close = owner,
+        seeds = [
+            SEED_RANDOMNESS,
+            position.key().as_ref(),
+            &[ActionType::Unstake as u8],
+            &position.pending_action_nonce.to_le_bytes(),
+        ],
+        bump = pending_randomness.bump,
+        constraint = pending_randomness.position == position.key() @ RodeoError::InvalidPendingRandomness,
+        constraint = pending_randomness.action_type == ActionType::Unstake @ RodeoError::WrongActionType,
+        constraint = pending_randomness.action_nonce == position.pending_action_nonce @ RodeoError::InvalidPendingRandomness,
+    )]
+    pub pending_randomness: Box<Account<'info, PendingRandomness>>,
+
+    #[account(
+        seeds = [
+            SEED_PROTOCOL_CONFIG,
+            global_config.key().as_ref(),
+            &pending_randomness.config_version_snapshot.to_le_bytes(),
+        ],
+        bump = protocol_config.bump,
+        constraint = protocol_config.config_version == pending_randomness.config_version_snapshot @ RodeoError::InvalidProbabilityTable,
+    )]
+    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_PRINCIPAL_VAULT],
+        bump = global_config.principal_vault_bump,
+        constraint = principal_vault.mint == global_config.rodeo_mint @ RodeoError::InvalidPrincipalVault,
+        constraint = principal_vault.owner == global_config.key() @ RodeoError::InvalidPrincipalVault,
+    )]
+    pub principal_vault: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = rodeo_mint.key() == global_config.rodeo_mint @ RodeoError::InvalidMint,
+    )]
+    pub rodeo_mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        constraint = owner_rodeo_account.mint == global_config.rodeo_mint @ RodeoError::InvalidRodeoDestination,
+        constraint = owner_rodeo_account.owner == position.owner @ RodeoError::InvalidRodeoDestination,
+    )]
+    pub owner_rodeo_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = reward_vault.key() == global_config.reward_vault @ RodeoError::InvalidRewardVault,
+        constraint = reward_vault.mint == global_config.ansem_mint @ RodeoError::InvalidAnsemMint,
+    )]
+    pub reward_vault: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = owner_ansem_account.mint == global_config.ansem_mint @ RodeoError::InvalidRewardDestination,
+        constraint = owner_ansem_account.owner == position.owner @ RodeoError::InvalidRewardDestination,
+    )]
+    pub owner_ansem_account: Account<'info, TokenAccount>,
+
+    /// CHECK: Account receives reclaimed rent and is validated against the position owner.
+    #[account(mut, constraint = owner.key() == position.owner @ RodeoError::InvalidOwner)]
+    pub owner: AccountInfo<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub clock: Sysvar<'info, Clock>,
+}
+
+#[derive(Accounts)]
+pub struct RecoverUnstakeTimeout<'info> {
+    #[account(mut)]
+    pub caller: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
+        bump = position.bump,
+        constraint = position.status == PositionStatus::Active @ RodeoError::InvalidRole,
+        constraint = position.pending_action_active @ RodeoError::PendingActionConflict,
+        constraint = position.pending_action_type == ActionType::Unstake @ RodeoError::WrongActionType,
+    )]
+    pub position: Box<Account<'info, Position>>,
+
+    #[account(
+        mut,
+        close = owner,
+        seeds = [
+            SEED_RANDOMNESS,
+            position.key().as_ref(),
+            &[ActionType::Unstake as u8],
+            &position.pending_action_nonce.to_le_bytes(),
+        ],
+        bump = pending_randomness.bump,
+        constraint = pending_randomness.position == position.key() @ RodeoError::InvalidPendingRandomness,
+        constraint = pending_randomness.action_type == ActionType::Unstake @ RodeoError::WrongActionType,
+        constraint = pending_randomness.action_nonce == position.pending_action_nonce @ RodeoError::InvalidPendingRandomness,
+    )]
+    pub pending_randomness: Box<Account<'info, PendingRandomness>>,
+
+    /// CHECK: Account receives reclaimed rent and is validated against the position owner.
+    #[account(mut, constraint = owner.key() == position.owner @ RodeoError::InvalidOwner)]
+    pub owner: AccountInfo<'info>,
+
+    pub system_program: Program<'info, System>,
+    pub clock: Sysvar<'info, Clock>,
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -1651,6 +2074,37 @@ pub struct RandomnessTimeoutRecovered {
     pub action_type: ActionType,
     pub action_nonce: u64,
     pub recovery_action: TimeoutRecoveryAction,
+}
+
+#[event]
+pub struct UnstakeRequested {
+    pub position: Pubkey,
+    pub owner: Pubkey,
+    pub action_nonce: u64,
+    pub requested_at: i64,
+    pub config_version: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AnsemUnstakeFate {
+    ToOwner,
+    ToBullPool,
+    Immune,
+}
+
+#[event]
+pub struct PositionUnstaked {
+    pub position: Pubkey,
+    pub owner: Pubkey,
+    pub principal_amount: u64,
+    pub principal_returned: u64,
+    pub principal_burned: u64,
+    pub ansem_fate: AnsemUnstakeFate,
+    pub synchronized_ansem: u64,
+    pub ansem_paid_to_owner: u64,
+    pub ansem_routed_to_bull_pool: u64,
+    pub settlement_nonce: u64,
+    pub config_version: u64,
 }
 
 #[event]
@@ -1856,6 +2310,14 @@ pub enum RodeoError {
     InvalidRewardIndex,
     #[msg("Position role is invalid for this operation")]
     InvalidRole,
+    #[msg("Position is not yet eligible for unstake")]
+    UnstakeNotEligible,
+    #[msg("No unstake action is pending for this position")]
+    NoPendingUnstakeAction,
+    #[msg("Unstake has already been settled")]
+    UnstakeAlreadySettled,
+    #[msg("RODEO destination account is invalid")]
+    InvalidRodeoDestination,
 }
 
 // ---------------------------------------------------------------------------
@@ -2224,6 +2686,314 @@ fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
         }
     }
 
+    emit!(RandomnessSettled {
+        position: position_key,
+        action_type,
+        action_nonce,
+        settlement_nonce,
+    });
+
+    Ok(())
+}
+
+#[cfg(feature = "mock-randomness")]
+fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
+    use crate::probability;
+
+    let config: &ProtocolConfig = &**ctx.accounts.protocol_config;
+
+    let position_key = ctx.accounts.position.key();
+    let action_type = ctx.accounts.pending_randomness.action_type;
+    let action_nonce = ctx.accounts.pending_randomness.action_nonce;
+    let protocol_epoch = ctx.accounts.pending_randomness.committed_protocol_epoch;
+
+    // Deterministic random bytes that are domain-separated and bound to the
+    // position, action type, action nonce, and protocol epoch.
+    let random_output = derive_commitment(position_key, action_type, action_nonce, protocol_epoch);
+
+    let position = &mut ctx.accounts.position;
+    let pending_randomness = &mut ctx.accounts.pending_randomness;
+
+    // Final reward synchronization before disposition.
+    sync_cowboy_rewards(position, &mut ctx.accounts.reward_state)?;
+    sync_bull_rewards(
+        position,
+        &mut ctx.accounts.bull_accumulator,
+        &mut ctx.accounts.reward_state,
+    )?;
+
+    let claimable = position.claimable_ansem_atomic;
+    let principal = position.principal_amount;
+
+    // RODEO principal settlement using the historical ProtocolConfig.
+    let returned = math::floor_bps(principal, config.unstake_return_bps)?;
+    let burned = math::checked_sub_u64(principal, returned)?;
+
+    if burned > 0 {
+        let seeds: &[&[u8]] = &[SEED_GLOBAL_CONFIG, &[ctx.accounts.global_config.bump]];
+        let signer: &[&[&[u8]]] = &[seeds];
+        let cpi = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Burn {
+                mint: ctx.accounts.rodeo_mint.to_account_info(),
+                from: ctx.accounts.principal_vault.to_account_info(),
+                authority: ctx.accounts.global_config.to_account_info(),
+            },
+            signer,
+        );
+        anchor_spl::token::burn(cpi, burned)?;
+    }
+
+    if returned > 0 {
+        let seeds: &[&[u8]] = &[SEED_GLOBAL_CONFIG, &[ctx.accounts.global_config.bump]];
+        let signer: &[&[&[u8]]] = &[seeds];
+        let transfer_ctx = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.principal_vault.to_account_info(),
+                to: ctx.accounts.owner_rodeo_account.to_account_info(),
+                authority: ctx.accounts.global_config.to_account_info(),
+            },
+            signer,
+        );
+        anchor_spl::token::transfer(transfer_ctx, returned)?;
+    }
+
+    let reward_state = &mut ctx.accounts.reward_state;
+    let game_state = &mut ctx.accounts.global_game_state;
+    let bull_accumulator = &mut ctx.accounts.bull_accumulator;
+
+    let owner = position.owner;
+    let settlement_nonce = math::checked_add_u64(position.settlement_nonce, 1)?;
+    position.settlement_nonce = settlement_nonce;
+
+    let ansem_fate = match position.role {
+        Role::Cowboy => {
+            let stolen = if position.cowboy_kind == CowboyKind::Desperado {
+                false
+            } else {
+                probability::map_unstake_theft_flag(
+                    probability::RandomnessSampleContext {
+                        random_output,
+                        domain: probability::RandomnessDomain::UnstakeTheft,
+                        position: position_key,
+                        action_nonce,
+                    },
+                    config,
+                )?
+            };
+
+            if stolen {
+                distribute_bull_pool_contribution(
+                    BullPoolSource::UnstakeTheft,
+                    claimable,
+                    reward_state,
+                    bull_accumulator,
+                    &**game_state,
+                )?;
+
+                require_gte!(
+                    reward_state.position_claimable_liability_atomic,
+                    claimable,
+                    RodeoError::LiabilityUnderflow
+                );
+                reward_state.position_claimable_liability_atomic = math::checked_sub_u64(
+                    reward_state.position_claimable_liability_atomic,
+                    claimable,
+                )?;
+
+                AnsemUnstakeFate::ToBullPool
+            } else {
+                if claimable > 0 {
+                    require_gte!(
+                        reward_state.position_claimable_liability_atomic,
+                        claimable,
+                        RodeoError::LiabilityUnderflow
+                    );
+                    require_gte!(
+                        reward_state.recognized_reward_balance_atomic,
+                        claimable,
+                        RodeoError::InsufficientRecognizedRewards
+                    );
+                    require_gte!(
+                        reward_state.total_ansem_liability_atomic,
+                        claimable,
+                        RodeoError::LiabilityUnderflow
+                    );
+
+                    transfer_ansem_from_vault(
+                        claimable,
+                        &*ctx.accounts.global_config,
+                        ctx.accounts.reward_vault.to_account_info(),
+                        ctx.accounts.owner_ansem_account.to_account_info(),
+                        ctx.accounts.token_program.to_account_info(),
+                    )?;
+
+                    reward_state.position_claimable_liability_atomic = math::checked_sub_u64(
+                        reward_state.position_claimable_liability_atomic,
+                        claimable,
+                    )?;
+                    reward_state.total_ansem_liability_atomic = math::checked_sub_u64(
+                        reward_state.total_ansem_liability_atomic,
+                        claimable,
+                    )?;
+                    reward_state.recognized_reward_balance_atomic = math::checked_sub_u64(
+                        reward_state.recognized_reward_balance_atomic,
+                        claimable,
+                    )?;
+                    reward_state.ansem_claimed_atomic =
+                        math::checked_add_u64(reward_state.ansem_claimed_atomic, claimable)?;
+
+                    emit!(RewardPaid {
+                        position: position_key,
+                        owner,
+                        amount_atomic: claimable,
+                        recognized_reward_balance_atomic: reward_state
+                            .recognized_reward_balance_atomic,
+                        reason: RewardPaidReason::UnstakeSettlement,
+                    });
+                }
+
+                if position.cowboy_kind == CowboyKind::Desperado {
+                    AnsemUnstakeFate::Immune
+                } else {
+                    AnsemUnstakeFate::ToOwner
+                }
+            }
+        }
+        Role::Bull => {
+            if claimable > 0 {
+                require_gte!(
+                    reward_state.position_claimable_liability_atomic,
+                    claimable,
+                    RodeoError::LiabilityUnderflow
+                );
+                require_gte!(
+                    reward_state.recognized_reward_balance_atomic,
+                    claimable,
+                    RodeoError::InsufficientRecognizedRewards
+                );
+                require_gte!(
+                    reward_state.total_ansem_liability_atomic,
+                    claimable,
+                    RodeoError::LiabilityUnderflow
+                );
+
+                transfer_ansem_from_vault(
+                    claimable,
+                    &*ctx.accounts.global_config,
+                    ctx.accounts.reward_vault.to_account_info(),
+                    ctx.accounts.owner_ansem_account.to_account_info(),
+                    ctx.accounts.token_program.to_account_info(),
+                )?;
+
+                reward_state.position_claimable_liability_atomic = math::checked_sub_u64(
+                    reward_state.position_claimable_liability_atomic,
+                    claimable,
+                )?;
+                reward_state.total_ansem_liability_atomic =
+                    math::checked_sub_u64(reward_state.total_ansem_liability_atomic, claimable)?;
+                reward_state.recognized_reward_balance_atomic = math::checked_sub_u64(
+                    reward_state.recognized_reward_balance_atomic,
+                    claimable,
+                )?;
+                reward_state.ansem_claimed_atomic =
+                    math::checked_add_u64(reward_state.ansem_claimed_atomic, claimable)?;
+
+                emit!(RewardPaid {
+                    position: position_key,
+                    owner,
+                    amount_atomic: claimable,
+                    recognized_reward_balance_atomic: reward_state.recognized_reward_balance_atomic,
+                    reason: RewardPaidReason::UnstakeSettlement,
+                });
+            }
+
+            require_gte!(
+                game_state.active_bull_count,
+                1,
+                RodeoError::ArithmeticUnderflow
+            );
+            game_state.active_bull_count = math::checked_sub_u64(game_state.active_bull_count, 1)?;
+            require_gte!(
+                game_state.total_active_bull_power,
+                position.buck_power as u64,
+                RodeoError::ArithmeticUnderflow
+            );
+            game_state.total_active_bull_power = math::checked_sub_u64(
+                game_state.total_active_bull_power,
+                position.buck_power as u64,
+            )?;
+
+            AnsemUnstakeFate::ToOwner
+        }
+        Role::Unassigned => {
+            return Err(error!(RodeoError::InvalidRole));
+        }
+    };
+
+    // Remove Cowboy/Desperado population weight if a Cowboy was handled above.
+    if position.role == Role::Cowboy {
+        require_gte!(
+            game_state.active_cowboy_count,
+            1,
+            RodeoError::ArithmeticUnderflow
+        );
+        game_state.active_cowboy_count = math::checked_sub_u64(game_state.active_cowboy_count, 1)?;
+        require_gte!(
+            game_state.total_active_cowboy_weight,
+            position.accrual_weight as u128,
+            RodeoError::ArithmeticUnderflow
+        );
+        game_state.total_active_cowboy_weight = math::checked_sub_u128(
+            game_state.total_active_cowboy_weight,
+            position.accrual_weight as u128,
+        )?;
+    }
+
+    // Move per-position accrual remainders to orphaned global remainders before close.
+    if position.cowboy_accrual_remainder_scaled > 0 {
+        reward_state.cowboy_orphaned_accrual_remainder_scaled = math::checked_add_u128(
+            reward_state.cowboy_orphaned_accrual_remainder_scaled,
+            position.cowboy_accrual_remainder_scaled,
+        )?;
+    }
+    if position.bull_accrual_remainder_scaled > 0 {
+        bull_accumulator.bull_orphaned_accrual_remainder_scaled = math::checked_add_u128(
+            bull_accumulator.bull_orphaned_accrual_remainder_scaled,
+            position.bull_accrual_remainder_scaled,
+        )?;
+    }
+
+    // Update principal accounting and live position count.
+    game_state.live_position_count = math::checked_sub_u64(game_state.live_position_count, 1)?;
+    game_state.accounted_principal_atomic =
+        math::checked_sub_u64(game_state.accounted_principal_atomic, principal)?;
+
+    position.claimable_ansem_atomic = 0;
+    pending_randomness.settled = true;
+
+    emit!(PositionUnstaked {
+        position: position_key,
+        owner,
+        principal_amount: principal,
+        principal_returned: returned,
+        principal_burned: burned,
+        ansem_fate,
+        synchronized_ansem: claimable,
+        ansem_paid_to_owner: if ansem_fate == AnsemUnstakeFate::ToBullPool {
+            0
+        } else {
+            claimable
+        },
+        ansem_routed_to_bull_pool: if ansem_fate == AnsemUnstakeFate::ToBullPool {
+            claimable
+        } else {
+            0
+        },
+        settlement_nonce,
+        config_version: pending_randomness.config_version_snapshot,
+    });
     emit!(RandomnessSettled {
         position: position_key,
         action_type,
@@ -2919,5 +3689,58 @@ mod tests {
             acc.reward_per_weight_scaled,
             REWARD_PER_WEIGHT_SCALE * 3 + (12 * REWARD_PER_WEIGHT_SCALE / 4)
         );
+    }
+
+    #[test]
+    fn derive_commitment_is_deterministic_and_domain_separated() {
+        let position = Pubkey::new_from_array([1u8; 32]);
+        let nonce1 = 1u64;
+        let nonce2 = 2u64;
+        let epoch1 = 0u64;
+
+        let a = derive_commitment(position, ActionType::Unstake, nonce1, epoch1);
+        let b = derive_commitment(position, ActionType::Unstake, nonce1, epoch1);
+        let c = derive_commitment(position, ActionType::Reveal, nonce1, epoch1);
+        let d = derive_commitment(position, ActionType::Unstake, nonce2, epoch1);
+
+        assert_eq!(a, b, "same inputs must produce same commitment");
+        assert_ne!(a, c, "action type changes commitment");
+        assert_ne!(a, d, "action nonce changes commitment");
+        assert_eq!(a.len(), 32, "commitment is a 32-byte SHA-256 digest");
+    }
+
+    #[test]
+    fn map_unstake_theft_flag_is_deterministic() {
+        let config = probability::protocol_config_v1(Pubkey::default(), 0);
+
+        let context = probability::RandomnessSampleContext {
+            random_output: [0u8; 32],
+            domain: probability::RandomnessDomain::UnstakeTheft,
+            position: Pubkey::default(),
+            action_nonce: 0,
+        };
+
+        let a = probability::map_unstake_theft_flag(context, &config).unwrap();
+        let b = probability::map_unstake_theft_flag(context, &config).unwrap();
+        assert_eq!(a, b, "same context must produce same theft flag");
+    }
+
+    #[test]
+    fn unstake_rodeo_split_uses_config_version() {
+        let mut v1 = probability::protocol_config_v1(Pubkey::default(), 0);
+        v1.unstake_tax_bps = 500;
+        v1.unstake_return_bps = 9_500;
+
+        let mut v2 = v1.clone();
+        v2.unstake_tax_bps = 2_000;
+        v2.unstake_return_bps = 8_000;
+
+        let principal = 100_000_000_000u64;
+        let v1_returned = math::floor_bps(principal, v1.unstake_return_bps).unwrap();
+        let v2_returned = math::floor_bps(principal, v2.unstake_return_bps).unwrap();
+
+        assert_eq!(v1_returned, 95_000_000_000);
+        assert_eq!(v2_returned, 80_000_000_000);
+        assert!(v2_returned < v1_returned, "V2 tax must return less RODEO");
     }
 }
