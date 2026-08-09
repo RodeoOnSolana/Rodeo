@@ -4045,6 +4045,26 @@ mod tests {
     }
 
     #[test]
+    fn convert_orphaned_remainders_bull_below_scale() {
+        let mut reward = dummy_reward_state();
+        reward.total_ansem_liability_atomic = 100;
+        reward.bull_pool_liability_atomic = 100;
+        let mut acc = dummy_bull_accumulator();
+        acc.bull_orphaned_accrual_remainder_scaled = REWARD_PER_WEIGHT_SCALE - 1;
+
+        convert_orphaned_remainders(&mut reward, &mut acc).unwrap();
+
+        assert_eq!(
+            acc.bull_orphaned_accrual_remainder_scaled,
+            REWARD_PER_WEIGHT_SCALE - 1
+        );
+        assert_eq!(reward.bull_pool_liability_atomic, 100);
+        assert_eq!(reward.total_ansem_liability_atomic, 100);
+        assert_eq!(reward.orphaned_reward_released_atomic, 0);
+        assert_eq!(reward.recognized_reward_balance_atomic, 0);
+    }
+
+    #[test]
     fn convert_orphaned_remainders_bull_exact_scale() {
         let mut reward = dummy_reward_state();
         reward.total_ansem_liability_atomic = 100;
