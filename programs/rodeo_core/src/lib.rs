@@ -1206,15 +1206,18 @@ pub mod rodeo_core {
         epoch_started_at: i64,
     ) -> Result<()> {
         let reward_state = &mut ctx.accounts.reward_state;
-        reward_state.cowboy_orphaned_accrual_remainder_scaled = cowboy_orphaned_accrual_remainder_scaled;
-        reward_state.cowboy_unmaterialized_liability_atomic = cowboy_unmaterialized_liability_atomic;
+        reward_state.cowboy_orphaned_accrual_remainder_scaled =
+            cowboy_orphaned_accrual_remainder_scaled;
+        reward_state.cowboy_unmaterialized_liability_atomic =
+            cowboy_unmaterialized_liability_atomic;
         reward_state.total_ansem_liability_atomic = total_ansem_liability_atomic;
         reward_state.recognized_reward_balance_atomic = recognized_reward_balance_atomic;
         reward_state.last_closed_epoch_timestamp = last_closed_epoch_timestamp;
         reward_state.epoch_started_at = epoch_started_at;
 
         let bull_accumulator = &mut ctx.accounts.bull_accumulator;
-        bull_accumulator.bull_orphaned_accrual_remainder_scaled = bull_orphaned_accrual_remainder_scaled;
+        bull_accumulator.bull_orphaned_accrual_remainder_scaled =
+            bull_orphaned_accrual_remainder_scaled;
         reward_state.bull_pool_liability_atomic = bull_pool_liability_atomic;
 
         Ok(())
@@ -2656,12 +2659,16 @@ fn convert_orphaned_remainders(
             .ok_or(RodeoError::DivisionByZero)?;
 
         reward_state.cowboy_orphaned_accrual_remainder_scaled = cowboy_remainder;
-        reward_state.cowboy_unmaterialized_liability_atomic =
-            math::checked_sub_u64(reward_state.cowboy_unmaterialized_liability_atomic, cowboy_whole_u64)?;
+        reward_state.cowboy_unmaterialized_liability_atomic = math::checked_sub_u64(
+            reward_state.cowboy_unmaterialized_liability_atomic,
+            cowboy_whole_u64,
+        )?;
         reward_state.total_ansem_liability_atomic =
             math::checked_sub_u64(reward_state.total_ansem_liability_atomic, cowboy_whole_u64)?;
-        reward_state.orphaned_reward_released_atomic =
-            math::checked_add_u64(reward_state.orphaned_reward_released_atomic, cowboy_whole_u64)?;
+        reward_state.orphaned_reward_released_atomic = math::checked_add_u64(
+            reward_state.orphaned_reward_released_atomic,
+            cowboy_whole_u64,
+        )?;
 
         emit!(OrphanedRewardReleased {
             reward_source: OrphanedRewardSource::Cowboy,
@@ -3992,7 +3999,10 @@ mod tests {
 
         convert_orphaned_remainders(&mut reward, &mut acc).unwrap();
 
-        assert_eq!(reward.cowboy_orphaned_accrual_remainder_scaled, COWBOY_REWARD_INDEX_SCALE - 1);
+        assert_eq!(
+            reward.cowboy_orphaned_accrual_remainder_scaled,
+            COWBOY_REWARD_INDEX_SCALE - 1
+        );
         assert_eq!(reward.cowboy_unmaterialized_liability_atomic, 100_000);
         assert_eq!(reward.total_ansem_liability_atomic, 100_000);
         assert_eq!(reward.orphaned_reward_released_atomic, 0);
