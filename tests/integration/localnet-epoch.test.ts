@@ -2558,6 +2558,15 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const rewardBeforeSettle = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const gameBeforeSettle =
       await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const positionBeforeSettle = await rodeoAccounts(rodeoCoreProgram).position.fetch(positionAddr);
+
+    console.log("DEBUG: preRequestClaimable", preRequestClaimable.toString());
+    console.log("DEBUG: lastCowboyIndexAtRequest", lastCowboyIndexAtRequest.toString());
+    console.log("DEBUG: requestRemainder", requestRemainder.toString());
+    console.log("DEBUG: positionBeforeSettle.claimable", positionBeforeSettle.claimableAnsemAtomic.toString());
+    console.log("DEBUG: positionBeforeSettle.lastCowboyRewardIndex", positionBeforeSettle.lastCowboyRewardIndex.toString());
+    console.log("DEBUG: positionBeforeSettle.cowboyAccrualRemainderScaled", positionBeforeSettle.cowboyAccrualRemainderScaled.toString());
+    console.log("DEBUG: rewardBeforeSettle.cowboyRewardIndex", rewardBeforeSettle.cowboyRewardIndex.toString());
 
     // Compute the expected synchronized amount from the reward state captured
     // immediately before settlement. The short-test epochs can close between the
@@ -2571,9 +2580,12 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       .div(scale);
     const expectedSynchronized = preRequestClaimable.add(postRequestAccrual);
 
+    console.log("DEBUG: expectedSynchronized", expectedSynchronized.toString());
+
     await settleUnstake(positionId, requestInfo.actionNonce);
 
     const positionUnstaked = await positionUnstakedPromise;
+    console.log("DEBUG: positionUnstaked.synchronizedAnsem", positionUnstaked.synchronizedAnsem.toString());
     const ansemAfterSettle = await getAccount(provider.connection, payerAnsemAccount);
     const rewardAfterSettle = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const gameAfterSettle =
