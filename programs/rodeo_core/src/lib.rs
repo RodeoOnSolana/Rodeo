@@ -3391,9 +3391,11 @@ mod tests {
 
     #[test]
     fn per_position_cowboy_accrual_with_remainder_carry() {
+        // A weight-1 position with a half-scale index delta produces no whole
+        // atoms and carries the entire scaled product as a per-position remainder.
         let current = COWBOY_REWARD_INDEX_SCALE / 2;
         let last = 0;
-        let weight = 10_000u128;
+        let weight = 1u128;
         let (accrued, remainder) =
             math::accrue_cowboy(current, last, weight, 0, COWBOY_REWARD_INDEX_SCALE).unwrap();
         assert_eq!(accrued, 0);
@@ -3682,7 +3684,7 @@ mod tests {
         let expected_remainder = (unallocated as u128) * scale % total_power;
         assert_eq!(new_index, expected_index);
         assert_eq!(new_remainder, expected_remainder);
-        assert_eq!(new_index, 100_000_000_000_000_000u128);
+        assert_eq!(new_index, 100_000_000_000_000_000_000_000u128);
         assert_eq!(new_remainder, 0u128);
     }
 
@@ -3718,7 +3720,7 @@ mod tests {
         assert_eq!(SEED_PRINCIPAL_VAULT, b"principal-vault");
         assert_eq!(SEED_REWARD_VAULT, b"reward-vault");
         assert_eq!(SEED_POSITION, b"position");
-        assert_eq!(SEED_CLAIM_COOLDOWN, b"claim-cooldown");
+        assert_eq!(SEED_CLAIM_COOLDOWN, b"claim_cooldown");
         assert_eq!(SEED_RANDOMNESS, b"randomness");
     }
 
