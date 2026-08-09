@@ -455,6 +455,7 @@ pub mod rodeo_core {
         let now = Clock::get()?.unix_timestamp;
 
         let reward_state = &mut ctx.accounts.reward_state;
+        let bull_accumulator = &mut ctx.accounts.bull_accumulator;
         let global_game_state = &ctx.accounts.global_game_state;
         let reward_vault = &ctx.accounts.reward_vault;
 
@@ -463,6 +464,10 @@ pub mod rodeo_core {
             ctx.accounts.global_config.reward_vault,
             RodeoError::InvalidRewardVault
         );
+
+        // Materialize any orphaned sub-atomic remainder that has reached scale
+        // before computing free ANSEM for the next epoch.
+        convert_orphaned_remainders(reward_state, bull_accumulator)?;
 
         let actual_reward_vault_balance = reward_vault.amount;
         let start_epoch = reward_state.current_epoch;
@@ -1161,6 +1166,59 @@ pub mod rodeo_core {
             ctx.accounts.protocol_config.config_version;
         Ok(())
     }
+
+    /// Test-only fixture to set the per-position scaled accrual remainders and
+    /// reward checkpoints. Used to establish deterministic boundary state for
+    /// orphaned-remainder materialization tests.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_set_position_remainders(
+        ctx: Context<TestFixtureSetPositionRemainders>,
+        position_id: u64,
+        cowboy_accrual_remainder_scaled: u128,
+        bull_accrual_remainder_scaled: u128,
+        last_cowboy_reward_index: u128,
+        last_bull_reward_per_weight: u128,
+    ) -> Result<()> {
+        let _ = position_id;
+        let position = &mut ctx.accounts.position;
+        position.cowboy_accrual_remainder_scaled = cowboy_accrual_remainder_scaled;
+        position.bull_accrual_remainder_scaled = bull_accrual_remainder_scaled;
+        position.last_cowboy_reward_index = last_cowboy_reward_index;
+        position.last_bull_reward_per_weight = last_bull_reward_per_weight;
+        Ok(())
+    }
+
+    /// Test-only fixture to set the global orphaned-remainder fields and the
+    /// liability buckets needed to exercise close_epoch conversion. Used to
+    /// establish deterministic boundary state for orphaned-remainder
+    /// materialization tests.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_set_orphaned_remainder(
+        ctx: Context<TestFixtureSetOrphanedRemainder>,
+        cowboy_orphaned_accrual_remainder_scaled: u128,
+        bull_orphaned_accrual_remainder_scaled: u128,
+        cowboy_unmaterialized_liability_atomic: u64,
+        bull_pool_liability_atomic: u64,
+        total_ansem_liability_atomic: u64,
+        recognized_reward_balance_atomic: u64,
+        last_closed_epoch_timestamp: i64,
+        epoch_started_at: i64,
+    ) -> Result<()> {
+        let reward_state = &mut ctx.accounts.reward_state;
+        reward_state.cowboy_orphaned_accrual_remainder_scaled = cowboy_orphaned_accrual_remainder_scaled;
+        reward_state.cowboy_unmaterialized_liability_atomic = cowboy_unmaterialized_liability_atomic;
+        reward_state.total_ansem_liability_atomic = total_ansem_liability_atomic;
+        reward_state.recognized_reward_balance_atomic = recognized_reward_balance_atomic;
+        reward_state.last_closed_epoch_timestamp = last_closed_epoch_timestamp;
+        reward_state.epoch_started_at = epoch_started_at;
+
+        let bull_accumulator = &mut ctx.accounts.bull_accumulator;
+        bull_accumulator.bull_orphaned_accrual_remainder_scaled = bull_orphaned_accrual_remainder_scaled;
+        reward_state.bull_pool_liability_atomic = bull_pool_liability_atomic;
+
+        Ok(())
+    }
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -1300,6 +1358,71 @@ pub struct SetCurrentConfigVersionFixture<'info> {
         bump = protocol_config.bump,
     )]
     pub protocol_config: Box<Account<'info, ProtocolConfig>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(
+    position_id: u64,
+    cowboy_accrual_remainder_scaled: u128,
+    bull_accrual_remainder_scaled: u128,
+    last_cowboy_reward_index: u128,
+    last_bull_reward_per_weight: u128
+)]
+pub struct TestFixtureSetPositionRemainders<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POSITION, global_config.key().as_ref(), &position_id.to_le_bytes()],
+        bump = position.bump,
+    )]
+    pub position: Box<Account<'info, Position>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[allow(clippy::too_many_arguments)]
+#[instruction(
+    cowboy_orphaned_accrual_remainder_scaled: u128,
+    bull_orphaned_accrual_remainder_scaled: u128,
+    cowboy_unmaterialized_liability_atomic: u64,
+    bull_pool_liability_atomic: u64,
+    total_ansem_liability_atomic: u64,
+    recognized_reward_balance_atomic: u64,
+    last_closed_epoch_timestamp: i64,
+    epoch_started_at: i64
+)]
+pub struct TestFixtureSetOrphanedRemainder<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Box<Account<'info, RewardState>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_BULL_ACCUMULATOR, global_config.key().as_ref()],
+        bump = bull_accumulator.bump,
+    )]
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
 }
 
 #[derive(Accounts)]
@@ -2175,6 +2298,20 @@ pub enum BullPoolSource {
     UnstakeTheft,
 }
 
+#[event]
+pub struct OrphanedRewardReleased {
+    pub reward_source: OrphanedRewardSource,
+    pub amount_atomic: u64,
+    pub remaining_remainder_scaled: u128,
+    pub total_ansem_liability_atomic_after: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
+pub enum OrphanedRewardSource {
+    Cowboy,
+    Bull,
+}
+
 #[allow(dead_code)]
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
 pub enum TimeoutRecoveryAction {
@@ -2492,6 +2629,82 @@ fn transfer_ansem_from_vault<'info>(
         signer,
     );
     anchor_spl::token::transfer(transfer_ctx, amount)
+}
+
+/// Materialize whole-atomic ANSEM from global orphaned-remainder fields when
+/// they reach their respective scales. Released ANSEM becomes free balance for
+/// future epochs; no token transfer occurs and recognized balance is unchanged.
+fn convert_orphaned_remainders(
+    reward_state: &mut RewardState,
+    bull_accumulator: &mut BullAccumulator,
+) -> Result<()> {
+    // Cowboy orphan materialization.
+    let cowboy_whole = reward_state
+        .cowboy_orphaned_accrual_remainder_scaled
+        .checked_div(COWBOY_REWARD_INDEX_SCALE)
+        .ok_or(RodeoError::DivisionByZero)?;
+    if cowboy_whole > 0 {
+        let cowboy_whole_u64 = math::u128_to_u64(cowboy_whole)?;
+        require_gte!(
+            reward_state.cowboy_unmaterialized_liability_atomic,
+            cowboy_whole_u64,
+            RodeoError::LiabilityUnderflow
+        );
+        let cowboy_remainder = reward_state
+            .cowboy_orphaned_accrual_remainder_scaled
+            .checked_rem(COWBOY_REWARD_INDEX_SCALE)
+            .ok_or(RodeoError::DivisionByZero)?;
+
+        reward_state.cowboy_orphaned_accrual_remainder_scaled = cowboy_remainder;
+        reward_state.cowboy_unmaterialized_liability_atomic =
+            math::checked_sub_u64(reward_state.cowboy_unmaterialized_liability_atomic, cowboy_whole_u64)?;
+        reward_state.total_ansem_liability_atomic =
+            math::checked_sub_u64(reward_state.total_ansem_liability_atomic, cowboy_whole_u64)?;
+        reward_state.orphaned_reward_released_atomic =
+            math::checked_add_u64(reward_state.orphaned_reward_released_atomic, cowboy_whole_u64)?;
+
+        emit!(OrphanedRewardReleased {
+            reward_source: OrphanedRewardSource::Cowboy,
+            amount_atomic: cowboy_whole_u64,
+            remaining_remainder_scaled: cowboy_remainder,
+            total_ansem_liability_atomic_after: reward_state.total_ansem_liability_atomic,
+        });
+    }
+
+    // Bull orphan materialization.
+    let bull_whole = bull_accumulator
+        .bull_orphaned_accrual_remainder_scaled
+        .checked_div(REWARD_PER_WEIGHT_SCALE)
+        .ok_or(RodeoError::DivisionByZero)?;
+    if bull_whole > 0 {
+        let bull_whole_u64 = math::u128_to_u64(bull_whole)?;
+        require_gte!(
+            reward_state.bull_pool_liability_atomic,
+            bull_whole_u64,
+            RodeoError::LiabilityUnderflow
+        );
+        let bull_remainder = bull_accumulator
+            .bull_orphaned_accrual_remainder_scaled
+            .checked_rem(REWARD_PER_WEIGHT_SCALE)
+            .ok_or(RodeoError::DivisionByZero)?;
+
+        bull_accumulator.bull_orphaned_accrual_remainder_scaled = bull_remainder;
+        reward_state.bull_pool_liability_atomic =
+            math::checked_sub_u64(reward_state.bull_pool_liability_atomic, bull_whole_u64)?;
+        reward_state.total_ansem_liability_atomic =
+            math::checked_sub_u64(reward_state.total_ansem_liability_atomic, bull_whole_u64)?;
+        reward_state.orphaned_reward_released_atomic =
+            math::checked_add_u64(reward_state.orphaned_reward_released_atomic, bull_whole_u64)?;
+
+        emit!(OrphanedRewardReleased {
+            reward_source: OrphanedRewardSource::Bull,
+            amount_atomic: bull_whole_u64,
+            remaining_remainder_scaled: bull_remainder,
+            total_ansem_liability_atomic_after: reward_state.total_ansem_liability_atomic,
+        });
+    }
+
+    Ok(())
 }
 
 #[cfg(feature = "mock-randomness")]
@@ -2965,6 +3178,10 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
         )?;
     }
 
+    // Materialize any orphaned sub-atomic remainder that has reached scale
+    // after the exiting position's carry has been added.
+    convert_orphaned_remainders(reward_state, bull_accumulator)?;
+
     // Update principal accounting and live position count.
     game_state.live_position_count = math::checked_sub_u64(game_state.live_position_count, 1)?;
     game_state.accounted_principal_atomic =
@@ -3072,7 +3289,7 @@ mod tests {
         assert_eq!(Position::INIT_SPACE, 239);
         assert_eq!(WalletClaimCooldown::INIT_SPACE, 74);
         assert_eq!(PendingRandomness::INIT_SPACE, 212);
-        assert_eq!(ProtocolConfig::INIT_SPACE, 322);
+        assert_eq!(ProtocolConfig::INIT_SPACE, 350);
     }
 
     #[test]
@@ -3545,6 +3762,27 @@ mod tests {
                 u64,
                 u64,
             ) -> Result<()>;
+        let _ = test_fixture_set_position_remainders
+            as fn(
+                Context<TestFixtureSetPositionRemainders>,
+                u64,
+                u128,
+                u128,
+                u128,
+                u128,
+            ) -> Result<()>;
+        let _ = test_fixture_set_orphaned_remainder
+            as fn(
+                Context<TestFixtureSetOrphanedRemainder>,
+                u128,
+                u128,
+                u64,
+                u64,
+                u64,
+                u64,
+                i64,
+                i64,
+            ) -> Result<()>;
     }
 
     fn dummy_position() -> state::Position {
@@ -3742,5 +3980,124 @@ mod tests {
         assert_eq!(v1_returned, 95_000_000_000);
         assert_eq!(v2_returned, 80_000_000_000);
         assert!(v2_returned < v1_returned, "V2 tax must return less RODEO");
+    }
+
+    #[test]
+    fn convert_orphaned_remainders_cowboy_below_scale() {
+        let mut reward = dummy_reward_state();
+        reward.total_ansem_liability_atomic = 100_000;
+        reward.cowboy_unmaterialized_liability_atomic = 100_000;
+        let mut acc = dummy_bull_accumulator();
+        reward.cowboy_orphaned_accrual_remainder_scaled = COWBOY_REWARD_INDEX_SCALE - 1;
+
+        convert_orphaned_remainders(&mut reward, &mut acc).unwrap();
+
+        assert_eq!(reward.cowboy_orphaned_accrual_remainder_scaled, COWBOY_REWARD_INDEX_SCALE - 1);
+        assert_eq!(reward.cowboy_unmaterialized_liability_atomic, 100_000);
+        assert_eq!(reward.total_ansem_liability_atomic, 100_000);
+        assert_eq!(reward.orphaned_reward_released_atomic, 0);
+        assert_eq!(reward.recognized_reward_balance_atomic, 0);
+    }
+
+    #[test]
+    fn convert_orphaned_remainders_cowboy_exact_scale() {
+        let mut reward = dummy_reward_state();
+        reward.total_ansem_liability_atomic = 100_000;
+        reward.cowboy_unmaterialized_liability_atomic = 100_000;
+        let mut acc = dummy_bull_accumulator();
+        reward.cowboy_orphaned_accrual_remainder_scaled = COWBOY_REWARD_INDEX_SCALE;
+
+        convert_orphaned_remainders(&mut reward, &mut acc).unwrap();
+
+        assert_eq!(reward.cowboy_orphaned_accrual_remainder_scaled, 0);
+        assert_eq!(reward.cowboy_unmaterialized_liability_atomic, 100_000 - 1);
+        assert_eq!(reward.total_ansem_liability_atomic, 100_000 - 1);
+        assert_eq!(reward.orphaned_reward_released_atomic, 1);
+        assert_eq!(reward.recognized_reward_balance_atomic, 0);
+    }
+
+    #[test]
+    fn convert_orphaned_remainders_cowboy_multiple_and_remainder() {
+        let mut reward = dummy_reward_state();
+        reward.total_ansem_liability_atomic = 100_000;
+        reward.cowboy_unmaterialized_liability_atomic = 100_000;
+        let mut acc = dummy_bull_accumulator();
+        reward.cowboy_orphaned_accrual_remainder_scaled = 2 * COWBOY_REWARD_INDEX_SCALE + 500;
+
+        convert_orphaned_remainders(&mut reward, &mut acc).unwrap();
+
+        assert_eq!(reward.cowboy_orphaned_accrual_remainder_scaled, 500);
+        assert_eq!(reward.cowboy_unmaterialized_liability_atomic, 100_000 - 2);
+        assert_eq!(reward.total_ansem_liability_atomic, 100_000 - 2);
+        assert_eq!(reward.orphaned_reward_released_atomic, 2);
+    }
+
+    #[test]
+    fn convert_orphaned_remainders_bull_exact_scale() {
+        let mut reward = dummy_reward_state();
+        reward.total_ansem_liability_atomic = 100;
+        reward.bull_pool_liability_atomic = 100;
+        let mut acc = dummy_bull_accumulator();
+        acc.bull_orphaned_accrual_remainder_scaled = REWARD_PER_WEIGHT_SCALE;
+
+        convert_orphaned_remainders(&mut reward, &mut acc).unwrap();
+
+        assert_eq!(acc.bull_orphaned_accrual_remainder_scaled, 0);
+        assert_eq!(reward.bull_pool_liability_atomic, 99);
+        assert_eq!(reward.total_ansem_liability_atomic, 99);
+        assert_eq!(reward.orphaned_reward_released_atomic, 1);
+        assert_eq!(reward.recognized_reward_balance_atomic, 0);
+    }
+
+    #[test]
+    fn convert_orphaned_remainders_bull_multiple_and_remainder() {
+        let mut reward = dummy_reward_state();
+        reward.total_ansem_liability_atomic = 100;
+        reward.bull_pool_liability_atomic = 100;
+        let mut acc = dummy_bull_accumulator();
+        acc.bull_orphaned_accrual_remainder_scaled = 3 * REWARD_PER_WEIGHT_SCALE + 700;
+
+        convert_orphaned_remainders(&mut reward, &mut acc).unwrap();
+
+        assert_eq!(acc.bull_orphaned_accrual_remainder_scaled, 700);
+        assert_eq!(reward.bull_pool_liability_atomic, 97);
+        assert_eq!(reward.total_ansem_liability_atomic, 97);
+        assert_eq!(reward.orphaned_reward_released_atomic, 3);
+    }
+
+    #[test]
+    fn convert_orphaned_remainders_underflow_protection() {
+        let mut reward = dummy_reward_state();
+        reward.total_ansem_liability_atomic = 0;
+        reward.cowboy_unmaterialized_liability_atomic = 0;
+        let mut acc = dummy_bull_accumulator();
+        reward.cowboy_orphaned_accrual_remainder_scaled = COWBOY_REWARD_INDEX_SCALE;
+
+        assert!(convert_orphaned_remainders(&mut reward, &mut acc).is_err());
+    }
+
+    #[test]
+    fn convert_orphaned_remainders_overflow_protection() {
+        let mut reward = dummy_reward_state();
+        reward.orphaned_reward_released_atomic = u64::MAX;
+        reward.total_ansem_liability_atomic = 1;
+        reward.cowboy_unmaterialized_liability_atomic = 1;
+        let mut acc = dummy_bull_accumulator();
+        reward.cowboy_orphaned_accrual_remainder_scaled = COWBOY_REWARD_INDEX_SCALE;
+
+        assert!(convert_orphaned_remainders(&mut reward, &mut acc).is_err());
+    }
+
+    #[test]
+    fn convert_orphaned_remainders_zero_is_noop() {
+        let mut reward = dummy_reward_state();
+        let before_total = reward.total_ansem_liability_atomic;
+        let before_released = reward.orphaned_reward_released_atomic;
+        let mut acc = dummy_bull_accumulator();
+
+        convert_orphaned_remainders(&mut reward, &mut acc).unwrap();
+
+        assert_eq!(reward.total_ansem_liability_atomic, before_total);
+        assert_eq!(reward.orphaned_reward_released_atomic, before_released);
     }
 }

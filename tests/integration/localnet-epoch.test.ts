@@ -619,6 +619,19 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       ["CowboyClaimTax", "DesperadoClaimTax", "UnstakeTheft"].sort(),
     );
 
+    expect(eventNames).toContain("OrphanedRewardReleased");
+    expect(fieldNames(findType("OrphanedRewardReleased")!).sort()).toEqual(
+      [
+        "reward_source",
+        "amount_atomic",
+        "remaining_remainder_scaled",
+        "total_ansem_liability_atomic_after",
+      ].sort(),
+    );
+    const orphanedRewardSource = findType("OrphanedRewardSource");
+    expect(orphanedRewardSource).toBeDefined();
+    expect(enumVariants(orphanedRewardSource!).sort()).toEqual(["Cowboy", "Bull"].sort());
+
     expect(eventNames).toContain("UnstakeRequested");
     expect(eventNames).toContain("PositionUnstaked");
     expect(fieldNames(findType("PositionUnstaked")!).sort()).toEqual(
@@ -1604,6 +1617,42 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     await provider.sendAndConfirm(tx, [payer]);
   }
 
+  async function fixtureSetOrphanedRemainder(args: {
+    cowboyOrphanedAccrualRemainderScaled: BN;
+    bullOrphanedAccrualRemainderScaled: BN;
+    cowboyUnmaterializedLiabilityAtomic: BN;
+    bullPoolLiabilityAtomic: BN;
+    totalAnsemLiabilityAtomic: BN;
+    recognizedRewardBalanceAtomic: BN;
+    lastClosedEpochTimestamp: BN;
+    epochStartedAt: BN;
+  }) {
+    const discriminator = Buffer.from("50455a376bab9446", "hex");
+    const data = Buffer.concat([
+      discriminator,
+      args.cowboyOrphanedAccrualRemainderScaled.toArrayLike(Buffer, "le", 16),
+      args.bullOrphanedAccrualRemainderScaled.toArrayLike(Buffer, "le", 16),
+      args.cowboyUnmaterializedLiabilityAtomic.toArrayLike(Buffer, "le", 8),
+      args.bullPoolLiabilityAtomic.toArrayLike(Buffer, "le", 8),
+      args.totalAnsemLiabilityAtomic.toArrayLike(Buffer, "le", 8),
+      args.recognizedRewardBalanceAtomic.toArrayLike(Buffer, "le", 8),
+      args.lastClosedEpochTimestamp.toArrayLike(Buffer, "le", 8),
+      args.epochStartedAt.toArrayLike(Buffer, "le", 8),
+    ]);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: false },
+        { pubkey: rewardState, isSigner: false, isWritable: true },
+        { pubkey: bullAccumulator, isSigner: false, isWritable: true },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
+  }
+
   async function requestUnstake(positionId: BN, owner = payer) {
     const { position } = await deriveStakeAccounts(positionId);
     const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
@@ -1881,6 +1930,82 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     expect(rewardAfter.totalAnsemLiabilityAtomic.gte(rewardBefore.totalAnsemLiabilityAtomic)).toBe(
       true,
     );
+  }, 60_000);
+
+  it("close_epochs materializes an orphan remainder before computing free ANSEM", async () => {
+    await ensureEpochsClosed();
+
+    const scale = new BN(COWBOY_REWARD_INDEX_SCALE.toString());
+    const fundAmount = new BN(1_000);
+    await fixtureRecognizeRewards(fundAmount);
+
+    const caughtUp = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    // The cowboy orphan bucket is exactly at the scale boundary. Without
+    // materialization, free ANSEM would be 900; with it, one atomic ANSEM is
+    // released from liability and free ANSEM becomes 901.
+    await fixtureSetOrphanedRemainder({
+      cowboyOrphanedAccrualRemainderScaled: scale,
+      bullOrphanedAccrualRemainderScaled: new BN(0),
+      cowboyUnmaterializedLiabilityAtomic: new BN(100),
+      bullPoolLiabilityAtomic: new BN(0),
+      totalAnsemLiabilityAtomic: new BN(100),
+      recognizedRewardBalanceAtomic: fundAmount,
+      lastClosedEpochTimestamp: caughtUp.lastClosedEpochTimestamp,
+      epochStartedAt: caughtUp.epochStartedAt,
+    });
+
+    const epochClosedPromise = collectOneEvent<{
+      epoch: BN;
+      cowboyEmission: BN;
+      suitVaultContribution: BN;
+      freeAnsem: BN;
+      totalAnsemLiabilityAtomic: BN;
+    }>("epochClosed");
+    const orphanedRewardPromise = collectOneEvent<{
+      rewardSource: { cowboy?: {}; bull?: {} };
+      amountAtomic: BN;
+      remainingRemainderScaled: BN;
+      totalAnsemLiabilityAtomicAfter: BN;
+    }>("orphanedRewardReleased");
+
+    const rewardBefore = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+
+    // Wait for one short epoch to elapse from the caught-up boundary.
+    await sleep(2_500);
+    await closeEpochs(1);
+
+    const epochClosed = await epochClosedPromise;
+    const orphanedReward = await orphanedRewardPromise;
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultAfter = await getAccount(provider.connection, rewardVault);
+
+    expect(orphanedReward.rewardSource).toHaveProperty("cowboy");
+    expect(orphanedReward.amountAtomic.toString()).toBe("1");
+    expect(orphanedReward.remainingRemainderScaled.toString()).toBe("0");
+    expect(orphanedReward.totalAnsemLiabilityAtomicAfter.toString()).toBe("99");
+
+    expect(epochClosed.freeAnsem.toString()).toBe("901");
+    expect(epochClosed.totalAnsemLiabilityAtomic.toString()).toBe("99");
+
+    expect(rewardAfter.cowboyOrphanedAccrualRemainderScaled.toString()).toBe("0");
+    expect(rewardAfter.cowboyUnmaterializedLiabilityAtomic.toString()).toBe(
+      rewardBefore.cowboyUnmaterializedLiabilityAtomic.subn(1).toString(),
+    );
+    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBefore.totalAnsemLiabilityAtomic.subn(1).toString(),
+    );
+    expect(rewardAfter.orphanedRewardReleasedAtomic.toString()).toBe(
+      rewardBefore.orphanedRewardReleasedAtomic.addn(1).toString(),
+    );
+    expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBefore.recognizedRewardBalanceAtomic.toString(),
+    );
+    expect(vaultAfter.amount.toString()).toBe(vaultBefore.amount.toString());
+
+    // Catch up again so later tests start with a current epoch boundary.
+    await ensureEpochsClosed();
   }, 60_000);
 
   it("rejects claim_position with EpochsNotClosed once an epoch elapses, then succeeds after catch-up", async () => {

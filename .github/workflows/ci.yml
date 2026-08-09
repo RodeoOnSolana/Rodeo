@@ -111,6 +111,9 @@ jobs:
       - name: Rust checks
         run: cargo check --workspace --all-targets --locked
 
+      - name: Rust unit tests
+        run: cargo test -p rodeo_core --locked
+
       - name: Upload generated Cargo lockfile
         uses: actions/upload-artifact@v4
         with:

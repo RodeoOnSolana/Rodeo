@@ -411,6 +411,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
   }, 30_000);
 
   const stakeAmountAtomic = new BN(100_000_000_000);
+  const COWBOY_REWARD_INDEX_SCALE = new BN("1000000000000000000");
   const REWARD_PER_WEIGHT_SCALE = new BN("1000000000000000000");
   let nextPositionId = 1;
 
@@ -616,6 +617,74 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         { pubkey: rewardState, isSigner: false, isWritable: true },
         { pubkey: bullAccumulator, isSigner: false, isWritable: true },
         { pubkey: position, isSigner: false, isWritable: true },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
+  }
+
+  async function fixtureSetPositionRemainders(
+    positionId: BN,
+    args: {
+      cowboyAccrualRemainderScaled: BN;
+      bullAccrualRemainderScaled: BN;
+      lastCowboyRewardIndex: BN;
+      lastBullRewardPerWeight: BN;
+    },
+  ) {
+    const discriminator = Buffer.from("8e56c00bcb6afbbc", "hex");
+    const data = Buffer.concat([
+      discriminator,
+      positionId.toArrayLike(Buffer, "le", 8),
+      args.cowboyAccrualRemainderScaled.toArrayLike(Buffer, "le", 16),
+      args.bullAccrualRemainderScaled.toArrayLike(Buffer, "le", 16),
+      args.lastCowboyRewardIndex.toArrayLike(Buffer, "le", 16),
+      args.lastBullRewardPerWeight.toArrayLike(Buffer, "le", 16),
+    ]);
+    const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: false },
+        { pubkey: position, isSigner: false, isWritable: true },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
+  }
+
+  async function fixtureSetOrphanedRemainder(args: {
+    cowboyOrphanedAccrualRemainderScaled: BN;
+    bullOrphanedAccrualRemainderScaled: BN;
+    cowboyUnmaterializedLiabilityAtomic: BN;
+    bullPoolLiabilityAtomic: BN;
+    totalAnsemLiabilityAtomic: BN;
+    recognizedRewardBalanceAtomic: BN;
+    lastClosedEpochTimestamp: BN;
+    epochStartedAt: BN;
+  }) {
+    const discriminator = Buffer.from("50455a376bab9446", "hex");
+    const data = Buffer.concat([
+      discriminator,
+      args.cowboyOrphanedAccrualRemainderScaled.toArrayLike(Buffer, "le", 16),
+      args.bullOrphanedAccrualRemainderScaled.toArrayLike(Buffer, "le", 16),
+      args.cowboyUnmaterializedLiabilityAtomic.toArrayLike(Buffer, "le", 8),
+      args.bullPoolLiabilityAtomic.toArrayLike(Buffer, "le", 8),
+      args.totalAnsemLiabilityAtomic.toArrayLike(Buffer, "le", 8),
+      args.recognizedRewardBalanceAtomic.toArrayLike(Buffer, "le", 8),
+      args.lastClosedEpochTimestamp.toArrayLike(Buffer, "le", 8),
+      args.epochStartedAt.toArrayLike(Buffer, "le", 8),
+    ]);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: false },
+        { pubkey: rewardState, isSigner: false, isWritable: true },
+        { pubkey: bullAccumulator, isSigner: false, isWritable: true },
       ],
       programId: rodeoCoreProgram.programId,
       data,
@@ -1532,6 +1601,141 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     );
     expect(rewardAfter.positionClaimableLiabilityAtomic.toString()).toBe(
       rewardBefore.positionClaimableLiabilityAtomic.sub(claimable).toString(),
+    );
+  }, 120_000);
+
+  it("settle_unstake materializes a Cowboy orphan remainder at the scale boundary", async () => {
+    const { positionId } = await findCowboyPosition(5);
+    await prepareUnstakeReadyPositionById(positionId, new BN(0));
+
+    const rewardBeforeFixture = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const posAccount = await rodeoAccounts(rodeoCoreProgram).position.fetch(
+      derivePosition(rodeoCoreProgram.programId, globalConfig, positionId)[0],
+    );
+
+    // Position holds a sub-atomic Cowboy remainder. The global orphan bucket is
+    // one position-remainder away from reaching the scale, so settlement should
+    // release exactly one whole atomic ANSEM.
+    const positionRemainder = new BN(150);
+    const globalOrphan = COWBOY_REWARD_INDEX_SCALE.sub(positionRemainder);
+    await fixtureSetPositionRemainders(positionId, {
+      cowboyAccrualRemainderScaled: positionRemainder,
+      bullAccrualRemainderScaled: new BN(0),
+      lastCowboyRewardIndex: posAccount.lastCowboyRewardIndex,
+      lastBullRewardPerWeight: posAccount.lastBullRewardPerWeight,
+    });
+
+    await fixtureSetOrphanedRemainder({
+      cowboyOrphanedAccrualRemainderScaled: globalOrphan,
+      bullOrphanedAccrualRemainderScaled: new BN(0),
+      cowboyUnmaterializedLiabilityAtomic: new BN(100),
+      bullPoolLiabilityAtomic: new BN(0),
+      totalAnsemLiabilityAtomic: new BN(100),
+      recognizedRewardBalanceAtomic: new BN(0),
+      lastClosedEpochTimestamp: rewardBeforeFixture.lastClosedEpochTimestamp,
+      epochStartedAt: rewardBeforeFixture.epochStartedAt,
+    });
+
+    const orphanedRewardPromise = collectOneEvent<{
+      rewardSource: { cowboy?: {}; bull?: {} };
+      amountAtomic: BN;
+      remainingRemainderScaled: BN;
+      totalAnsemLiabilityAtomicAfter: BN;
+    }>("orphanedRewardReleased");
+
+    const rewardBeforeUnstake = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultBefore = await getAccount(provider.connection, rewardVault);
+
+    const { actionNonce } = await requestUnstake(positionId);
+    await settleUnstake(positionId, actionNonce);
+
+    const orphanedReward = await orphanedRewardPromise;
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const vaultAfter = await getAccount(provider.connection, rewardVault);
+
+    expect(orphanedReward.rewardSource).toHaveProperty("cowboy");
+    expect(orphanedReward.amountAtomic.toString()).toBe("1");
+    expect(orphanedReward.remainingRemainderScaled.toString()).toBe("0");
+    expect(orphanedReward.totalAnsemLiabilityAtomicAfter.toString()).toBe("99");
+
+    expect(rewardAfter.cowboyOrphanedAccrualRemainderScaled.toString()).toBe("0");
+    expect(rewardAfter.cowboyUnmaterializedLiabilityAtomic.toString()).toBe(
+      rewardBeforeUnstake.cowboyUnmaterializedLiabilityAtomic.subn(1).toString(),
+    );
+    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBeforeUnstake.totalAnsemLiabilityAtomic.subn(1).toString(),
+    );
+    expect(rewardAfter.orphanedRewardReleasedAtomic.toString()).toBe(
+      rewardBeforeUnstake.orphanedRewardReleasedAtomic.addn(1).toString(),
+    );
+    expect(rewardAfter.recognizedRewardBalanceAtomic.toString()).toBe(
+      rewardBeforeUnstake.recognizedRewardBalanceAtomic.toString(),
+    );
+    expect(vaultAfter.amount.toString()).toBe(vaultBefore.amount.toString());
+
+    const closedPosition = await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(
+      derivePosition(rodeoCoreProgram.programId, globalConfig, positionId)[0],
+    );
+    expect(closedPosition).toBeNull();
+  }, 120_000);
+
+  it("settle_unstake materializes a Bull orphan remainder at the scale boundary", async () => {
+    const { positionId } = await findBullPosition();
+    await prepareUnstakeReadyPositionById(positionId, new BN(0));
+
+    const rewardBeforeFixture = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const posAccount = await rodeoAccounts(rodeoCoreProgram).position.fetch(
+      derivePosition(rodeoCoreProgram.programId, globalConfig, positionId)[0],
+    );
+
+    const positionRemainder = new BN(200);
+    const globalOrphan = REWARD_PER_WEIGHT_SCALE.sub(positionRemainder);
+    await fixtureSetPositionRemainders(positionId, {
+      cowboyAccrualRemainderScaled: new BN(0),
+      bullAccrualRemainderScaled: positionRemainder,
+      lastCowboyRewardIndex: posAccount.lastCowboyRewardIndex,
+      lastBullRewardPerWeight: posAccount.lastBullRewardPerWeight,
+    });
+
+    await fixtureSetOrphanedRemainder({
+      cowboyOrphanedAccrualRemainderScaled: new BN(0),
+      bullOrphanedAccrualRemainderScaled: globalOrphan,
+      cowboyUnmaterializedLiabilityAtomic: new BN(0),
+      bullPoolLiabilityAtomic: new BN(100),
+      totalAnsemLiabilityAtomic: new BN(100),
+      recognizedRewardBalanceAtomic: new BN(0),
+      lastClosedEpochTimestamp: rewardBeforeFixture.lastClosedEpochTimestamp,
+      epochStartedAt: rewardBeforeFixture.epochStartedAt,
+    });
+
+    const orphanedRewardPromise = collectOneEvent<{
+      rewardSource: { cowboy?: {}; bull?: {} };
+      amountAtomic: BN;
+      remainingRemainderScaled: BN;
+      totalAnsemLiabilityAtomicAfter: BN;
+    }>("orphanedRewardReleased");
+
+    const rewardBeforeUnstake = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    const { actionNonce } = await requestUnstake(positionId);
+    await settleUnstake(positionId, actionNonce);
+
+    const orphanedReward = await orphanedRewardPromise;
+    const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    expect(orphanedReward.rewardSource).toHaveProperty("bull");
+    expect(orphanedReward.amountAtomic.toString()).toBe("1");
+    expect(orphanedReward.remainingRemainderScaled.toString()).toBe("0");
+    expect(orphanedReward.totalAnsemLiabilityAtomicAfter.toString()).toBe("99");
+
+    expect(rewardAfter.bullPoolLiabilityAtomic.toString()).toBe(
+      rewardBeforeUnstake.bullPoolLiabilityAtomic.subn(1).toString(),
+    );
+    expect(rewardAfter.totalAnsemLiabilityAtomic.toString()).toBe(
+      rewardBeforeUnstake.totalAnsemLiabilityAtomic.subn(1).toString(),
+    );
+    expect(rewardAfter.orphanedRewardReleasedAtomic.toString()).toBe(
+      rewardBeforeUnstake.orphanedRewardReleasedAtomic.addn(1).toString(),
     );
   }, 120_000);
 
