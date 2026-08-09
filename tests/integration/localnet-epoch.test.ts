@@ -2415,14 +2415,6 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       preRequestClaimable.toString(),
     );
 
-    const scale = new BN(COWBOY_REWARD_INDEX_SCALE.toString());
-    const indexDelta = rewardAfterPending.cowboyRewardIndex.sub(lastCowboyIndexAtRequest);
-    const postRequestAccrual = indexDelta
-      .muln(10000)
-      .add(requestRemainder)
-      .div(scale);
-    const expectedSynchronized = preRequestClaimable.add(postRequestAccrual);
-
     const positionUnstakedPromise = collectOneEvent<{
       position: web3.PublicKey;
       owner: web3.PublicKey;
@@ -2441,6 +2433,18 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const rewardBeforeSettle = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const gameBeforeSettle =
       await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+
+    // Compute the expected synchronized amount from the reward state captured
+    // immediately before settlement. The short-test epochs can close between the
+    // pending-period observation and settleUnstake, so using rewardBeforeSettle
+    // makes the assertion deterministic.
+    const scale = new BN(COWBOY_REWARD_INDEX_SCALE.toString());
+    const indexDelta = rewardBeforeSettle.cowboyRewardIndex.sub(lastCowboyIndexAtRequest);
+    const postRequestAccrual = indexDelta
+      .muln(10000)
+      .add(requestRemainder)
+      .div(scale);
+    const expectedSynchronized = preRequestClaimable.add(postRequestAccrual);
 
     await settleUnstake(positionId, requestInfo.actionNonce);
 
@@ -2478,7 +2482,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     // position claimable bucket during settle-time sync, then the pre-request
     // claimable bucket is debited by the payout.
     expect(
-      rewardAfterPending.cowboyUnmaterializedLiabilityAtomic.sub(
+      rewardBeforeSettle.cowboyUnmaterializedLiabilityAtomic.sub(
         rewardAfterSettle.cowboyUnmaterializedLiabilityAtomic,
       ).toString(),
     ).toBe(postRequestAccrual.toString());
