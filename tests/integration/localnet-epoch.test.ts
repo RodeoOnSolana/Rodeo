@@ -1724,7 +1724,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         clock: web3.SYSVAR_CLOCK_PUBKEY,
       })
       .signers([settler]);
-    await runWhenEpochsClosed(() => builder.rpc());
+    await builder.rpc();
   }
 
   async function recoverUnstakeTimeout(positionId: BN, actionNonce: BN, caller = payer) {
@@ -2554,38 +2554,35 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       configVersion: BN;
     }>("positionUnstaked");
 
-    const ansemBeforeSettle = await getAccount(provider.connection, payerAnsemAccount);
-    const rewardBeforeSettle = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const gameBeforeSettle =
       await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
-    const positionBeforeSettle = await rodeoAccounts(rodeoCoreProgram).position.fetch(positionAddr);
-
-    console.log("DEBUG: preRequestClaimable", preRequestClaimable.toString());
-    console.log("DEBUG: lastCowboyIndexAtRequest", lastCowboyIndexAtRequest.toString());
-    console.log("DEBUG: requestRemainder", requestRemainder.toString());
-    console.log("DEBUG: positionBeforeSettle.claimable", positionBeforeSettle.claimableAnsemAtomic.toString());
-    console.log("DEBUG: positionBeforeSettle.lastCowboyRewardIndex", positionBeforeSettle.lastCowboyRewardIndex.toString());
-    console.log("DEBUG: positionBeforeSettle.cowboyAccrualRemainderScaled", positionBeforeSettle.cowboyAccrualRemainderScaled.toString());
-    console.log("DEBUG: rewardBeforeSettle.cowboyRewardIndex", rewardBeforeSettle.cowboyRewardIndex.toString());
 
     // Compute the expected synchronized amount from the reward state captured
-    // immediately before settlement. The short-test epochs can close between the
-    // pending-period observation and settleUnstake, so using rewardBeforeSettle
-    // makes the assertion deterministic.
+    // immediately before settlement. Because settleUnstake no longer internally
+    // catches up epochs, wrap the settlement inside runWhenEpochsClosed and
+    // re-fetch rewardBeforeSettle on each attempt so the index used for the
+    // expectation is exactly the one seen by settle_unstake.
     const scale = new BN(COWBOY_REWARD_INDEX_SCALE.toString());
-    const indexDelta = rewardBeforeSettle.cowboyRewardIndex.sub(lastCowboyIndexAtRequest);
-    const postRequestAccrual = indexDelta
-      .muln(10000)
-      .add(requestRemainder)
-      .div(scale);
-    const expectedSynchronized = preRequestClaimable.add(postRequestAccrual);
+    let ansemBeforeSettle!: Awaited<ReturnType<typeof getAccount>>;
+    let rewardBeforeSettle!: RewardStateAccount;
+    let postRequestAccrual!: BN;
+    let expectedSynchronized!: BN;
 
-    console.log("DEBUG: expectedSynchronized", expectedSynchronized.toString());
+    await runWhenEpochsClosed(async () => {
+      rewardBeforeSettle = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+      ansemBeforeSettle = await getAccount(provider.connection, payerAnsemAccount);
 
-    await settleUnstake(positionId, requestInfo.actionNonce);
+      const indexDelta = rewardBeforeSettle.cowboyRewardIndex.sub(lastCowboyIndexAtRequest);
+      postRequestAccrual = indexDelta
+        .muln(10000)
+        .add(requestRemainder)
+        .div(scale);
+      expectedSynchronized = preRequestClaimable.add(postRequestAccrual);
+
+      await settleUnstake(positionId, requestInfo.actionNonce);
+    });
 
     const positionUnstaked = await positionUnstakedPromise;
-    console.log("DEBUG: positionUnstaked.synchronizedAnsem", positionUnstaked.synchronizedAnsem.toString());
     const ansemAfterSettle = await getAccount(provider.connection, payerAnsemAccount);
     const rewardAfterSettle = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     const gameAfterSettle =

@@ -862,19 +862,7 @@ pub mod rodeo_core {
         );
 
         // Synchronize current role rewards before opening the pending action.
-        msg!(
-            "request_unstake before sync: last={}, remainder={}, claimable={}",
-            position.last_cowboy_reward_index,
-            position.cowboy_accrual_remainder_scaled,
-            position.claimable_ansem_atomic
-        );
         sync_cowboy_rewards(position, &mut ctx.accounts.reward_state)?;
-        msg!(
-            "request_unstake after sync: last={}, remainder={}, claimable={}",
-            position.last_cowboy_reward_index,
-            position.cowboy_accrual_remainder_scaled,
-            position.claimable_ansem_atomic
-        );
         sync_bull_rewards(
             position,
             &mut ctx.accounts.bull_accumulator,
@@ -2947,19 +2935,7 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
     let pending_randomness = &mut ctx.accounts.pending_randomness;
 
     // Final reward synchronization before disposition.
-    msg!(
-        "settle_unstake before sync: last={}, remainder={}, claimable={}",
-        position.last_cowboy_reward_index,
-        position.cowboy_accrual_remainder_scaled,
-        position.claimable_ansem_atomic
-    );
     sync_cowboy_rewards(position, &mut ctx.accounts.reward_state)?;
-    msg!(
-        "settle_unstake after sync: last={}, remainder={}, claimable={}",
-        position.last_cowboy_reward_index,
-        position.cowboy_accrual_remainder_scaled,
-        position.claimable_ansem_atomic
-    );
     sync_bull_rewards(
         position,
         &mut ctx.accounts.bull_accumulator,
