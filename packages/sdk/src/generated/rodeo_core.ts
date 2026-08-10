@@ -894,6 +894,288 @@ export const rodeoCoreIdl = {
       "args": []
     },
     {
+      "name": "recover_unstake_timeout",
+      "discriminator": [
+        231,
+        189,
+        160,
+        114,
+        161,
+        47,
+        104,
+        99
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "account",
+                "path": "position.position_id",
+                "account": "Position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pending_randomness",
+          "writable": true
+        },
+        {
+          "name": "owner",
+          "writable": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "request_unstake",
+      "discriminator": [
+        44,
+        154,
+        110,
+        253,
+        160,
+        202,
+        54,
+        34
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "protocol_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "account",
+                "path": "global_config.current_config_version",
+                "account": "GlobalConfig"
+              }
+            ]
+          }
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "account",
+                "path": "position.position_id",
+                "account": "Position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pending_randomness",
+          "writable": true
+        },
+        {
+          "name": "reward_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bull_accumulator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  97,
+                  99,
+                  99,
+                  117,
+                  109,
+                  117,
+                  108,
+                  97,
+                  116,
+                  111,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "settle_reveal",
       "discriminator": [
         160,
@@ -1101,6 +1383,274 @@ export const rodeoCoreIdl = {
               }
             ]
           }
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "settle_unstake",
+      "discriminator": [
+        235,
+        119,
+        26,
+        224,
+        149,
+        215,
+        180,
+        124
+      ],
+      "accounts": [
+        {
+          "name": "settler",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "global_game_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  103,
+                  97,
+                  109,
+                  101,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bull_accumulator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  97,
+                  99,
+                  99,
+                  117,
+                  109,
+                  117,
+                  108,
+                  97,
+                  116,
+                  111,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "account",
+                "path": "position.position_id",
+                "account": "Position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pending_randomness",
+          "writable": true
+        },
+        {
+          "name": "protocol_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "account",
+                "path": "pending_randomness.config_version_snapshot",
+                "account": "PendingRandomness"
+              }
+            ]
+          }
+        },
+        {
+          "name": "principal_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  110,
+                  99,
+                  105,
+                  112,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "rodeo_mint",
+          "writable": true
+        },
+        {
+          "name": "owner_rodeo_account",
+          "writable": true
+        },
+        {
+          "name": "reward_vault",
+          "writable": true
+        },
+        {
+          "name": "owner_ansem_account",
+          "writable": true
+        },
+        {
+          "name": "owner",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
         },
         {
           "name": "clock",
@@ -1491,6 +2041,19 @@ export const rodeoCoreIdl = {
       ]
     },
     {
+      "name": "OrphanedRewardReleased",
+      "discriminator": [
+        126,
+        100,
+        136,
+        24,
+        112,
+        124,
+        82,
+        104
+      ]
+    },
+    {
       "name": "PositionClaimed",
       "discriminator": [
         149,
@@ -1540,6 +2103,19 @@ export const rodeoCoreIdl = {
         63,
         247,
         2
+      ]
+    },
+    {
+      "name": "PositionUnstaked",
+      "discriminator": [
+        157,
+        31,
+        33,
+        230,
+        178,
+        93,
+        69,
+        19
       ]
     },
     {
@@ -1608,19 +2184,6 @@ export const rodeoCoreIdl = {
       ]
     },
     {
-      "name": "OrphanedRewardReleased",
-      "discriminator": [
-        126,
-        100,
-        136,
-        24,
-        112,
-        124,
-        82,
-        104
-      ]
-    },
-    {
       "name": "RewardPaid",
       "discriminator": [
         132,
@@ -1631,6 +2194,19 @@ export const rodeoCoreIdl = {
         177,
         19,
         95
+      ]
+    },
+    {
+      "name": "UnstakeRequested",
+      "discriminator": [
+        21,
+        253,
+        177,
+        85,
+        129,
+        206,
+        42,
+        152
       ]
     }
   ],
@@ -1939,6 +2515,26 @@ export const rodeoCoreIdl = {
       "code": 6060,
       "name": "InvalidRole",
       "msg": "Position role is invalid for this operation"
+    },
+    {
+      "code": 6061,
+      "name": "UnstakeNotEligible",
+      "msg": "Position is not yet eligible for unstake"
+    },
+    {
+      "code": 6062,
+      "name": "NoPendingUnstakeAction",
+      "msg": "No unstake action is pending for this position"
+    },
+    {
+      "code": 6063,
+      "name": "UnstakeAlreadySettled",
+      "msg": "Unstake has already been settled"
+    },
+    {
+      "code": 6064,
+      "name": "InvalidRodeoDestination",
+      "msg": "RODEO destination account is invalid"
     }
   ],
   "types": [
@@ -1957,6 +2553,23 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "Unstake"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AnsemUnstakeFate",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "ToOwner"
+          },
+          {
+            "name": "ToBullPool"
+          },
+          {
+            "name": "Immune"
           }
         ]
       }
@@ -2030,48 +2643,6 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "UnstakeTheft"
-          }
-        ]
-      }
-    },
-    {
-      "name": "OrphanedRewardReleased",
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "reward_source",
-            "type": {
-              "defined": {
-                "name": "OrphanedRewardSource"
-              }
-            }
-          },
-          {
-            "name": "amount_atomic",
-            "type": "u64"
-          },
-          {
-            "name": "remaining_remainder_scaled",
-            "type": "u128"
-          },
-          {
-            "name": "total_ansem_liability_atomic_after",
-            "type": "u64"
-          }
-        ]
-      }
-    },
-    {
-      "name": "OrphanedRewardSource",
-      "type": {
-        "kind": "enum",
-        "variants": [
-          {
-            "name": "Cowboy"
-          },
-          {
-            "name": "Bull"
           }
         ]
       }
@@ -2300,6 +2871,48 @@ export const rodeoCoreIdl = {
           {
             "name": "bump",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OrphanedRewardReleased",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "reward_source",
+            "type": {
+              "defined": {
+                "name": "OrphanedRewardSource"
+              }
+            }
+          },
+          {
+            "name": "amount_atomic",
+            "type": "u64"
+          },
+          {
+            "name": "remaining_remainder_scaled",
+            "type": "u128"
+          },
+          {
+            "name": "total_ansem_liability_atomic_after",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OrphanedRewardSource",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Cowboy"
+          },
+          {
+            "name": "Bull"
           }
         ]
       }
@@ -2720,6 +3333,62 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "Active"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PositionUnstaked",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "principal_amount",
+            "type": "u64"
+          },
+          {
+            "name": "principal_returned",
+            "type": "u64"
+          },
+          {
+            "name": "principal_burned",
+            "type": "u64"
+          },
+          {
+            "name": "ansem_fate",
+            "type": {
+              "defined": {
+                "name": "AnsemUnstakeFate"
+              }
+            }
+          },
+          {
+            "name": "synchronized_ansem",
+            "type": "u64"
+          },
+          {
+            "name": "ansem_paid_to_owner",
+            "type": "u64"
+          },
+          {
+            "name": "ansem_routed_to_bull_pool",
+            "type": "u64"
+          },
+          {
+            "name": "settlement_nonce",
+            "type": "u64"
+          },
+          {
+            "name": "config_version",
+            "type": "u64"
           }
         ]
       }
@@ -3285,6 +3954,34 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "CancelUnstake"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UnstakeRequested",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "action_nonce",
+            "type": "u64"
+          },
+          {
+            "name": "requested_at",
+            "type": "i64"
+          },
+          {
+            "name": "config_version",
+            "type": "u64"
           }
         ]
       }
