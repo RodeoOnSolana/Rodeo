@@ -955,12 +955,36 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     return { position, pendingRandomness };
   }
 
+  async function fixtureAdvanceNextPositionId(positionId: BN) {
+    const discriminator = Buffer.from("3105ae71743b6219", "hex");
+    const data = Buffer.concat([
+      discriminator,
+      positionId.toArrayLike(Buffer, "le", 8),
+    ]);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: false },
+        { pubkey: globalGameState, isSigner: false, isWritable: true },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
+  }
+
   async function stakeAndCommit(
     positionId: BN,
     amount: BN = stakeAmountAtomic,
     ownerRodeo = payerRodeoAccount,
     owner = payer,
   ) {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    if (positionId.gt(game.nextPositionId)) {
+      await fixtureAdvanceNextPositionId(positionId);
+    }
+
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
     const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
     const [protocolConfig] = deriveProtocolConfig(
@@ -968,25 +992,32 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       globalConfig,
       globalConfigAccount.currentConfigVersion,
     );
-    await rodeoCoreProgram.methods
-      .stakeAndCommit(positionId, amount)
-      .accounts({
-        owner: owner.publicKey,
-        ownerRodeoTokenAccount: ownerRodeo,
-        globalConfig,
-        protocolConfig,
-        principalVault,
-        position,
-        pendingRandomness,
-        rewardState,
-        globalGameState,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: web3.SystemProgram.programId,
-        rent: web3.SYSVAR_RENT_PUBKEY,
-        clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
-      .signers([owner])
-      .rpc();
+
+    try {
+      await rodeoCoreProgram.methods
+        .stakeAndCommit(positionId, amount)
+        .accounts({
+          owner: owner.publicKey,
+          ownerRodeoTokenAccount: ownerRodeo,
+          globalConfig,
+          protocolConfig,
+          principalVault,
+          position,
+          pendingRandomness,
+          rewardState,
+          globalGameState,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          rent: web3.SYSVAR_RENT_PUBKEY,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([owner])
+        .rpc();
+    } finally {
+      const gameAfter = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+      nextPositionId = gameAfter.nextPositionId.toNumber();
+    }
+
     return { position, pendingRandomness, protocolConfig };
   }
 

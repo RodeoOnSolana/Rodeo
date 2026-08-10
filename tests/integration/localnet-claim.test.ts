@@ -428,6 +428,11 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     ownerRodeo = payerRodeoAccount,
     owner = payer,
   ) {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    if (positionId.gt(game.nextPositionId)) {
+      await fixtureAdvanceNextPositionId(positionId);
+    }
+
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
     const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
     const [protocolConfig] = deriveProtocolConfig(
@@ -435,25 +440,32 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       globalConfig,
       globalConfigAccount.currentConfigVersion,
     );
-    await rodeoCoreProgram.methods
-      .stakeAndCommit(positionId, amount)
-      .accounts({
-        owner: owner.publicKey,
-        ownerRodeoTokenAccount: ownerRodeo,
-        globalConfig,
-        protocolConfig,
-        principalVault,
-        position,
-        pendingRandomness,
-        rewardState,
-        globalGameState,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: web3.SystemProgram.programId,
-        rent: web3.SYSVAR_RENT_PUBKEY,
-        clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
-      .signers([owner])
-      .rpc();
+
+    try {
+      await rodeoCoreProgram.methods
+        .stakeAndCommit(positionId, amount)
+        .accounts({
+          owner: owner.publicKey,
+          ownerRodeoTokenAccount: ownerRodeo,
+          globalConfig,
+          protocolConfig,
+          principalVault,
+          position,
+          pendingRandomness,
+          rewardState,
+          globalGameState,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          rent: web3.SYSVAR_RENT_PUBKEY,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([owner])
+        .rpc();
+    } finally {
+      const gameAfter = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+      nextPositionId = gameAfter.nextPositionId.toNumber();
+    }
+
     return { position, pendingRandomness, protocolConfig };
   }
 
