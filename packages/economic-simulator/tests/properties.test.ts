@@ -352,11 +352,31 @@ describe("Protocol v1.3 simulator invariants", () => {
   it("increments the global nextPositionId only for sequential numeric position ids", () => {
     const simulator = new EconomicSimulator(config);
     expect(simulator.state.nextPositionId).toBe(0n);
+
+    // Successful sequential stake consumes the next id.
     simulator.apply({ type: "stake", settlementId: "s1", positionId: "0", owner: "alice", openedAt: now });
     expect(simulator.state.nextPositionId).toBe(1n);
-    simulator.apply({ type: "stake", settlementId: "s2", positionId: "2", owner: "bob", openedAt: now });
+
+    // A future numeric id is rejected and does not consume an id.
+    expect(() =>
+      simulator.apply({ type: "stake", settlementId: "s2", positionId: "2", owner: "bob", openedAt: now }),
+    ).toThrow("Position id must equal the next global position id");
     expect(simulator.state.nextPositionId).toBe(1n);
+
+    // Filling the gap succeeds.
     simulator.apply({ type: "stake", settlementId: "s3", positionId: "1", owner: "carol", openedAt: now });
+    expect(simulator.state.nextPositionId).toBe(2n);
+
+    // Close the original position.
+    simulator.apply({ type: "reveal", settlementId: "r1", positionId: "0", outcomes: revealCowboy("rank4", "hearts") });
+    simulator.apply({ type: "requestUnstake", settlementId: "u1", positionId: "0", requestedAt: MIN_STAKE_SECONDS + 1n });
+    simulator.apply({ type: "settleUnstake", settlementId: "u2", positionId: "0", fate: { ansemToBullPool: false } });
+    expect(simulator.state.positions.has("0")).toBe(false);
+
+    // Reusing the closed id is rejected.
+    expect(() =>
+      simulator.apply({ type: "stake", settlementId: "s4", positionId: "0", owner: "dave", openedAt: now }),
+    ).toThrow("Position id has already been used");
     expect(simulator.state.nextPositionId).toBe(2n);
   });
 

@@ -1433,6 +1433,94 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     await expect(stakeAndCommit(positionId)).rejects.toThrow();
   }, 60_000);
 
+  it("enforces sequential position ids and rejects reuse after closure", async () => {
+    const before = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const n = before.nextPositionId;
+
+    async function readGame() {
+      return rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    }
+
+    async function rawStakeAndCommit(positionId: BN) {
+      const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
+      const [pendingRandomness] = deriveRandomness(
+        rodeoCoreProgram.programId,
+        position,
+        0,
+        new BN(0),
+      );
+      const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(
+        globalConfig,
+      );
+      const [protocolConfig] = deriveProtocolConfig(
+        rodeoCoreProgram.programId,
+        globalConfig,
+        globalConfigAccount.currentConfigVersion,
+      );
+      return rodeoCoreProgram.methods
+        .stakeAndCommit(positionId, stakeAmountAtomic)
+        .accounts({
+          owner: payer.publicKey,
+          ownerRodeoTokenAccount: payerRodeoAccount,
+          globalConfig,
+          protocolConfig,
+          principalVault,
+          position,
+          pendingRandomness,
+          rewardState,
+          globalGameState,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          rent: web3.SYSVAR_RENT_PUBKEY,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([payer])
+        .rpc();
+    }
+
+    // A. current next_position_id = N
+    expect(before.nextPositionId.toString()).toBe(n.toString());
+
+    // B. stake N succeeds
+    await rawStakeAndCommit(n);
+    let after = await readGame();
+    expect(after.nextPositionId.toString()).toBe(n.addn(1).toString());
+
+    // C. next_position_id == N + 1
+    expect(after.nextPositionId.sub(n).toString()).toBe("1");
+
+    // D. stake N again fails
+    await expect(rawStakeAndCommit(n)).rejects.toThrow();
+    after = await readGame();
+    expect(after.nextPositionId.toString()).toBe(n.addn(1).toString());
+
+    // E. stake N + 2 fails
+    await expect(rawStakeAndCommit(n.addn(2))).rejects.toThrow();
+    after = await readGame();
+    expect(after.nextPositionId.toString()).toBe(n.addn(1).toString());
+
+    // F. failed attempts leave next_position_id == N + 1
+    expect(after.nextPositionId.toString()).toBe(n.addn(1).toString());
+
+    // G. stake N + 1 succeeds
+    await rawStakeAndCommit(n.addn(1));
+    after = await readGame();
+    expect(after.nextPositionId.toString()).toBe(n.addn(2).toString());
+
+    // H. close/un-stake the original Position
+    await sleep(3_000);
+    await recoverRevealTimeout(n);
+    const positionInfo = await provider.connection.getAccountInfo(
+      derivePosition(rodeoCoreProgram.programId, globalConfig, n)[0],
+    );
+    expect(positionInfo).toBeNull();
+
+    // I. stake using old ID N still fails
+    await expect(rawStakeAndCommit(n)).rejects.toThrow();
+    after = await readGame();
+    expect(after.nextPositionId.toString()).toBe(n.addn(2).toString());
+  }, 120_000);
+
   it("derives the same Position PDA for any owner", async () => {
     const positionId = new BN(12345);
     const [positionFromPayer] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);

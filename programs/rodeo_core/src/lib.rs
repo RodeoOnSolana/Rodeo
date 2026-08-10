@@ -1242,6 +1242,11 @@ pub mod rodeo_core {
         ctx: Context<TestFixtureAdvanceNextPositionId>,
         next_position_id: u64,
     ) -> Result<()> {
+        require_gte!(
+            next_position_id,
+            ctx.accounts.global_game_state.next_position_id,
+            RodeoError::InvalidPositionId
+        );
         ctx.accounts.global_game_state.next_position_id = next_position_id;
         Ok(())
     }

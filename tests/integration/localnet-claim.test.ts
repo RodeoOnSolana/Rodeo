@@ -576,6 +576,21 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     return collectEvents<T>(eventName, 1, timeoutMs).then((arr) => arr[0]);
   }
 
+  // Collects every event of `eventName` emitted for `durationMs` regardless of
+  // count. Useful for asserting that an event was *not* emitted during an
+  // operation that is expected to skip the conditional emit path.
+  function collectEventsDuring<T>(eventName: string, durationMs: number): Promise<T[]> {
+    return new Promise((resolve) => {
+      const events: T[] = [];
+      const listener = rodeoCoreProgram.addEventListener(eventName, (event: T) => {
+        events.push(event);
+      });
+      setTimeout(() => {
+        void rodeoCoreProgram.removeEventListener(listener).then(() => resolve(events));
+      }, durationMs);
+    });
+  }
+
   // The `test_fixture_*` instructions are compiled only for local tests via
   // the `test-fixtures` feature, so they are not exported in the production
   // IDL. They are invoked here as raw instructions using their Anchor
@@ -1800,6 +1815,94 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     expect(rewardAfter.orphanedRewardReleasedAtomic.toString()).toBe(
       rewardBeforeUnstake.orphanedRewardReleasedAtomic.addn(1).toString(),
     );
+  }, 120_000);
+
+  it("emits BullRewardDistributed when a Bull accrues on unstake", async () => {
+    const { positionId } = await findBullPosition();
+    await prepareUnstakeReadyPositionById(positionId, new BN(0));
+
+    const { position } = await deriveStakeAccounts(positionId);
+    const posAccount = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const rewardBeforeFixture = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    // Per-position Bull remainder is > one full scale, so sync_bull_rewards
+    // accrues one whole ANSEM when last == current.
+    const positionRemainder = REWARD_PER_WEIGHT_SCALE.addn(200);
+    await fixtureSetPositionRemainders(positionId, {
+      cowboyAccrualRemainderScaled: new BN(0),
+      bullAccrualRemainderScaled: positionRemainder,
+      lastCowboyRewardIndex: posAccount.lastCowboyRewardIndex,
+      lastBullRewardPerWeight: posAccount.lastBullRewardPerWeight,
+    });
+
+    await fixtureSetOrphanedRemainder({
+      cowboyOrphanedAccrualRemainderScaled: new BN(0),
+      bullOrphanedAccrualRemainderScaled: new BN(0),
+      cowboyUnmaterializedLiabilityAtomic: new BN(0),
+      bullPoolLiabilityAtomic: new BN(2),
+      totalAnsemLiabilityAtomic: new BN(2),
+      recognizedRewardBalanceAtomic: new BN(2),
+      lastClosedEpochTimestamp: rewardBeforeFixture.lastClosedEpochTimestamp,
+      epochStartedAt: rewardBeforeFixture.epochStartedAt,
+    });
+
+    await fundRewardVault(new BN(2));
+
+    const bullRewardPromise = collectOneEvent<{
+      position: string;
+      owner: string;
+      amountAtomic: BN;
+      rewardPerWeightScaled: BN;
+    }>("bullRewardDistributed");
+
+    const { actionNonce } = await requestUnstake(positionId);
+    await settleUnstake(positionId, actionNonce);
+
+    const bullReward = await bullRewardPromise;
+    expect(bullReward.amountAtomic.toString()).toBe("1");
+    expect(bullReward.rewardPerWeightScaled.toString()).toBe(posAccount.lastBullRewardPerWeight.toString());
+  }, 120_000);
+
+  it("does not emit BullRewardDistributed when a Bull has zero accrual on unstake", async () => {
+    const { positionId } = await findBullPosition();
+    await prepareUnstakeReadyPositionById(positionId, new BN(0));
+
+    const { position } = await deriveStakeAccounts(positionId);
+    const posAccount = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const rewardBeforeFixture = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    // Sub-scale per-position remainder => accrued == 0.
+    const positionRemainder = new BN(200);
+    await fixtureSetPositionRemainders(positionId, {
+      cowboyAccrualRemainderScaled: new BN(0),
+      bullAccrualRemainderScaled: positionRemainder,
+      lastCowboyRewardIndex: posAccount.lastCowboyRewardIndex,
+      lastBullRewardPerWeight: posAccount.lastBullRewardPerWeight,
+    });
+
+    await fixtureSetOrphanedRemainder({
+      cowboyOrphanedAccrualRemainderScaled: new BN(0),
+      bullOrphanedAccrualRemainderScaled: new BN(0),
+      cowboyUnmaterializedLiabilityAtomic: new BN(0),
+      bullPoolLiabilityAtomic: new BN(0),
+      totalAnsemLiabilityAtomic: new BN(0),
+      recognizedRewardBalanceAtomic: new BN(0),
+      lastClosedEpochTimestamp: rewardBeforeFixture.lastClosedEpochTimestamp,
+      epochStartedAt: rewardBeforeFixture.epochStartedAt,
+    });
+
+    const noBullRewardPromise = collectEventsDuring<{
+      position: string;
+      owner: string;
+      amountAtomic: BN;
+      rewardPerWeightScaled: BN;
+    }>("bullRewardDistributed", 2_000);
+
+    const { actionNonce } = await requestUnstake(positionId);
+    await settleUnstake(positionId, actionNonce);
+
+    const bullEvents = await noBullRewardPromise;
+    expect(bullEvents.length).toBe(0);
   }, 120_000);
 
   it("recover_unstake_timeout cancels the pending action after timeout", async () => {

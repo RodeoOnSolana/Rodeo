@@ -344,7 +344,9 @@ export class EconomicSimulator {
     const amount = stakeAmountAtomic(this.config.rodeoDecimals);
     if (this.state.positions.has(event.positionId)) throw new Error("Position already exists");
     const positionIdNum = /^\d+$/.test(event.positionId) ? BigInt(event.positionId) : null;
-    if (positionIdNum === this.state.nextPositionId) {
+    if (positionIdNum !== null) {
+      if (positionIdNum < this.state.nextPositionId) throw new Error("Position id has already been used");
+      if (positionIdNum > this.state.nextPositionId) throw new Error("Position id must equal the next global position id");
       this.state.nextPositionId = checkedAdd(this.state.nextPositionId, 1n);
     }
     const configVersion = event.configVersion ?? this.state.currentConfigVersion;
