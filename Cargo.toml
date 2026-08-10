@@ -10,16 +10,20 @@ resolver = "2"
 rust-version = "1.79"
 
 # Pins the platform-tools (SBF Rust/LLVM toolchain) version `cargo-build-sbf`
-# downloads and uses, independent of the installed Solana/Agave CLI's own
-# default. Solana CLI 2.2.20's default (v1.48, Rust 1.84.0) does not
-# support the `edition2024` Cargo feature that several transitive crates
-# (pulled in by cargo-build-sbf's own independent, `--locked`-ignoring
-# dependency resolution) now require. platform-tools v1.52 bundles Rust
-# 1.89.0. This bump also surfaced (and was fixed on main by boxing
+# downloads and uses, independent of the installed Solana/Agave CLI's
+# built-in default. platform-tools v1.52 bundles Rust 1.89.0, which
+# supports the `edition2024` Cargo feature; the CLI-bundled default at
+# Solana CLI 2.2.20 (v1.48, Rust 1.84.0) does not, and started failing
+# `anchor build` once mpl-core 0.11.2's dependency graph (via the required
+# solana-program/solana-zk-sdk 2.2.1 bump) pulled in transitive crates
+# whose latest patch releases require edition2024. v1.50/v1.51 were tried
+# first and still bundle Rust 1.84.x; v1.52 is the oldest release
+# confirmed to bundle Rust >= 1.85 (edition2024 was stabilized in Rust
+# 1.85.0). This bump also surfaced (and was fixed on main by boxing
 # SettleUnstake's SPL accounts) a pre-existing SBF stack-frame overflow in
 # `SettleUnstake::try_accounts` that the older toolchain silently built
-# without failing. See docs/mpl-core-integration-proof.md for the mpl-core
-# side of this investigation.
+# without failing. See docs/mpl-core-integration-proof.md for the
+# full investigation.
 [workspace.metadata.solana]
 tools-version = "v1.52"
 
