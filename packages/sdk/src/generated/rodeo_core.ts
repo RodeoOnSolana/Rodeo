@@ -1608,6 +1608,19 @@ export const rodeoCoreIdl = {
       ]
     },
     {
+      "name": "OrphanedRewardReleased",
+      "discriminator": [
+        126,
+        100,
+        136,
+        24,
+        112,
+        124,
+        82,
+        104
+      ]
+    },
+    {
       "name": "RewardPaid",
       "discriminator": [
         132,
@@ -2017,6 +2030,48 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "UnstakeTheft"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OrphanedRewardReleased",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "reward_source",
+            "type": {
+              "defined": {
+                "name": "OrphanedRewardSource"
+              }
+            }
+          },
+          {
+            "name": "amount_atomic",
+            "type": "u64"
+          },
+          {
+            "name": "remaining_remainder_scaled",
+            "type": "u128"
+          },
+          {
+            "name": "total_ansem_liability_atomic_after",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OrphanedRewardSource",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Cowboy"
+          },
+          {
+            "name": "Bull"
           }
         ]
       }
