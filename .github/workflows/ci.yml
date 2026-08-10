@@ -19,12 +19,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      # Bumped from v2.1.0: cargo-build-sbf's bundled platform-tools under
-      # v2.1.0 silently produced a rodeo_core SBF binary with an oversized
-      # SettleUnstake::try_accounts stack frame (real undefined behavior --
-      # see the stack-safety guard below), without failing the build. The
-      # newer toolchain surfaces the same class of diagnostic more
-      # reliably. Not a jump to Agave 3.x/4.x.
+      # Bumped from v2.1.0 (minimum pinned patch bump within the 2.2.x
+      # line, not a jump to Agave 3.x/4.x): cargo-build-sbf's bundled
+      # platform-tools under v2.1.0 silently produced a rodeo_core SBF
+      # binary with an oversized SettleUnstake::try_accounts stack frame
+      # (real undefined behavior -- see the stack-safety guard below),
+      # without failing the build; this bump surfaces that class of
+      # diagnostic reliably (fixed on main; see the hotfix history) and is
+      # also required by mpl-core 0.11.2's solana-program/solana-zk-sdk
+      # 2.2.1 dependency. The platform-tools SBF toolchain version itself
+      # is pinned separately via `[workspace.metadata.solana]
+      # tools-version` in Cargo.toml (see docs/mpl-core-integration-proof.md).
       SOLANA_VERSION: v2.2.20
       ANCHOR_VERSION: 0.31.1
       RUST_VERSION: 1.85.1
@@ -98,7 +103,8 @@ jobs:
           # Reports the SBF platform-tools version and the Rust version it
           # bundles, which is what `anchor build` / `cargo build-sbf`
           # actually compiles the on-chain program with (independent of the
-          # workspace's own pinned `RUST_VERSION` above).
+          # workspace's own pinned `RUST_VERSION` above). This is pinned via
+          # `[workspace.metadata.solana] tools-version` in Cargo.toml.
           cargo build-sbf --version
 
       - name: Install JavaScript dependencies

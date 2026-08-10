@@ -15,10 +15,11 @@ rust-version = "1.79"
 # support the `edition2024` Cargo feature that several transitive crates
 # (pulled in by cargo-build-sbf's own independent, `--locked`-ignoring
 # dependency resolution) now require. platform-tools v1.52 bundles Rust
-# 1.89.0. This bump also surfaced (and, combined with the fix in this PR,
-# resolves) a pre-existing SBF stack-frame overflow in
+# 1.89.0. This bump also surfaced (and was fixed on main by boxing
+# SettleUnstake's SPL accounts) a pre-existing SBF stack-frame overflow in
 # `SettleUnstake::try_accounts` that the older toolchain silently built
-# without failing. See docs in this PR's description for the investigation.
+# without failing. See docs/mpl-core-integration-proof.md for the mpl-core
+# side of this investigation.
 [workspace.metadata.solana]
 tools-version = "v1.52"
 
