@@ -1519,6 +1519,10 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     await expect(rawStakeAndCommit(n)).rejects.toThrow();
     after = await readGame();
     expect(after.nextPositionId.toString()).toBe(n.addn(2).toString());
+
+    // Keep the shared test counter synchronized with the chain for subsequent
+    // tests that use nextPositionId++.
+    nextPositionId = after.nextPositionId.toNumber();
   }, 120_000);
 
   it("derives the same Position PDA for any owner", async () => {
