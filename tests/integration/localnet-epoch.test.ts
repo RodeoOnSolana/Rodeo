@@ -34,6 +34,7 @@ const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
 
 interface AccountFetcher<T> {
   fetch(address: web3.PublicKey): Promise<T>;
+  fetchNullable(address: web3.PublicKey): Promise<T | null>;
 }
 
 interface RodeoCoreAccountNamespace {
@@ -165,6 +166,7 @@ interface RewardStateAccount {
 interface GlobalGameStateAccount {
   version: number;
   globalConfig: web3.PublicKey;
+  nextPositionId: BN;
   totalCompletedReveals: BN;
   livePositionCount: BN;
   activeCowboyCount: BN;
@@ -854,7 +856,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   it("initializes GlobalGameState with zeroed population and principal counters", async () => {
     const state = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
 
-    expect(state.version).toBe(3);
+    expect(state.version).toBe(4);
     expect(state.globalConfig.toBase58()).toBe(globalConfig.toBase58());
     expect(state.totalCompletedReveals.toString()).toBe("0");
     expect(state.livePositionCount.toString()).toBe("0");
@@ -945,12 +947,31 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   }, 30_000);
 
   const stakeAmountAtomic = new BN(100_000_000_000);
-  let nextPositionId = 1;
+  let nextPositionId = 0;
 
   async function deriveStakeAccounts(positionId: BN) {
     const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
     const [pendingRandomness] = deriveRandomness(rodeoCoreProgram.programId, position, 0, new BN(0));
     return { position, pendingRandomness };
+  }
+
+  async function fixtureAdvanceNextPositionId(positionId: BN) {
+    const discriminator = Buffer.from("3105ae71743b6219", "hex");
+    const data = Buffer.concat([
+      discriminator,
+      positionId.toArrayLike(Buffer, "le", 8),
+    ]);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: false },
+        { pubkey: globalGameState, isSigner: false, isWritable: true },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
   }
 
   async function stakeAndCommit(
@@ -959,6 +980,11 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     ownerRodeo = payerRodeoAccount,
     owner = payer,
   ) {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    if (positionId.gt(game.nextPositionId)) {
+      await fixtureAdvanceNextPositionId(positionId);
+    }
+
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
     const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
     const [protocolConfig] = deriveProtocolConfig(
@@ -966,30 +992,39 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       globalConfig,
       globalConfigAccount.currentConfigVersion,
     );
-    await rodeoCoreProgram.methods
-      .stakeAndCommit(positionId, amount)
-      .accounts({
-        owner: owner.publicKey,
-        ownerRodeoTokenAccount: ownerRodeo,
-        globalConfig,
-        protocolConfig,
-        principalVault,
-        position,
-        pendingRandomness,
-        rewardState,
-        globalGameState,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: web3.SystemProgram.programId,
-        rent: web3.SYSVAR_RENT_PUBKEY,
-        clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
-      .signers([owner])
-      .rpc();
+
+    try {
+      await rodeoCoreProgram.methods
+        .stakeAndCommit(positionId, amount)
+        .accounts({
+          owner: owner.publicKey,
+          ownerRodeoTokenAccount: ownerRodeo,
+          globalConfig,
+          protocolConfig,
+          principalVault,
+          position,
+          pendingRandomness,
+          rewardState,
+          globalGameState,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          rent: web3.SYSVAR_RENT_PUBKEY,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([owner])
+        .rpc();
+    } finally {
+      const gameAfter = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+      nextPositionId = gameAfter.nextPositionId.toNumber();
+    }
+
     return { position, pendingRandomness, protocolConfig };
   }
 
   async function settleReveal(positionId: BN, settler = payer) {
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const [positionAddr] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(positionAddr);
     const pendingRandomnessAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(
       pendingRandomness,
     );
@@ -1006,9 +1041,10 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         globalGameState,
         rewardState,
         bullAccumulator,
-        position,
+        position: positionAddr,
         pendingRandomness,
         protocolConfig,
+        owner: pos.owner,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
       })
       .signers([settler])
@@ -1415,6 +1451,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     expect(after.accountedPrincipalAtomic.sub(before.accountedPrincipalAtomic).toString()).toBe(
       stakeAmountAtomic.toString(),
     );
+    expect(after.nextPositionId.sub(before.nextPositionId).toString()).toBe("1");
     expect(after.totalCompletedReveals.toString()).toBe(before.totalCompletedReveals.toString());
   }, 60_000);
 
@@ -1433,10 +1470,10 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     expect(pos.settlementNonce.toString()).toBe("1");
     expect(pos.unstakeEligibleAt.sub(pos.activeSince).toNumber()).toBe(86_400);
 
-    const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(
+    const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetchNullable(
       deriveRandomness(rodeoCoreProgram.programId, position, 0, new BN(0))[0],
     );
-    expect(pending.settled).toBe(true);
+    expect(pending).toBeNull();
 
     const after = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
     expect(after.totalCompletedReveals.toString()).toBe(
@@ -2641,6 +2678,99 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
 
     expect(preRequestTotalLiability.gte(preRequestClaimable)).toBe(true);
   }, 120_000);
+
+  it("enforces sequential position ids and rejects reuse after closure", async () => {
+    const before = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const n = before.nextPositionId;
+
+    async function readGame() {
+      return rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    }
+
+    async function rawStakeAndCommit(positionId: BN) {
+      const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
+      const [pendingRandomness] = deriveRandomness(
+        rodeoCoreProgram.programId,
+        position,
+        0,
+        new BN(0),
+      );
+      const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(
+        globalConfig,
+      );
+      const [protocolConfig] = deriveProtocolConfig(
+        rodeoCoreProgram.programId,
+        globalConfig,
+        globalConfigAccount.currentConfigVersion,
+      );
+      return rodeoCoreProgram.methods
+        .stakeAndCommit(positionId, stakeAmountAtomic)
+        .accounts({
+          owner: payer.publicKey,
+          ownerRodeoTokenAccount: payerRodeoAccount,
+          globalConfig,
+          protocolConfig,
+          principalVault,
+          position,
+          pendingRandomness,
+          rewardState,
+          globalGameState,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          rent: web3.SYSVAR_RENT_PUBKEY,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([payer])
+        .rpc();
+    }
+
+    // A. current next_position_id = N
+    expect(before.nextPositionId.toString()).toBe(n.toString());
+
+    // B. stake N succeeds
+    await rawStakeAndCommit(n);
+    let after = await readGame();
+    expect(after.nextPositionId.toString()).toBe(n.addn(1).toString());
+
+    // C. next_position_id == N + 1
+    expect(after.nextPositionId.sub(n).toString()).toBe("1");
+
+    // D. stake N again fails
+    await expect(rawStakeAndCommit(n)).rejects.toThrow();
+    after = await readGame();
+    expect(after.nextPositionId.toString()).toBe(n.addn(1).toString());
+
+    // E. stake N + 2 fails
+    await expect(rawStakeAndCommit(n.addn(2))).rejects.toThrow();
+    after = await readGame();
+    expect(after.nextPositionId.toString()).toBe(n.addn(1).toString());
+
+    // F. failed attempts leave next_position_id == N + 1
+    expect(after.nextPositionId.toString()).toBe(n.addn(1).toString());
+
+    // G. stake N + 1 succeeds
+    await rawStakeAndCommit(n.addn(1));
+    after = await readGame();
+    expect(after.nextPositionId.toString()).toBe(n.addn(2).toString());
+
+    // H. close/un-stake the original Position
+    await sleep(3_000);
+    await recoverRevealTimeout(n);
+    const positionInfo = await provider.connection.getAccountInfo(
+      derivePosition(rodeoCoreProgram.programId, globalConfig, n)[0],
+    );
+    expect(positionInfo).toBeNull();
+
+    // I. stake using old ID N still fails
+    await expect(rawStakeAndCommit(n)).rejects.toThrow();
+    after = await readGame();
+    expect(after.nextPositionId.toString()).toBe(n.addn(2).toString());
+
+    // Keep the shared test counter synchronized with the chain for subsequent
+    // tests that use nextPositionId++.
+    nextPositionId = after.nextPositionId.toNumber();
+  }, 120_000);
+
 });
 
 describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", () => {
@@ -2791,4 +2921,5 @@ describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", (
     await revokeMintAuthorities(provider.connection, payer, wrongSupplyMint);
     await expectInitFailure({ rodeoMint: wrongSupplyMint });
   }, 30_000);
+
 });

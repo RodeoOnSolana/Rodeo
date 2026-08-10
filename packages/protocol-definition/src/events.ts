@@ -30,15 +30,17 @@ export type ProtocolInitializedEvent = {
 export type PositionStakedEvent = ProtocolEventEnvelope<"positionStaked", {
   readonly position: string;
   readonly owner: string;
+  readonly positionId: bigint;
   readonly principalAtomic: bigint;
   readonly commitment: Uint8Array;
+  readonly globalGameState: string;
 }>;
 
-export type MockRandomnessRevealedEvent = ProtocolEventEnvelope<"mockRandomnessRevealed", {
+export type PositionOwnerChangedEvent = ProtocolEventEnvelope<"positionOwnerChanged", {
   readonly position: string;
-  readonly owner: string;
-  readonly randomness: Uint8Array;
-  readonly settlementNonce: bigint;
+  readonly previousOwner: string;
+  readonly newOwner: string;
+  readonly reason: "sale" | "gift" | "mintTheft";
 }>;
 
 export type PositionRevealedEvent = ProtocolEventEnvelope<"positionRevealed", {
@@ -149,6 +151,13 @@ export type BullPoolContributionEvent = ProtocolEventEnvelope<"bullPoolContribut
   readonly source: BullPoolSource;
 }>;
 
+export type BullRewardDistributedEvent = ProtocolEventEnvelope<"bullRewardDistributed", {
+  readonly position: string;
+  readonly owner: string;
+  readonly amountAtomic: bigint;
+  readonly rewardPerWeightScaled: bigint;
+}>;
+
 export type ListingCreatedEvent = ProtocolEventEnvelope<"listingCreated", {
   readonly position: string;
   readonly seller: string;
@@ -164,6 +173,7 @@ export type RandomnessRequestedEvent = ProtocolEventEnvelope<"randomnessRequeste
   readonly position: string;
   readonly actionType: "reveal" | "unstake";
   readonly actionNonce: bigint;
+  readonly committedSlot: bigint;
   readonly committedProtocolEpoch: bigint;
   readonly timeoutTimestamp: bigint;
   readonly providerProgram: string;
@@ -181,6 +191,10 @@ export type RandomnessSettledEvent = ProtocolEventEnvelope<"randomnessSettled", 
   readonly actionType: "reveal" | "unstake";
   readonly actionNonce: bigint;
   readonly settlementNonce: bigint;
+  readonly committedSlot: bigint;
+  readonly committedProtocolEpoch: bigint;
+  readonly settledAt: bigint;
+  readonly configVersionSnapshot: bigint;
 }>;
 
 export type RandomnessTimeoutRecoveredEvent = ProtocolEventEnvelope<"randomnessTimeoutRecovered", {
@@ -224,7 +238,7 @@ export type OrphanedRewardReleasedEvent = ProtocolEventEnvelope<"orphanedRewardR
 export type RodeoProtocolEvent =
   | ProtocolInitializedEvent
   | PositionStakedEvent
-  | MockRandomnessRevealedEvent
+  | PositionOwnerChangedEvent
   | PositionRevealedEvent
   | PositionSoldEvent
   | PositionGiftedEvent
@@ -237,6 +251,7 @@ export type RodeoProtocolEvent =
   | EpochsClosedEvent
   | PositionClaimedEvent
   | BullPoolContributionEvent
+  | BullRewardDistributedEvent
   | ListingCreatedEvent
   | ListingCancelledEvent
   | RandomnessRequestedEvent

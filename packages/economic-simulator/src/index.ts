@@ -137,6 +137,7 @@ export interface SimulationState {
   orphanedRewardReleasedAtomic: bigint;
   suitEpoch: bigint;
   // Game counters
+  nextPositionId: bigint;
   totalCompletedReveals: bigint;
   livePositionCount: bigint;
   activeCowboyCount: bigint;
@@ -246,6 +247,7 @@ export class EconomicSimulator {
       bullOrphanedAccrualRemainderScaled: 0n,
       orphanedRewardReleasedAtomic: 0n,
       suitEpoch: 0n,
+      nextPositionId: 0n,
       totalCompletedReveals: 0n,
       livePositionCount: 0n,
       activeCowboyCount: 0n,
@@ -341,6 +343,12 @@ export class EconomicSimulator {
   private stake(event: Extract<SimulationEvent, { type: "stake" }>): void {
     const amount = stakeAmountAtomic(this.config.rodeoDecimals);
     if (this.state.positions.has(event.positionId)) throw new Error("Position already exists");
+    const positionIdNum = /^\d+$/.test(event.positionId) ? BigInt(event.positionId) : null;
+    if (positionIdNum !== null) {
+      if (positionIdNum < this.state.nextPositionId) throw new Error("Position id has already been used");
+      if (positionIdNum > this.state.nextPositionId) throw new Error("Position id must equal the next global position id");
+      this.state.nextPositionId = checkedAdd(this.state.nextPositionId, 1n);
+    }
     const configVersion = event.configVersion ?? this.state.currentConfigVersion;
     this.state.positions.set(event.positionId, {
       id: event.positionId,

@@ -162,6 +162,7 @@ interface RewardStateAccount {
 interface GlobalGameStateAccount {
   version: number;
   globalConfig: web3.PublicKey;
+  nextPositionId: BN;
   totalCompletedReveals: BN;
   livePositionCount: BN;
   activeCowboyCount: BN;
@@ -413,7 +414,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
   const stakeAmountAtomic = new BN(100_000_000_000);
   const COWBOY_REWARD_INDEX_SCALE = new BN("1000000000000000000");
   const REWARD_PER_WEIGHT_SCALE = new BN("1000000000000000000");
-  let nextPositionId = 1;
+  let nextPositionId = 0;
 
   async function deriveStakeAccounts(positionId: BN) {
     const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
@@ -427,6 +428,11 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     ownerRodeo = payerRodeoAccount,
     owner = payer,
   ) {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    if (positionId.gt(game.nextPositionId)) {
+      await fixtureAdvanceNextPositionId(positionId);
+    }
+
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
     const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
     const [protocolConfig] = deriveProtocolConfig(
@@ -434,30 +440,38 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       globalConfig,
       globalConfigAccount.currentConfigVersion,
     );
-    await rodeoCoreProgram.methods
-      .stakeAndCommit(positionId, amount)
-      .accounts({
-        owner: owner.publicKey,
-        ownerRodeoTokenAccount: ownerRodeo,
-        globalConfig,
-        protocolConfig,
-        principalVault,
-        position,
-        pendingRandomness,
-        rewardState,
-        globalGameState,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: web3.SystemProgram.programId,
-        rent: web3.SYSVAR_RENT_PUBKEY,
-        clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
-      .signers([owner])
-      .rpc();
+
+    try {
+      await rodeoCoreProgram.methods
+        .stakeAndCommit(positionId, amount)
+        .accounts({
+          owner: owner.publicKey,
+          ownerRodeoTokenAccount: ownerRodeo,
+          globalConfig,
+          protocolConfig,
+          principalVault,
+          position,
+          pendingRandomness,
+          rewardState,
+          globalGameState,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          rent: web3.SYSVAR_RENT_PUBKEY,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([owner])
+        .rpc();
+    } finally {
+      const gameAfter = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+      nextPositionId = gameAfter.nextPositionId.toNumber();
+    }
+
     return { position, pendingRandomness, protocolConfig };
   }
 
   async function settleReveal(positionId: BN, settler = payer) {
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     const pendingRandomnessAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(
       pendingRandomness,
     );
@@ -477,6 +491,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         position,
         pendingRandomness,
         protocolConfig,
+        owner: pos.owner,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
       })
       .signers([settler])
@@ -559,6 +574,21 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
 
   function collectOneEvent<T>(eventName: string, timeoutMs = 10_000): Promise<T> {
     return collectEvents<T>(eventName, 1, timeoutMs).then((arr) => arr[0]);
+  }
+
+  // Collects every event of `eventName` emitted for `durationMs` regardless of
+  // count. Useful for asserting that an event was *not* emitted during an
+  // operation that is expected to skip the conditional emit path.
+  function collectEventsDuring<T>(eventName: string, durationMs: number): Promise<T[]> {
+    return new Promise((resolve) => {
+      const events: T[] = [];
+      const listener = rodeoCoreProgram.addEventListener(eventName, (event: T) => {
+        events.push(event);
+      });
+      setTimeout(() => {
+        void rodeoCoreProgram.removeEventListener(listener).then(() => resolve(events));
+      }, durationMs);
+    });
   }
 
   // The `test_fixture_*` instructions are compiled only for local tests via
@@ -693,6 +723,37 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     await provider.sendAndConfirm(tx, [payer]);
   }
 
+  async function fixtureAdvanceNextPositionId(nextPositionId: BN) {
+    const discriminator = Buffer.from("3105ae71743b6219", "hex");
+    const data = Buffer.concat([
+      discriminator,
+      nextPositionId.toArrayLike(Buffer, "le", 8),
+    ]);
+    const ix = new web3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: globalConfig, isSigner: false, isWritable: false },
+        { pubkey: globalGameState, isSigner: false, isWritable: true },
+      ],
+      programId: rodeoCoreProgram.programId,
+      data,
+    });
+    const tx = new web3.Transaction().add(ix);
+    await provider.sendAndConfirm(tx, [payer]);
+  }
+
+  async function stakeAndSettleById(positionId: BN) {
+    const { position } = await deriveStakeAccounts(positionId);
+    const existing = await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(position);
+    if (existing !== null) return;
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    if (!positionId.eq(game.nextPositionId)) {
+      await fixtureAdvanceNextPositionId(positionId);
+    }
+    await stakeAndCommit(positionId);
+    await settleReveal(positionId);
+  }
+
   /**
    * Stakes and reveals a fresh position, then uses the test-only fixtures to
    * make it deterministically claim-ready, bypassing organic Cowboy-index /
@@ -715,8 +776,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         ? await findBullPosition()
         : await findCowboyPosition(cowboyKindCode);
 
-    await stakeAndCommit(positionId);
-    await settleReveal(positionId);
+    await stakeAndSettleById(positionId);
     const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     const actualCowboyKindCode = pos.cowboyKind.desperado
       ? 254
@@ -738,7 +798,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
     if (game.activeBullCount.isZero()) return;
 
-    for (let id = 1; id < nextPositionId; id++) {
+    for (let id = 0; id < nextPositionId; id++) {
       const positionId = new BN(id);
       const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
       const pos = await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(position);
@@ -767,9 +827,10 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
   async function prepareUnstakeReadyPosition(
     claimable: BN,
   ): Promise<{ positionId: BN; position: web3.PublicKey; role: "cowboy" | "bull" | "desperado" }> {
-    const positionId = new BN(nextPositionId++);
-    await stakeAndCommit(positionId);
-    await settleReveal(positionId);
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const positionId = game.nextPositionId;
+    nextPositionId = positionId.toNumber() + 1;
+    await stakeAndSettleById(positionId);
     const { position } = await deriveStakeAccounts(positionId);
     const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
 
@@ -862,8 +923,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     positionId: BN,
     claimable: BN,
   ): Promise<{ positionId: BN; position: web3.PublicKey; role: "cowboy" | "bull" | "desperado" }> {
-    await stakeAndCommit(positionId);
-    await settleReveal(positionId);
+    await stakeAndSettleById(positionId);
     const { position } = await deriveStakeAccounts(positionId);
     const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
 
@@ -894,27 +954,38 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     predicate: (positionId: BN, position: web3.PublicKey, role: string, cowboyKind: string, stolen: boolean) => boolean,
     maxAttempts = 1000,
   ): Promise<{ positionId: BN; position: web3.PublicKey; role: string; cowboyKind: string; stolen: boolean }> {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    let candidate = game.nextPositionId.toNumber();
     for (let i = 0; i < maxAttempts; i++) {
-      const positionId = new BN(nextPositionId++);
+      const positionId = new BN(candidate);
       const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
       const role = expectedRevealRole(position);
-      if (role !== "cowboy") continue;
+      if (role !== "cowboy") {
+        candidate++;
+        continue;
+      }
       const cowboyKind = expectedCowboyKind(position);
       const stolen = expectedUnstakeTheftFlag(position, new BN(1), new BN(0));
       if (predicate(positionId, position, role, cowboyKind, stolen)) {
+        nextPositionId = candidate + 1;
         return { positionId, position, role, cowboyKind, stolen };
       }
+      candidate++;
     }
     throw new Error("Could not find a matching unstake position");
   }
 
   async function findBullPosition(maxAttempts = 100): Promise<{ positionId: BN; position: web3.PublicKey }> {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    let candidate = game.nextPositionId.toNumber();
     for (let i = 0; i < maxAttempts; i++) {
-      const positionId = new BN(nextPositionId++);
+      const positionId = new BN(candidate);
       const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
       if (expectedRevealRole(position) === "bull") {
+        nextPositionId = candidate + 1;
         return { positionId, position };
       }
+      candidate++;
     }
     throw new Error("Could not find a Bull position");
   }
@@ -923,15 +994,22 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     cowboyKindCode = 5,
     maxAttempts = 10000,
   ): Promise<{ positionId: BN; position: web3.PublicKey }> {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    let candidate = game.nextPositionId.toNumber();
     const desiredKind =
       cowboyKindCode === 254 ? "desperado" : `rank${cowboyKindCode}`;
     for (let i = 0; i < maxAttempts; i++) {
-      const positionId = new BN(nextPositionId++);
+      const positionId = new BN(candidate);
       const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
-      if (expectedRevealRole(position) !== "cowboy") continue;
+      if (expectedRevealRole(position) !== "cowboy") {
+        candidate++;
+        continue;
+      }
       if (expectedCowboyKind(position) === desiredKind) {
+        nextPositionId = candidate + 1;
         return { positionId, position };
       }
+      candidate++;
     }
     throw new Error("Could not find a Cowboy position");
   }
@@ -1739,6 +1817,94 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     );
   }, 120_000);
 
+  it("emits BullRewardDistributed when a Bull accrues on unstake", async () => {
+    const { positionId } = await findBullPosition();
+    await prepareUnstakeReadyPositionById(positionId, new BN(0));
+
+    const { position } = await deriveStakeAccounts(positionId);
+    const posAccount = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const rewardBeforeFixture = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    // Per-position Bull remainder is > one full scale, so sync_bull_rewards
+    // accrues one whole ANSEM when last == current.
+    const positionRemainder = REWARD_PER_WEIGHT_SCALE.addn(200);
+    await fixtureSetPositionRemainders(positionId, {
+      cowboyAccrualRemainderScaled: new BN(0),
+      bullAccrualRemainderScaled: positionRemainder,
+      lastCowboyRewardIndex: posAccount.lastCowboyRewardIndex,
+      lastBullRewardPerWeight: posAccount.lastBullRewardPerWeight,
+    });
+
+    await fixtureSetOrphanedRemainder({
+      cowboyOrphanedAccrualRemainderScaled: new BN(0),
+      bullOrphanedAccrualRemainderScaled: new BN(0),
+      cowboyUnmaterializedLiabilityAtomic: new BN(0),
+      bullPoolLiabilityAtomic: new BN(2),
+      totalAnsemLiabilityAtomic: new BN(2),
+      recognizedRewardBalanceAtomic: new BN(2),
+      lastClosedEpochTimestamp: rewardBeforeFixture.lastClosedEpochTimestamp,
+      epochStartedAt: rewardBeforeFixture.epochStartedAt,
+    });
+
+    await fundRewardVault(new BN(2));
+
+    const bullRewardPromise = collectOneEvent<{
+      position: string;
+      owner: string;
+      amountAtomic: BN;
+      rewardPerWeightScaled: BN;
+    }>("bullRewardDistributed");
+
+    const { actionNonce } = await requestUnstake(positionId);
+    await settleUnstake(positionId, actionNonce);
+
+    const bullReward = await bullRewardPromise;
+    expect(bullReward.amountAtomic.toString()).toBe("1");
+    expect(bullReward.rewardPerWeightScaled.toString()).toBe(posAccount.lastBullRewardPerWeight.toString());
+  }, 120_000);
+
+  it("does not emit BullRewardDistributed when a Bull has zero accrual on unstake", async () => {
+    const { positionId } = await findBullPosition();
+    await prepareUnstakeReadyPositionById(positionId, new BN(0));
+
+    const { position } = await deriveStakeAccounts(positionId);
+    const posAccount = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const rewardBeforeFixture = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    // Sub-scale per-position remainder => accrued == 0.
+    const positionRemainder = new BN(200);
+    await fixtureSetPositionRemainders(positionId, {
+      cowboyAccrualRemainderScaled: new BN(0),
+      bullAccrualRemainderScaled: positionRemainder,
+      lastCowboyRewardIndex: posAccount.lastCowboyRewardIndex,
+      lastBullRewardPerWeight: posAccount.lastBullRewardPerWeight,
+    });
+
+    await fixtureSetOrphanedRemainder({
+      cowboyOrphanedAccrualRemainderScaled: new BN(0),
+      bullOrphanedAccrualRemainderScaled: new BN(0),
+      cowboyUnmaterializedLiabilityAtomic: new BN(0),
+      bullPoolLiabilityAtomic: new BN(0),
+      totalAnsemLiabilityAtomic: new BN(0),
+      recognizedRewardBalanceAtomic: new BN(0),
+      lastClosedEpochTimestamp: rewardBeforeFixture.lastClosedEpochTimestamp,
+      epochStartedAt: rewardBeforeFixture.epochStartedAt,
+    });
+
+    const noBullRewardPromise = collectEventsDuring<{
+      position: string;
+      owner: string;
+      amountAtomic: BN;
+      rewardPerWeightScaled: BN;
+    }>("bullRewardDistributed", 2_000);
+
+    const { actionNonce } = await requestUnstake(positionId);
+    await settleUnstake(positionId, actionNonce);
+
+    const bullEvents = await noBullRewardPromise;
+    expect(bullEvents.length).toBe(0);
+  }, 120_000);
+
   it("recover_unstake_timeout cancels the pending action after timeout", async () => {
     const { positionId } = await prepareUnstakeReadyPosition(new BN(0));
     const { pendingRandomness, actionNonce } = await requestUnstake(positionId);
@@ -1913,64 +2079,92 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     }
   }
 
-  function findV1SafeV2StolenCowboy(maxAttempts = 2000): {
+  async function findV1SafeV2StolenCowboy(maxAttempts = 2000): Promise<{
     positionId: BN;
     position: web3.PublicKey;
     randomOutput: Uint8Array;
-  } {
+  }> {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    let candidate = game.nextPositionId.toNumber();
     for (let i = 0; i < maxAttempts; i++) {
-      const positionId = new BN(nextPositionId++);
+      const positionId = new BN(candidate);
       const [position] = derivePosition(
         rodeoCoreProgram.programId,
         globalConfig,
         positionId,
       );
       const role = expectedRevealRole(position, PROTOCOL_CONFIG_V1);
-      if (role !== "cowboy") continue;
+      if (role !== "cowboy") {
+        candidate++;
+        continue;
+      }
       const cowboyKind = expectedCowboyKind(position, PROTOCOL_CONFIG_V1);
-      if (cowboyKind === "desperado") continue;
+      if (cowboyKind === "desperado") {
+        candidate++;
+        continue;
+      }
       const v1Stolen = expectedUnstakeTheftFlag(
         position,
         new BN(1),
         new BN(0),
         PROTOCOL_CONFIG_V1,
       );
-      if (v1Stolen) continue;
+      if (v1Stolen) {
+        candidate++;
+        continue;
+      }
       const v2Stolen = expectedUnstakeTheftFlag(
         position,
         new BN(1),
         new BN(0),
         PROTOCOL_CONFIG_V2,
       );
-      if (!v2Stolen) continue;
+      if (!v2Stolen) {
+        candidate++;
+        continue;
+      }
+      nextPositionId = candidate + 1;
       const randomOutput = deriveMockCommitment(position, 1, new BN(1), new BN(0));
       return { positionId, position, randomOutput };
     }
     throw new Error("Could not find a V1-safe / V2-stolen Cowboy position");
   }
 
-  function findV2StolenCowboy(maxAttempts = 1000): {
+  async function findV2StolenCowboy(maxAttempts = 1000): Promise<{
     positionId: BN;
     position: web3.PublicKey;
-  } {
+  }> {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    let candidate = game.nextPositionId.toNumber();
     for (let i = 0; i < maxAttempts; i++) {
-      const positionId = new BN(nextPositionId++);
+      const positionId = new BN(candidate);
       const [position] = derivePosition(
         rodeoCoreProgram.programId,
         globalConfig,
         positionId,
       );
       const role = expectedRevealRole(position, PROTOCOL_CONFIG_V2);
-      if (role !== "cowboy") continue;
+      if (role !== "cowboy") {
+        candidate++;
+        continue;
+      }
       const cowboyKind = expectedCowboyKind(position, PROTOCOL_CONFIG_V2);
-      if (cowboyKind === "desperado") continue;
+      if (cowboyKind === "desperado") {
+        candidate++;
+        continue;
+      }
       const stolen = expectedUnstakeTheftFlag(
         position,
         new BN(1),
         new BN(0),
         PROTOCOL_CONFIG_V2,
       );
-      if (stolen) return { positionId, position };
+      if (!stolen) {
+        candidate++;
+        continue;
+      }
+      nextPositionId = candidate + 1;
+      return { positionId, position };
     }
     throw new Error("Could not find a V2-stolen non-Desperado Cowboy position");
   }
@@ -2550,7 +2744,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
 
   it("historical V1/V2 unstake snapshot with same input producing different theft", async () => {
     const { positionId: positionAId, position: positionA, randomOutput } =
-      findV1SafeV2StolenCowboy();
+      await findV1SafeV2StolenCowboy();
     const v1Prediction = expectedUnstakeTheftFlag(
       positionA,
       new BN(1),
@@ -2617,7 +2811,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       new BN(rodeoBeforeA.amount.toString()).add(v1Returned).toString(),
     );
 
-    const { positionId: positionBId, position: positionB } = findV2StolenCowboy();
+    const { positionId: positionBId, position: positionB } = await findV2StolenCowboy();
     await ensureRecognizedReserve(claimable);
     await prepareUnstakeReadyPositionById(positionBId, claimable);
 

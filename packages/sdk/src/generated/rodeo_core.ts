@@ -1385,6 +1385,10 @@ export const rodeoCoreIdl = {
           }
         },
         {
+          "name": "owner",
+          "writable": true
+        },
+        {
           "name": "clock",
           "address": "SysvarC1ock11111111111111111111111111111111"
         }
@@ -2015,6 +2019,19 @@ export const rodeoCoreIdl = {
       ]
     },
     {
+      "name": "BullRewardDistributed",
+      "discriminator": [
+        145,
+        221,
+        25,
+        41,
+        42,
+        182,
+        95,
+        9
+      ]
+    },
+    {
       "name": "EpochClosed",
       "discriminator": [
         21,
@@ -2631,6 +2648,30 @@ export const rodeoCoreIdl = {
       }
     },
     {
+      "name": "BullRewardDistributed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount_atomic",
+            "type": "u64"
+          },
+          {
+            "name": "reward_per_weight_scaled",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
       "name": "BullPoolSource",
       "type": {
         "kind": "enum",
@@ -2839,6 +2880,10 @@ export const rodeoCoreIdl = {
           {
             "name": "global_config",
             "type": "pubkey"
+          },
+          {
+            "name": "next_position_id",
+            "type": "u64"
           },
           {
             "name": "total_completed_reveals",
@@ -3704,6 +3749,22 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "settlement_nonce",
+            "type": "u64"
+          },
+          {
+            "name": "committed_slot",
+            "type": "u64"
+          },
+          {
+            "name": "committed_protocol_epoch",
+            "type": "u64"
+          },
+          {
+            "name": "settled_at",
+            "type": "i64"
+          },
+          {
+            "name": "config_version_snapshot",
             "type": "u64"
           }
         ]

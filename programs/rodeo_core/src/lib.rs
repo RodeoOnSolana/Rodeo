@@ -152,6 +152,7 @@ pub mod rodeo_core {
         let global_game_state = &mut ctx.accounts.global_game_state;
         global_game_state.version = ACCOUNT_VERSION_GLOBAL_GAME_STATE;
         global_game_state.global_config = global_config.key();
+        global_game_state.next_position_id = 0;
         global_game_state.total_completed_reveals = 0;
         global_game_state.live_position_count = 0;
         global_game_state.active_cowboy_count = 0;
@@ -232,6 +233,11 @@ pub mod rodeo_core {
             !ctx.accounts.position.pending_action_active,
             RodeoError::PendingActionConflict
         );
+        require_eq!(
+            position_id,
+            ctx.accounts.global_game_state.next_position_id,
+            RodeoError::InvalidPositionId
+        );
 
         let commitment = derive_commitment(
             ctx.accounts.position.key(),
@@ -305,6 +311,7 @@ pub mod rodeo_core {
 
         // Update global counters.
         let game_state = &mut ctx.accounts.global_game_state;
+        game_state.next_position_id = math::checked_add_u64(game_state.next_position_id, 1)?;
         game_state.live_position_count = math::checked_add_u64(game_state.live_position_count, 1)?;
         game_state.accounted_principal_atomic =
             math::checked_add_u64(game_state.accounted_principal_atomic, principal_amount)?;
@@ -632,6 +639,7 @@ pub mod rodeo_core {
         require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
         let owner = ctx.accounts.owner.key();
+        let position_key = ctx.accounts.position.key();
         let position = &mut ctx.accounts.position;
         require_eq!(position.owner, owner, RodeoError::InvalidOwner);
         require!(
@@ -647,6 +655,7 @@ pub mod rodeo_core {
         sync_cowboy_rewards(position, &mut ctx.accounts.reward_state)?;
         sync_bull_rewards(
             position,
+            position_key,
             &mut ctx.accounts.bull_accumulator,
             &mut ctx.accounts.reward_state,
         )?;
@@ -845,6 +854,7 @@ pub mod rodeo_core {
         require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
         let owner = ctx.accounts.owner.key();
+        let position_key = ctx.accounts.position.key();
         let position = &mut ctx.accounts.position;
 
         require_eq!(position.owner, owner, RodeoError::InvalidOwner);
@@ -865,6 +875,7 @@ pub mod rodeo_core {
         sync_cowboy_rewards(position, &mut ctx.accounts.reward_state)?;
         sync_bull_rewards(
             position,
+            position_key,
             &mut ctx.accounts.bull_accumulator,
             &mut ctx.accounts.reward_state,
         )?;
@@ -1222,6 +1233,23 @@ pub mod rodeo_core {
 
         Ok(())
     }
+
+    /// Test-only fixture to advance the global position-id counter. This lets
+    /// the claim-profile suite search for a deterministic position PDA without
+    /// staking every skipped id.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_advance_next_position_id(
+        ctx: Context<TestFixtureAdvanceNextPositionId>,
+        next_position_id: u64,
+    ) -> Result<()> {
+        require_gte!(
+            next_position_id,
+            ctx.accounts.global_game_state.next_position_id,
+            RodeoError::InvalidPositionId
+        );
+        ctx.accounts.global_game_state.next_position_id = next_position_id;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -1307,6 +1335,27 @@ pub struct TestFixturePreparePosition<'info> {
         bump = position.bump,
     )]
     pub position: Box<Account<'info, Position>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(next_position_id: u64)]
+pub struct TestFixtureAdvanceNextPositionId<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
+        bump = global_game_state.bump,
+    )]
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -1650,6 +1699,7 @@ pub struct SettleReveal<'info> {
 
     #[account(
         mut,
+        close = owner,
         seeds = [
             SEED_RANDOMNESS,
             position.key().as_ref(),
@@ -1673,6 +1723,10 @@ pub struct SettleReveal<'info> {
         constraint = protocol_config.config_version == pending_randomness.config_version_snapshot @ RodeoError::InvalidProbabilityTable,
     )]
     pub protocol_config: Box<Account<'info, ProtocolConfig>>,
+
+    /// CHECK: Account receives reclaimed rent and is validated against the position owner.
+    #[account(mut, constraint = owner.key() == position.owner @ RodeoError::InvalidOwner)]
+    pub owner: AccountInfo<'info>,
 
     pub clock: Sysvar<'info, Clock>,
 }
@@ -2192,6 +2246,10 @@ pub struct RandomnessSettled {
     pub action_type: ActionType,
     pub action_nonce: u64,
     pub settlement_nonce: u64,
+    pub committed_slot: u64,
+    pub committed_protocol_epoch: u64,
+    pub settled_at: i64,
+    pub config_version_snapshot: u64,
 }
 
 #[event]
@@ -2292,6 +2350,14 @@ pub struct BullPoolContribution {
     pub epoch: u64,
     pub amount_atomic: u64,
     pub source: BullPoolSource,
+}
+
+#[event]
+pub struct BullRewardDistributed {
+    pub position: Pubkey,
+    pub owner: Pubkey,
+    pub amount_atomic: u64,
+    pub reward_per_weight_scaled: u128,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
@@ -2416,6 +2482,8 @@ pub enum RodeoError {
     PausedRouterSwaps,
     #[msg("Position already exists for the chosen position_id")]
     PositionAlreadyExists,
+    #[msg("position_id must equal the next global position id")]
+    InvalidPositionId,
     #[msg("Principal vault is invalid for the configured mint or authority")]
     InvalidPrincipalVault,
     #[msg("Owner token account is invalid for the configured mint or signer")]
@@ -2530,6 +2598,7 @@ fn sync_cowboy_rewards(position: &mut Position, reward_state: &mut RewardState) 
 /// Synchronize a Bull position with the global Bull reward-per-weight accumulator.
 fn sync_bull_rewards(
     position: &mut Position,
+    position_key: Pubkey,
     bull_accumulator: &mut BullAccumulator,
     reward_state: &mut RewardState,
 ) -> Result<()> {
@@ -2565,6 +2634,13 @@ fn sync_bull_rewards(
             math::checked_sub_u64(reward_state.bull_pool_liability_atomic, accrued)?;
         reward_state.position_claimable_liability_atomic =
             math::checked_add_u64(reward_state.position_claimable_liability_atomic, accrued)?;
+
+        emit!(BullRewardDistributed {
+            position: position_key,
+            owner: position.owner,
+            amount_atomic: accrued,
+            reward_per_weight_scaled: bull_accumulator.reward_per_weight_scaled,
+        });
     }
 
     Ok(())
@@ -2911,6 +2987,10 @@ fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
         action_type,
         action_nonce,
         settlement_nonce,
+        committed_slot: pending_randomness.committed_slot,
+        committed_protocol_epoch: pending_randomness.committed_protocol_epoch,
+        settled_at: now,
+        config_version_snapshot: pending_randomness.config_version_snapshot,
     });
 
     Ok(())
@@ -2922,6 +3002,7 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
 
     let config: &ProtocolConfig = &**ctx.accounts.protocol_config;
 
+    let now = Clock::get()?.unix_timestamp;
     let position_key = ctx.accounts.position.key();
     let action_type = ctx.accounts.pending_randomness.action_type;
     let action_nonce = ctx.accounts.pending_randomness.action_nonce;
@@ -2938,6 +3019,7 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
     sync_cowboy_rewards(position, &mut ctx.accounts.reward_state)?;
     sync_bull_rewards(
         position,
+        position_key,
         &mut ctx.accounts.bull_accumulator,
         &mut ctx.accounts.reward_state,
     )?;
@@ -3223,6 +3305,10 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
         action_type,
         action_nonce,
         settlement_nonce,
+        committed_slot: pending_randomness.committed_slot,
+        committed_protocol_epoch: pending_randomness.committed_protocol_epoch,
+        settled_at: now,
+        config_version_snapshot: pending_randomness.config_version_snapshot,
     });
 
     Ok(())
@@ -3279,7 +3365,7 @@ mod tests {
     fn account_versions_match_protocol_definition() {
         assert_eq!(ACCOUNT_VERSION_GLOBAL_CONFIG, 2);
         assert_eq!(ACCOUNT_VERSION_REWARD_STATE, 3);
-        assert_eq!(ACCOUNT_VERSION_GLOBAL_GAME_STATE, 3);
+        assert_eq!(ACCOUNT_VERSION_GLOBAL_GAME_STATE, 4);
         assert_eq!(ACCOUNT_VERSION_BULL_ACCUMULATOR, 3);
         assert_eq!(ACCOUNT_VERSION_POSITION, 4);
         assert_eq!(ACCOUNT_VERSION_WALLET_CLAIM_COOLDOWN, 1);
@@ -3291,7 +3377,7 @@ mod tests {
     fn account_init_space_values() {
         assert_eq!(GlobalConfig::INIT_SPACE, 266);
         assert_eq!(RewardState::INIT_SPACE, 194);
-        assert_eq!(GlobalGameState::INIT_SPACE, 98);
+        assert_eq!(GlobalGameState::INIT_SPACE, 106);
         assert_eq!(BullAccumulator::INIT_SPACE, 82);
         assert_eq!(Position::INIT_SPACE, 239);
         assert_eq!(WalletClaimCooldown::INIT_SPACE, 74);
@@ -3792,6 +3878,8 @@ mod tests {
                 i64,
                 i64,
             ) -> Result<()>;
+        let _ = test_fixture_advance_next_position_id
+            as fn(Context<TestFixtureAdvanceNextPositionId>, u64) -> Result<()>;
     }
 
     fn dummy_position() -> state::Position {
@@ -3894,7 +3982,7 @@ mod tests {
         let mut reward = dummy_reward_state();
         reward.bull_pool_liability_atomic = 12;
         let mut acc = dummy_bull_accumulator();
-        sync_bull_rewards(&mut pos, &mut acc, &mut reward).unwrap();
+        sync_bull_rewards(&mut pos, Pubkey::default(), &mut acc, &mut reward).unwrap();
 
         // Index delta = 3 * scale; power = 4 => accrued = 12.
         assert_eq!(pos.claimable_ansem_atomic, 12);
@@ -3913,6 +4001,7 @@ mod tests {
         let game = state::GlobalGameState {
             version: ACCOUNT_VERSION_GLOBAL_GAME_STATE,
             global_config: Pubkey::default(),
+            next_position_id: 0,
             total_completed_reveals: 0,
             live_position_count: 0,
             active_cowboy_count: 0,

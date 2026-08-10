@@ -1,7 +1,7 @@
 export const ACCOUNT_VERSIONS = {
   globalConfig: 2,
   rewardState: 3,
-  globalGameState: 3,
+  globalGameState: 4,
   bullAccumulator: 3,
   position: 4,
   walletClaimCooldown: 1,
@@ -63,6 +63,7 @@ export interface RewardState {
 export interface GlobalGameState {
   readonly version: number;
   readonly globalConfig: string;
+  readonly nextPositionId: bigint;
   readonly totalCompletedReveals: bigint;
   readonly livePositionCount: bigint;
   readonly activeCowboyCount: bigint;
