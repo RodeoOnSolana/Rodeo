@@ -39,6 +39,9 @@ importers:
 
   packages/protocol-definition:
     devDependencies:
+      '@rodeo/sdk':
+        specifier: workspace:*
+        version: link:../sdk
       vitest:
         specifier: 3.2.4
         version: 3.2.4(@types/node@22.15.3)

@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "devDependencies": {
+    "@rodeo/sdk": "workspace:*",
     "vitest": "3.2.4"
   }
 }

@@ -2,11 +2,10 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { rodeoCoreIdl } from "@rodeo/sdk";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-const idlPath = resolve(__dirname, "../../../../target/idl/rodeo_core.json");
 const eventsPath = resolve(__dirname, "../events.ts");
 
 function toCamelCase(name: string): string {
@@ -15,12 +14,9 @@ function toCamelCase(name: string): string {
 
 describe("event schema parity", () => {
   it("every IDL event has a matching ProtocolEventEnvelope in events.ts", () => {
-    const idl = JSON.parse(readFileSync(idlPath, "utf8")) as {
-      events: Array<{ name: string }>;
-    };
     const eventsSource = readFileSync(eventsPath, "utf8");
 
-    const idlNames = idl.events.map((e) => e.name);
+    const idlNames = rodeoCoreIdl.events.map((e) => e.name);
     const declaredNames = new Set<string>();
     const envelopeRegex = /ProtocolEventEnvelope<"([^"]+)"/g;
     const nameRegex = /readonly name:\s*"([^"]+)"/g;
@@ -39,7 +35,6 @@ describe("event schema parity", () => {
       }
     }
 
-    // Reverse: every declared protocol event is present in the IDL.
     const idlCamelNames = new Set(idlNames.map(toCamelCase));
     const offChainOnlyNames = new Set([
       "listingCancelled",
