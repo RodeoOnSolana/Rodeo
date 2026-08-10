@@ -17,6 +17,12 @@ wallet = "~/.config/solana/id.json"
 
 [test]
 upgradeable = true
+# DIAGNOSTIC ONLY (debug/toolchain-isolation branch): the previous run
+# failed with "Test validator does not look started" under Solana CLI
+# 2.2.20's solana-test-validator; increase the startup wait in case it is
+# simply slower to start than Anchor's default, before concluding this is
+# a real crash.
+startup_wait = 20000
 
 [scripts]
 test = "pnpm --filter @rodeo/integration test"

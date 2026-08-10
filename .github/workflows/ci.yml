@@ -158,8 +158,25 @@ jobs:
       - name: Build epoch-profile test program binary
         run: anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-epoch,test-short-claim-cooldown,test-fixtures
 
-      - name: Anchor localnet integration tests (epoch profile)
+      - name: Anchor localnet integration tests (epoch profile) - run 1
         run: RODEO_TEST_SUITE=epoch anchor test --skip-build --no-idl
+
+      # DIAGNOSTIC ONLY (debug/toolchain-isolation branch): run twice to
+      # distinguish a deterministic failure from a one-off flake.
+      - name: Anchor localnet integration tests (epoch profile) - run 2
+        if: always()
+        run: RODEO_TEST_SUITE=epoch anchor test --skip-build --no-idl
+
+      # DIAGNOSTIC ONLY (debug/toolchain-isolation branch): always capture
+      # the validator's own log, so a "does not look started" failure is
+      # explainable instead of opaque.
+      - name: Upload test-validator ledger log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-validator-ledger-log
+          path: .anchor/test-ledger/test-ledger-log.txt
+          if-no-files-found: warn
 
       # Claim/recognition profile: production-length epochs, so a real epoch
       # can never elapse mid-test. `require_elapsed_epochs_closed` remains
