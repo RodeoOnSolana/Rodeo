@@ -162,6 +162,24 @@ jobs:
           solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
           solana config set --url localhost
 
+      # Fetches the live Metaplex Core on-chain program (see
+      # scripts/fetch-mpl-core-program.sh and
+      # docs/mpl-core-integration-proof.md) so it can be loaded into the
+      # local test validator at genesis via Anchor.toml's [[test.genesis]].
+      # Every run's SHA-256 is written to the job summary so an unannounced
+      # mainnet upgrade is always visible rather than silently trusted.
+      - name: Fetch Metaplex Core program binary
+        run: |
+          chmod +x scripts/fetch-mpl-core-program.sh
+          MPL_CORE_EXPECTED_SHA256="${MPL_CORE_EXPECTED_SHA256:-}" scripts/fetch-mpl-core-program.sh
+
+      - name: Upload Metaplex Core program binary provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpl-core-program-provenance
+          path: |
+            vendor/mpl-core/mpl_core_program.so.sha256
+
       # Epoch-closure profile: 2-second epochs so close_epochs, batched
       # closure, and the EpochsNotClosed guard can be exercised quickly.
       # `require_elapsed_epochs_closed` remains compiled in and active; only
@@ -191,6 +209,23 @@ jobs:
 
       - name: Anchor localnet integration tests (claim profile)
         run: RODEO_TEST_SUITE=claim anchor test --skip-build --no-idl
+
+      - name: Ensure no stray validator process survives between profiles
+        if: always()
+        run: |
+          pkill -f solana-test-validator || true
+          sleep 2
+
+      # MPL Core integration-proof profile: proves the real Metaplex Core
+      # program (loaded via [[test.genesis]]) is present and executable on
+      # the local validator. This profile does not exercise any Rodeo
+      # receipt creation/transfer/burn logic yet -- that is scoped to a
+      # follow-up PR (see docs/mpl-core-integration-proof.md).
+      - name: Build mpl-core-profile test program binary
+        run: scripts/check-sbf-stack-safety.sh anchor build --no-idl --program-name rodeo_core -- --features test-fixtures
+
+      - name: Anchor localnet integration tests (mpl-core profile)
+        run: RODEO_TEST_SUITE=mplcore anchor test --skip-build --no-idl
 
       - name: Upload test-validator ledger log
         if: always()

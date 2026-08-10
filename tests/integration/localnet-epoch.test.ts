@@ -341,7 +341,10 @@ async function revokeMintAuthorities(
 // (2-second epochs) so that epoch-closure behavior is exercised quickly. It
 // must NOT be run against the claim-profile binary, since production-length
 // epochs there would make `close_epochs`/`EpochsClosed` assertions time out.
-const skipEpochSuite = !localnetAvailable || process.env.RODEO_TEST_SUITE === "claim";
+const skipEpochSuite =
+  !localnetAvailable ||
+  process.env.RODEO_TEST_SUITE === "claim" ||
+  process.env.RODEO_TEST_SUITE === "mplcore";
 
 describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () => {
   let provider: AnchorProvider;

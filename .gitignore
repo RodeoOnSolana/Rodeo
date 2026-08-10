@@ -11,3 +11,10 @@ generated-artifacts/
 phase-0-generated-artifacts/
 rodeo-phase-2a-*.zip
 phase-2a-*.txt
+
+# Fetched fresh by CI/localnet setup on every run (see
+# docs/mpl-core-integration-proof.md); never committed so drift from the
+# live mainnet-beta deployment is always visible in CI output rather than
+# silently stale in git history.
+/vendor/mpl-core/*.so
+/vendor/mpl-core/*.sha256
