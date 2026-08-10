@@ -78,6 +78,7 @@ pub struct RewardState {
 pub struct GlobalGameState {
     pub version: u8,
     pub global_config: Pubkey,
+    pub next_position_id: u64,
     pub total_completed_reveals: u64,
     pub live_position_count: u64,
     pub active_cowboy_count: u64,

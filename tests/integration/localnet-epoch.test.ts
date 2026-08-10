@@ -34,6 +34,7 @@ const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
 
 interface AccountFetcher<T> {
   fetch(address: web3.PublicKey): Promise<T>;
+  fetchNullable(address: web3.PublicKey): Promise<T | null>;
 }
 
 interface RodeoCoreAccountNamespace {
@@ -165,6 +166,7 @@ interface RewardStateAccount {
 interface GlobalGameStateAccount {
   version: number;
   globalConfig: web3.PublicKey;
+  nextPositionId: BN;
   totalCompletedReveals: BN;
   livePositionCount: BN;
   activeCowboyCount: BN;
@@ -854,7 +856,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   it("initializes GlobalGameState with zeroed population and principal counters", async () => {
     const state = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
 
-    expect(state.version).toBe(3);
+    expect(state.version).toBe(4);
     expect(state.globalConfig.toBase58()).toBe(globalConfig.toBase58());
     expect(state.totalCompletedReveals.toString()).toBe("0");
     expect(state.livePositionCount.toString()).toBe("0");
@@ -945,7 +947,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   }, 30_000);
 
   const stakeAmountAtomic = new BN(100_000_000_000);
-  let nextPositionId = 1;
+  let nextPositionId = 0;
 
   async function deriveStakeAccounts(positionId: BN) {
     const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
@@ -990,6 +992,8 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
 
   async function settleReveal(positionId: BN, settler = payer) {
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const [positionAddr] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(positionAddr);
     const pendingRandomnessAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(
       pendingRandomness,
     );
@@ -1006,9 +1010,10 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         globalGameState,
         rewardState,
         bullAccumulator,
-        position,
+        position: positionAddr,
         pendingRandomness,
         protocolConfig,
+        owner: pos.owner,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
       })
       .signers([settler])
@@ -1415,6 +1420,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     expect(after.accountedPrincipalAtomic.sub(before.accountedPrincipalAtomic).toString()).toBe(
       stakeAmountAtomic.toString(),
     );
+    expect(after.nextPositionId.sub(before.nextPositionId).toString()).toBe("1");
     expect(after.totalCompletedReveals.toString()).toBe(before.totalCompletedReveals.toString());
   }, 60_000);
 
@@ -1433,10 +1439,10 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     expect(pos.settlementNonce.toString()).toBe("1");
     expect(pos.unstakeEligibleAt.sub(pos.activeSince).toNumber()).toBe(86_400);
 
-    const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(
+    const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetchNullable(
       deriveRandomness(rodeoCoreProgram.programId, position, 0, new BN(0))[0],
     );
-    expect(pending.settled).toBe(true);
+    expect(pending).toBeNull();
 
     const after = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
     expect(after.totalCompletedReveals.toString()).toBe(

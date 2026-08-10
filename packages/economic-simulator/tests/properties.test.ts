@@ -349,6 +349,17 @@ describe("Protocol v1.3 simulator invariants", () => {
     expect(() => simulator.apply({ type: "stake", settlementId: "s1", positionId: "p2", owner: "bob", openedAt: now })).toThrow("Duplicate settlement");
   });
 
+  it("increments the global nextPositionId only for sequential numeric position ids", () => {
+    const simulator = new EconomicSimulator(config);
+    expect(simulator.state.nextPositionId).toBe(0n);
+    simulator.apply({ type: "stake", settlementId: "s1", positionId: "0", owner: "alice", openedAt: now });
+    expect(simulator.state.nextPositionId).toBe(1n);
+    simulator.apply({ type: "stake", settlementId: "s2", positionId: "2", owner: "bob", openedAt: now });
+    expect(simulator.state.nextPositionId).toBe(1n);
+    simulator.apply({ type: "stake", settlementId: "s3", positionId: "1", owner: "carol", openedAt: now });
+    expect(simulator.state.nextPositionId).toBe(2n);
+  });
+
   it("caps ANSEM liability by recognized reward balance", () => {
     const simulator = new EconomicSimulator(config);
     simulator.apply({ type: "stake", settlementId: "s1", positionId: "p1", owner: "alice", openedAt: now });
