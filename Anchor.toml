@@ -17,6 +17,11 @@ wallet = "~/.config/solana/id.json"
 
 [test]
 upgradeable = true
+# solana-test-validator 2.2.20 needs more than Anchor's default startup
+# wait on the CI runner; without this, `anchor test` can report "Test
+# validator does not look started" even though the validator is merely
+# slow to come up, not actually failing.
+startup_wait = 20000
 
 [scripts]
 test = "pnpm --filter @rodeo/integration test"

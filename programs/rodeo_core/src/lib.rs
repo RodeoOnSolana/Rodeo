@@ -2079,34 +2079,34 @@ pub struct SettleUnstake<'info> {
         constraint = principal_vault.mint == global_config.rodeo_mint @ RodeoError::InvalidPrincipalVault,
         constraint = principal_vault.owner == global_config.key() @ RodeoError::InvalidPrincipalVault,
     )]
-    pub principal_vault: Account<'info, TokenAccount>,
+    pub principal_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         constraint = rodeo_mint.key() == global_config.rodeo_mint @ RodeoError::InvalidMint,
     )]
-    pub rodeo_mint: Account<'info, Mint>,
+    pub rodeo_mint: Box<Account<'info, Mint>>,
 
     #[account(
         mut,
         constraint = owner_rodeo_account.mint == global_config.rodeo_mint @ RodeoError::InvalidRodeoDestination,
         constraint = owner_rodeo_account.owner == position.owner @ RodeoError::InvalidRodeoDestination,
     )]
-    pub owner_rodeo_account: Account<'info, TokenAccount>,
+    pub owner_rodeo_account: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         constraint = reward_vault.key() == global_config.reward_vault @ RodeoError::InvalidRewardVault,
         constraint = reward_vault.mint == global_config.ansem_mint @ RodeoError::InvalidAnsemMint,
     )]
-    pub reward_vault: Account<'info, TokenAccount>,
+    pub reward_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         constraint = owner_ansem_account.mint == global_config.ansem_mint @ RodeoError::InvalidRewardDestination,
         constraint = owner_ansem_account.owner == position.owner @ RodeoError::InvalidRewardDestination,
     )]
-    pub owner_ansem_account: Account<'info, TokenAccount>,
+    pub owner_ansem_account: Box<Account<'info, TokenAccount>>,
 
     /// CHECK: Account receives reclaimed rent and is validated against the position owner.
     #[account(mut, constraint = owner.key() == position.owner @ RodeoError::InvalidOwner)]

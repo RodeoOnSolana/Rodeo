@@ -19,7 +19,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      SOLANA_VERSION: v2.1.0
+      # Bumped from v2.1.0: cargo-build-sbf's bundled platform-tools under
+      # v2.1.0 silently produced a rodeo_core SBF binary with an oversized
+      # SettleUnstake::try_accounts stack frame (real undefined behavior --
+      # see the stack-safety guard below), without failing the build. The
+      # newer toolchain surfaces the same class of diagnostic more
+      # reliably. Not a jump to Agave 3.x/4.x.
+      SOLANA_VERSION: v2.2.20
       ANCHOR_VERSION: 0.31.1
       RUST_VERSION: 1.85.1
       SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install/active_release
@@ -89,6 +95,11 @@ jobs:
           anchor --version
           node --version
           pnpm --version
+          # Reports the SBF platform-tools version and the Rust version it
+          # bundles, which is what `anchor build` / `cargo build-sbf`
+          # actually compiles the on-chain program with (independent of the
+          # workspace's own pinned `RUST_VERSION` above).
+          cargo build-sbf --version
 
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
@@ -124,7 +135,9 @@ jobs:
         run: pnpm program-keys:localnet
 
       - name: Anchor build
-        run: anchor build
+        run: |
+          chmod +x scripts/check-sbf-stack-safety.sh
+          scripts/check-sbf-stack-safety.sh anchor build
 
       - name: Generate SDK from IDLs
         run: pnpm sdk:generate
@@ -154,10 +167,19 @@ jobs:
       # `require_elapsed_epochs_closed` remains compiled in and active; only
       # the epoch duration itself is shortened.
       - name: Build epoch-profile test program binary
-        run: anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-epoch,test-short-claim-cooldown,test-fixtures
+        run: scripts/check-sbf-stack-safety.sh anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-epoch,test-short-claim-cooldown,test-fixtures
 
       - name: Anchor localnet integration tests (epoch profile)
         run: RODEO_TEST_SUITE=epoch anchor test --skip-build --no-idl
+
+      # `anchor test` starts its own solana-test-validator and normally
+      # tears it down on exit, but ensure no stray process/port survives
+      # before the next profile's validator starts on the same port.
+      - name: Ensure no stray validator process survives between profiles
+        if: always()
+        run: |
+          pkill -f solana-test-validator || true
+          sleep 2
 
       # Claim/recognition profile: production-length epochs, so a real epoch
       # can never elapse mid-test. `require_elapsed_epochs_closed` remains
@@ -165,7 +187,15 @@ jobs:
       # state is established via the test-only `test-fixtures` instructions
       # instead of waiting on organic epoch emissions.
       - name: Build claim-profile test program binary
-        run: anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-claim-cooldown,test-fixtures
+        run: scripts/check-sbf-stack-safety.sh anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-claim-cooldown,test-fixtures
 
       - name: Anchor localnet integration tests (claim profile)
         run: RODEO_TEST_SUITE=claim anchor test --skip-build --no-idl
+
+      - name: Upload test-validator ledger log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-validator-ledger-log
+          path: .anchor/test-ledger/test-ledger-log.txt
+          if-no-files-found: warn

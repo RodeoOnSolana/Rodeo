@@ -9,6 +9,19 @@ resolver = "2"
 [workspace.package]
 rust-version = "1.79"
 
+# Pins the platform-tools (SBF Rust/LLVM toolchain) version `cargo-build-sbf`
+# downloads and uses, independent of the installed Solana/Agave CLI's own
+# default. Solana CLI 2.2.20's default (v1.48, Rust 1.84.0) does not
+# support the `edition2024` Cargo feature that several transitive crates
+# (pulled in by cargo-build-sbf's own independent, `--locked`-ignoring
+# dependency resolution) now require. platform-tools v1.52 bundles Rust
+# 1.89.0. This bump also surfaced (and, combined with the fix in this PR,
+# resolves) a pre-existing SBF stack-frame overflow in
+# `SettleUnstake::try_accounts` that the older toolchain silently built
+# without failing. See docs in this PR's description for the investigation.
+[workspace.metadata.solana]
+tools-version = "v1.52"
+
 [profile.release]
 overflow-checks = true
 lto = "fat"
