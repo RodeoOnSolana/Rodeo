@@ -19,7 +19,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      SOLANA_VERSION: v2.1.0
+      # DIAGNOSTIC ONLY (debug/toolchain-isolation branch): matches PR #12's
+      # toolchain bump exactly, without the mpl-core dependency change.
+      SOLANA_VERSION: v2.2.20
       ANCHOR_VERSION: 0.31.1
       RUST_VERSION: 1.85.1
       SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install/active_release

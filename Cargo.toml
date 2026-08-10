@@ -9,6 +9,14 @@ resolver = "2"
 [workspace.package]
 rust-version = "1.79"
 
+# DIAGNOSTIC ONLY (debug/toolchain-isolation branch): pins the same
+# platform-tools version as PR #12 (phase-2/mpl-core-integration-proof) but
+# WITHOUT the mpl-core/solana-program dependency bump, to isolate whether a
+# runtime crash seen under the new toolchain is caused by the toolchain
+# itself or by the dependency graph change. Not intended to be merged.
+[workspace.metadata.solana]
+tools-version = "v1.52"
+
 [profile.release]
 overflow-checks = true
 lto = "fat"
