@@ -229,3 +229,20 @@ mpl-core = { git = "https://github.com/RodeoOnSolana/mpl-core", rev = "e31f5de77
 ```toml
 mpl-core = { version = "=0.11.2", default-features = false }
 ```
+
+## 2D3A1 final state
+
+- **2D3A1 merge commit:** `91048124aa94daa78f16f06cc788a1aa1d744dcd`
+- **Main CI run:** https://github.com/RodeoOnSolana/Rodeo/actions/runs/31462533013 — `success`
+- **Solana CLI:** `v2.2.20`
+- **platform-tools:** `v1.52`
+- **Anchor:** `0.31.1`
+- **solana-program:** `2.2.1`
+- **mpl-core:** `0.11.2` (patched fork `RodeoOnSolana/mpl-core` at `e31f5de77a0bd23793ddf27bc887dc675ecaec75`)
+- **Upstream issue:** https://github.com/metaplex-foundation/mpl-core/issues/299
+- **MPL Core program ID:** `CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d`
+- **Localnet Core binary SHA256:** `f03e75373ae9cae07b5875f7818c55147b73c5607ca0f96968bab93cd583dc6e`
+- **SBF stack-safety result:** zero `Stack offset ... exceeded max offset` and zero `overwrites values in the frame` diagnostics across default, epoch, claim, and mpl-core build profiles.
+- **Anchor 0.31.1 status:** Rodeo remains an Anchor 0.31.1 program. Only `mpl-core`'s optional `anchor` feature is disabled; Rodeo uses `mpl-core`'s generated CPI builders directly and parses Core accounts via `BaseAssetV1::load` / `SolanaAccount` Borsh deserialization.
+
+2D3A1 is complete and merged to `main`. 2D3A2 (receipt lifecycle proof) must not begin until explicitly scoped.
