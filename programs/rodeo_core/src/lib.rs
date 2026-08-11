@@ -1442,6 +1442,40 @@ pub mod rodeo_core {
             None => false,
         };
 
+        // Localnet tests load only the production IDL (test-fixture
+        // instructions/events are never part of it), so this event cannot be
+        // decoded client-side via `addEventListener`. These `msg!` lines are
+        // the only way for the TS proof tests to read back the values that
+        // were actually parsed from the on-chain Core account, without
+        // hand-rolling a byte-level MPL Core account decoder in TypeScript.
+        // They report exactly the same values the event above carries.
+        msg!("receipt_owner:{}", owner);
+        msg!("receipt_frozen:{}", frozen);
+        msg!(
+            "receipt_has_permanent_transfer_delegate:{}",
+            permanent_transfer.is_some()
+        );
+        msg!(
+            "receipt_has_permanent_burn_delegate:{}",
+            permanent_burn.is_some()
+        );
+        msg!(
+            "receipt_has_permanent_freeze_delegate:{}",
+            permanent_freeze.is_some()
+        );
+        msg!(
+            "receipt_permanent_transfer_authority:{}",
+            format_plugin_authority(permanent_transfer.map(|p| p.authority.clone()))
+        );
+        msg!(
+            "receipt_permanent_burn_authority:{}",
+            format_plugin_authority(permanent_burn.map(|p| p.authority.clone()))
+        );
+        msg!(
+            "receipt_permanent_freeze_authority:{}",
+            format_plugin_authority(permanent_freeze.map(|p| p.authority.clone()))
+        );
+
         emit!(PositionReceiptParsed {
             receipt_asset: *ctx.accounts.receipt_asset.key,
             owner,

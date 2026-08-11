@@ -64,6 +64,21 @@ pub enum ReceiptPluginAuthority {
     Address { address: Pubkey },
 }
 
+/// Renders a parsed plugin authority as a compact string for `msg!`
+/// diagnostics, since the production IDL does not carry the `PositionReceiptParsed`
+/// event and localnet tests cannot decode it client-side. Exhaustive over
+/// the pinned 0.11.2 `PluginAuthority` shape for the same reason as the
+/// `From` conversion below.
+pub fn format_plugin_authority(authority: Option<MplCorePluginAuthority>) -> String {
+    match authority {
+        None => "missing".to_string(),
+        Some(MplCorePluginAuthority::None) => "none".to_string(),
+        Some(MplCorePluginAuthority::Owner) => "owner".to_string(),
+        Some(MplCorePluginAuthority::UpdateAuthority) => "update_authority".to_string(),
+        Some(MplCorePluginAuthority::Address { address }) => format!("address:{}", address),
+    }
+}
+
 /// Exhaustive conversion from the foreign MPL Core enum to the local mirror.
 /// Deliberately has no `_` wildcard arm: if the pinned mpl-core dependency
 /// ever changes `PluginAuthority`'s variants, this must fail to compile
