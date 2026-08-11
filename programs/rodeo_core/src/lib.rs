@@ -1317,14 +1317,16 @@ pub mod rodeo_core {
             ctx.accounts.mpl_core_program.to_account_info(),
         ];
 
+        let global_config_key = ctx.accounts.global_config.key();
+        let position_key = ctx.accounts.position.key();
         let receipt_authority_seeds = [
             SEED_RECEIPT_AUTHORITY,
-            ctx.accounts.global_config.key().as_ref(),
+            global_config_key.as_ref(),
             &[receipt_authority_bump],
         ];
         let receipt_asset_seeds = [
             SEED_POSITION_RECEIPT,
-            ctx.accounts.position.key().as_ref(),
+            position_key.as_ref(),
             &[receipt_asset_bump],
         ];
 
@@ -1351,7 +1353,7 @@ pub mod rodeo_core {
             .payer(ctx.accounts.authority.key())
             .authority(Some(receipt_authority))
             .new_owner(new_owner)
-            .system_program(solana_program::system_program::ID)
+            .system_program(Some(solana_program::system_program::ID))
             .instruction();
 
         let account_infos = [
@@ -1390,7 +1392,7 @@ pub mod rodeo_core {
             .asset(*ctx.accounts.receipt_asset.key)
             .payer(ctx.accounts.authority.key())
             .authority(Some(receipt_authority))
-            .system_program(solana_program::system_program::ID)
+            .system_program(Some(solana_program::system_program::ID))
             .instruction();
 
         let account_infos = [
