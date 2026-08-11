@@ -167,7 +167,10 @@ describe.skipIf(skipReceiptProofSuite)(
     // Wallet B is exercised in the follow-up pass.
     let walletA: web3.Keypair;
 
-    const positionId = new BN(90_000);
+    // `stake_and_commit` requires `position_id` to equal the current
+    // `next_position_id`, which starts at 0 on a freshly initialized
+    // protocol (this suite initializes its own isolated GlobalConfig).
+    const positionId = new BN(0);
 
     beforeAll(async () => {
       provider = AnchorProvider.env();
