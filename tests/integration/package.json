@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "pretest": "cargo check -p rodeo_core --locked && cargo check -p rodeo_core --features mock-randomness,test-short-timeout,test-fixtures --locked",
+    "pretest": "cargo check -p rodeo_core && cargo check -p rodeo_core --features mock-randomness,test-short-timeout,test-fixtures",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

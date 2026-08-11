@@ -126,10 +126,10 @@ jobs:
         run: cargo metadata --format-version 1 > /dev/null
 
       - name: Rust checks
-        run: cargo check --workspace --all-targets --locked
+        run: cargo check --workspace --all-targets
 
       - name: Rust unit tests
-        run: cargo test -p rodeo_core --locked
+        run: cargo test -p rodeo_core
 
       - name: Upload generated Cargo lockfile
         uses: actions/upload-artifact@v4
