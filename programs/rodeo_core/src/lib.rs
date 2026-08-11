@@ -1449,9 +1449,12 @@ pub mod rodeo_core {
             has_permanent_burn_delegate: permanent_burn.is_some(),
             has_permanent_freeze_delegate: permanent_freeze.is_some(),
             frozen,
-            permanent_transfer_authority: permanent_transfer.map(|p| p.authority.clone()),
-            permanent_burn_authority: permanent_burn.map(|p| p.authority.clone()),
-            permanent_freeze_authority: permanent_freeze.map(|p| p.authority.clone()),
+            permanent_transfer_authority: permanent_transfer
+                .map(|p| ReceiptPluginAuthority::from(p.authority.clone())),
+            permanent_burn_authority: permanent_burn
+                .map(|p| ReceiptPluginAuthority::from(p.authority.clone())),
+            permanent_freeze_authority: permanent_freeze
+                .map(|p| ReceiptPluginAuthority::from(p.authority.clone())),
         });
 
         Ok(())

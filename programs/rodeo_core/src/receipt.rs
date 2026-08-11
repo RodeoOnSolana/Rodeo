@@ -3,7 +3,7 @@ use crate::state::*;
 use crate::RodeoError;
 use anchor_lang::prelude::*;
 use mpl_core::accounts::BaseAssetV1;
-use mpl_core::types::{Key as MplCoreKey, PluginAuthority};
+use mpl_core::types::{Key as MplCoreKey, PluginAuthority as MplCorePluginAuthority};
 use mpl_core::{IndexableAsset, SolanaAccount};
 
 /// Derive the stateless ReceiptAuthority PDA used to sign permanent-delegate
@@ -47,6 +47,40 @@ pub fn parse_core_asset(account: &AccountInfo) -> Result<IndexableAsset> {
         .map_err(|_| error!(RodeoError::CoreAssetDeserializationFailed))
 }
 
+/// Rodeo-owned, Anchor-IDL-compatible mirror of `mpl_core::types::PluginAuthority`
+/// (pinned fork revision `e31f5de77a0bd23793ddf27bc887dc675ecaec75`, which matches
+/// the upstream mpl-core 0.11.2 shape). This exists solely so the test-only
+/// `PositionReceiptParsed` event can report the actual parsed Core plugin
+/// authority kind without embedding a foreign, non-`IdlBuild` type in an
+/// Anchor-visible struct (`mpl-core` is compiled with `default-features =
+/// false`, so its own Anchor trait impls are not available). This type is
+/// test/proof instrumentation only and is never used in production Rodeo
+/// state.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
+pub enum ReceiptPluginAuthority {
+    None,
+    Owner,
+    UpdateAuthority,
+    Address { address: Pubkey },
+}
+
+/// Exhaustive conversion from the foreign MPL Core enum to the local mirror.
+/// Deliberately has no `_` wildcard arm: if the pinned mpl-core dependency
+/// ever changes `PluginAuthority`'s variants, this must fail to compile
+/// rather than silently drop or misrepresent an authority kind.
+impl From<MplCorePluginAuthority> for ReceiptPluginAuthority {
+    fn from(authority: MplCorePluginAuthority) -> Self {
+        match authority {
+            MplCorePluginAuthority::None => ReceiptPluginAuthority::None,
+            MplCorePluginAuthority::Owner => ReceiptPluginAuthority::Owner,
+            MplCorePluginAuthority::UpdateAuthority => ReceiptPluginAuthority::UpdateAuthority,
+            MplCorePluginAuthority::Address { address } => {
+                ReceiptPluginAuthority::Address { address }
+            }
+        }
+    }
+}
+
 #[event]
 pub struct PositionReceiptParsed {
     pub receipt_asset: Pubkey,
@@ -55,9 +89,9 @@ pub struct PositionReceiptParsed {
     pub has_permanent_burn_delegate: bool,
     pub has_permanent_freeze_delegate: bool,
     pub frozen: bool,
-    pub permanent_transfer_authority: Option<PluginAuthority>,
-    pub permanent_burn_authority: Option<PluginAuthority>,
-    pub permanent_freeze_authority: Option<PluginAuthority>,
+    pub permanent_transfer_authority: Option<ReceiptPluginAuthority>,
+    pub permanent_burn_authority: Option<ReceiptPluginAuthority>,
+    pub permanent_freeze_authority: Option<ReceiptPluginAuthority>,
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -254,5 +288,30 @@ mod tests {
         let (receipt, _) = position_receipt_pda(&sample_position);
 
         assert_ne!(receipt_authority, receipt);
+    }
+
+    #[test]
+    fn receipt_plugin_authority_mirrors_none_variant() {
+        let converted: ReceiptPluginAuthority = MplCorePluginAuthority::None.into();
+        assert_eq!(converted, ReceiptPluginAuthority::None);
+    }
+
+    #[test]
+    fn receipt_plugin_authority_mirrors_owner_variant() {
+        let converted: ReceiptPluginAuthority = MplCorePluginAuthority::Owner.into();
+        assert_eq!(converted, ReceiptPluginAuthority::Owner);
+    }
+
+    #[test]
+    fn receipt_plugin_authority_mirrors_update_authority_variant() {
+        let converted: ReceiptPluginAuthority = MplCorePluginAuthority::UpdateAuthority.into();
+        assert_eq!(converted, ReceiptPluginAuthority::UpdateAuthority);
+    }
+
+    #[test]
+    fn receipt_plugin_authority_mirrors_address_variant() {
+        let address = Pubkey::from_str("79PJ9kijazYdkds7dmeJThJifPfuYdnYNbs9WTvVLmN3").unwrap();
+        let converted: ReceiptPluginAuthority = MplCorePluginAuthority::Address { address }.into();
+        assert_eq!(converted, ReceiptPluginAuthority::Address { address });
     }
 }
