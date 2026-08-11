@@ -334,16 +334,33 @@ describe.skipIf(skipReceiptProofSuite)(
       });
       const tx = new web3.Transaction().add(ix);
       const signature = await provider.sendAndConfirm(tx, [payer]);
-      const parsed = await provider.connection.getTransaction(signature, {
-        commitment: "confirmed",
-        maxSupportedTransactionVersion: 0,
-      });
-      const logs = parsed?.meta?.logMessages ?? [];
+
+      // `getTransaction` can briefly lag behind `sendAndConfirm` even at
+      // "confirmed" commitment on a fresh local validator; retry rather
+      // than risk a flaky false negative on log retrieval.
+      let logs: string[] = [];
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const parsed = await provider.connection.getTransaction(signature, {
+          commitment: "confirmed",
+          maxSupportedTransactionVersion: 0,
+        });
+        if (parsed?.meta?.logMessages) {
+          logs = parsed.meta.logMessages;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
       const extract = (key: string): string | undefined => {
         const prefix = `Program log: ${key}:`;
         const line = logs.find((l) => l.startsWith(prefix));
         return line?.slice(prefix.length);
       };
+      if (logs.length === 0) {
+        throw new Error(
+          `test_fixture_parse_position_receipt (${signature}) returned no retrievable logs after retries`,
+        );
+      }
       return {
         signature,
         logs,
@@ -405,6 +422,13 @@ describe.skipIf(skipReceiptProofSuite)(
         expect(receiptLamportsAfterCreate).toBeGreaterThan(0);
 
         const parsed = await fixtureParsePositionReceipt(position, receiptAsset);
+        if (parsed.owner === undefined) {
+          // Surface the raw transaction logs to make any future log-format
+          // drift immediately diagnosable instead of just "undefined".
+          throw new Error(
+            `could not find receipt_owner log line; full logs:\n${parsed.logs.join("\n")}`,
+          );
+        }
 
         // Embedded Core asset owner must be Wallet A (the Position owner),
         // and must be conceptually distinct from the Solana program owner
