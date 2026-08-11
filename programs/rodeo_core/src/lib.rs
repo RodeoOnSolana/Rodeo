@@ -1365,9 +1365,10 @@ pub mod rodeo_core {
             ctx.accounts.system_program.to_account_info(),
             ctx.accounts.mpl_core_program.to_account_info(),
         ];
+        let global_config_key = ctx.accounts.global_config.key();
         let seeds = [
             SEED_RECEIPT_AUTHORITY,
-            ctx.accounts.global_config.key().as_ref(),
+            global_config_key.as_ref(),
             &[receipt_authority_bump],
         ];
 
@@ -1403,9 +1404,10 @@ pub mod rodeo_core {
             ctx.accounts.system_program.to_account_info(),
             ctx.accounts.mpl_core_program.to_account_info(),
         ];
+        let global_config_key = ctx.accounts.global_config.key();
         let seeds = [
             SEED_RECEIPT_AUTHORITY,
-            ctx.accounts.global_config.key().as_ref(),
+            global_config_key.as_ref(),
             &[receipt_authority_bump],
         ];
 
