@@ -233,7 +233,7 @@ mpl-core = { version = "=0.11.2", default-features = false }
 ## 2D3A1 final state
 
 - **2D3A1 merge commit:** `91048124aa94daa78f16f06cc788a1aa1d744dcd`
-- **Main CI run:** https://github.com/RodeoOnSolana/Rodeo/actions/runs/31462533013 — `success`
+- **Main CI run:** https://github.com/RodeoOnSolana/Rodeo/actions/runs/31463659875 — `success`
 - **Solana CLI:** `v2.2.20`
 - **platform-tools:** `v1.52`
 - **Anchor:** `0.31.1`
