@@ -131,6 +131,9 @@ jobs:
       - name: Rust unit tests
         run: cargo test -p rodeo_core
 
+      - name: MPL Core semantic parity unit tests
+        run: cargo test -p mpl-core --lib
+
       - name: Upload generated Cargo lockfile
         uses: actions/upload-artifact@v4
         with:
