@@ -1281,16 +1281,26 @@ pub mod rodeo_core {
 
         let plugins = vec![
             PluginAuthorityPair {
-                plugin: Plugin::PermanentTransferDelegate(mpl_core::types::PermanentTransferDelegate {}),
-                authority: Some(PluginAuthority::Address { address: receipt_authority }),
+                plugin: Plugin::PermanentTransferDelegate(
+                    mpl_core::types::PermanentTransferDelegate {},
+                ),
+                authority: Some(PluginAuthority::Address {
+                    address: receipt_authority,
+                }),
             },
             PluginAuthorityPair {
                 plugin: Plugin::PermanentBurnDelegate(mpl_core::types::PermanentBurnDelegate {}),
-                authority: Some(PluginAuthority::Address { address: receipt_authority }),
+                authority: Some(PluginAuthority::Address {
+                    address: receipt_authority,
+                }),
             },
             PluginAuthorityPair {
-                plugin: Plugin::PermanentFreezeDelegate(mpl_core::types::PermanentFreezeDelegate { frozen: true }),
-                authority: Some(PluginAuthority::Address { address: receipt_authority }),
+                plugin: Plugin::PermanentFreezeDelegate(mpl_core::types::PermanentFreezeDelegate {
+                    frozen: true,
+                }),
+                authority: Some(PluginAuthority::Address {
+                    address: receipt_authority,
+                }),
             },
         ];
 
@@ -1372,12 +1382,8 @@ pub mod rodeo_core {
             &[receipt_authority_bump],
         ];
 
-        solana_program::program::invoke_signed(
-            &instruction,
-            &account_infos,
-            &[&seeds],
-        )
-        .map_err(Into::into)
+        solana_program::program::invoke_signed(&instruction, &account_infos, &[&seeds])
+            .map_err(Into::into)
     }
 
     /// Test-only fixture that force-burns the frozen receipt using the
@@ -1411,12 +1417,8 @@ pub mod rodeo_core {
             &[receipt_authority_bump],
         ];
 
-        solana_program::program::invoke_signed(
-            &instruction,
-            &account_infos,
-            &[&seeds],
-        )
-        .map_err(Into::into)
+        solana_program::program::invoke_signed(&instruction, &account_infos, &[&seeds])
+            .map_err(Into::into)
     }
 
     /// Test-only fixture that parses a PositionReceipt Core asset and emits a
