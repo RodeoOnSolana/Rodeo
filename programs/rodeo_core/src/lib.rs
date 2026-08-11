@@ -1299,7 +1299,7 @@ pub mod rodeo_core {
             .authority(Some(receipt_authority))
             .payer(ctx.accounts.authority.key())
             .owner(Some(ctx.accounts.asset_owner.key()))
-            .system_program(system_program::ID)
+            .system_program(solana_program::system_program::ID)
             .data_state(DataState::AccountState)
             .name(name)
             .uri(uri)
@@ -1351,7 +1351,7 @@ pub mod rodeo_core {
             .payer(ctx.accounts.authority.key())
             .authority(Some(receipt_authority))
             .new_owner(new_owner)
-            .system_program(system_program::ID)
+            .system_program(solana_program::system_program::ID)
             .instruction();
 
         let account_infos = [
@@ -1390,7 +1390,7 @@ pub mod rodeo_core {
             .asset(*ctx.accounts.receipt_asset.key)
             .payer(ctx.accounts.authority.key())
             .authority(Some(receipt_authority))
-            .system_program(system_program::ID)
+            .system_program(solana_program::system_program::ID)
             .instruction();
 
         let account_infos = [
