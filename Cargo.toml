@@ -43,4 +43,4 @@ codegen-units = 1
 # refactors the `try_fold` closure into a plain `for` loop to reduce
 # simultaneously-live stack. Pinned by exact SHA.
 [patch.crates-io]
-mpl-core = { git = "https://github.com/RodeoOnSolana/mpl-core", rev = "a036fe099d77b914237521629fcb70101e61ee31" }
+mpl-core = { git = "https://github.com/RodeoOnSolana/mpl-core", rev = "8c95c18a962a9cdf82c2a0c1e8598f206e029762" }
