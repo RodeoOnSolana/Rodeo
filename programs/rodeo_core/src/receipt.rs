@@ -2,10 +2,9 @@ use crate::constants::*;
 use crate::state::*;
 use crate::RodeoError;
 use anchor_lang::prelude::*;
-use mpl_core::{
-    BaseAssetV1, BurnV1Builder, CreateV2Builder, DataState, IndexableAsset, Key, Plugin,
-    PluginAuthority, PluginAuthorityPair, PluginType, SolanaAccount, TransferV1Builder,
-};
+use mpl_core::accounts::BaseAssetV1;
+use mpl_core::types::{Key as MplCoreKey, PluginAuthority};
+use mpl_core::{IndexableAsset, SolanaAccount};
 
 /// Derive the stateless ReceiptAuthority PDA used to sign permanent-delegate
 /// CPIs. The PDA is seeded by `"receipt-authority"` and the GlobalConfig PDA.
@@ -44,7 +43,7 @@ pub fn parse_core_asset(account: &AccountInfo) -> Result<IndexableAsset> {
         RodeoError::InvalidCoreAssetProgramOwner
     );
     let data = account.try_borrow_data()?;
-    IndexableAsset::fetch(Key::AssetV1, &data)
+    IndexableAsset::fetch(MplCoreKey::AssetV1, &data)
         .map_err(|_| error!(RodeoError::CoreAssetDeserializationFailed))
 }
 
@@ -194,4 +193,66 @@ pub struct TestFixtureParsePositionReceipt<'info> {
         bump,
     )]
     pub receipt_asset: UncheckedAccount<'info>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    /// Deterministic vector: GlobalConfig PDA for the deployed rodeo_core
+    /// program id, seeded by `[b"global-config"]`.
+    fn sample_global_config() -> Pubkey {
+        Pubkey::find_program_address(&[SEED_GLOBAL_CONFIG], &crate::ID).0
+    }
+
+    #[test]
+    fn receipt_authority_pda_matches_known_vector() {
+        let global_config = sample_global_config();
+        assert_eq!(
+            global_config,
+            Pubkey::from_str("6AYZNE4bCRt2GtJ25o1XBitN2FEN5XCYLnQfLksQddRQ").unwrap(),
+            "global_config PDA vector drifted; update this test's expectations only if the seeds intentionally changed"
+        );
+
+        let (receipt_authority, bump) = receipt_authority_pda(&global_config);
+        assert_eq!(
+            receipt_authority,
+            Pubkey::from_str("79PJ9kijazYdkds7dmeJThJifPfuYdnYNbs9WTvVLmN3").unwrap()
+        );
+        assert_eq!(bump, 252);
+
+        // Re-derivation must be deterministic.
+        let (receipt_authority_again, bump_again) = receipt_authority_pda(&global_config);
+        assert_eq!(receipt_authority, receipt_authority_again);
+        assert_eq!(bump, bump_again);
+    }
+
+    #[test]
+    fn position_receipt_pda_matches_known_vector() {
+        let sample_position = Pubkey::from_str("11111111111111111111111111111112").unwrap();
+
+        let (receipt, bump) = position_receipt_pda(&sample_position);
+        assert_eq!(
+            receipt,
+            Pubkey::from_str("JDW5DEHYQtW9ydLqRHUY6X2FJqKZ6gB5VmTqMxLirR6i").unwrap()
+        );
+        assert_eq!(bump, 255);
+
+        // Re-derivation must be deterministic.
+        let (receipt_again, bump_again) = position_receipt_pda(&sample_position);
+        assert_eq!(receipt, receipt_again);
+        assert_eq!(bump, bump_again);
+    }
+
+    #[test]
+    fn receipt_authority_and_position_receipt_pdas_are_distinct() {
+        let global_config = sample_global_config();
+        let sample_position = Pubkey::from_str("11111111111111111111111111111112").unwrap();
+
+        let (receipt_authority, _) = receipt_authority_pda(&global_config);
+        let (receipt, _) = position_receipt_pda(&sample_position);
+
+        assert_ne!(receipt_authority, receipt);
+    }
 }

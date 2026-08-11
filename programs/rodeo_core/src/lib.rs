@@ -10,7 +10,8 @@ pub mod receipt;
 pub mod state;
 
 use constants::*;
-use mpl_core::{BurnV1Builder, CreateV2Builder, DataState, PermanentBurnDelegate, PermanentFreezeDelegate, PermanentTransferDelegate, Plugin, PluginAuthority, PluginAuthorityPair, PluginType, TransferV1Builder};
+use mpl_core::instructions::{BurnV1Builder, CreateV2Builder, TransferV1Builder};
+use mpl_core::types::{DataState, Plugin, PluginAuthority, PluginAuthorityPair, PluginType};
 use receipt::*;
 use state::*;
 
