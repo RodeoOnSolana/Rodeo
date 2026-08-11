@@ -6,9 +6,12 @@ declare_id!("EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z");
 pub mod constants;
 pub mod math;
 pub mod probability;
+pub mod receipt;
 pub mod state;
 
 use constants::*;
+use mpl_core::{BurnV1Builder, CreateV2Builder, DataState, PermanentBurnDelegate, PermanentFreezeDelegate, PermanentTransferDelegate, Plugin, PluginAuthority, PluginAuthorityPair, PluginType, TransferV1Builder};
+use receipt::*;
 use state::*;
 
 #[program]
@@ -1248,6 +1251,202 @@ pub mod rodeo_core {
             RodeoError::InvalidPositionId
         );
         ctx.accounts.global_game_state.next_position_id = next_position_id;
+        Ok(())
+    }
+
+    /// Test-only fixture that creates a Core PositionReceipt at the deterministic
+    /// PDA for the given Position. Proves stateless ReceiptAuthority signing.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_create_position_receipt(
+        ctx: Context<TestFixtureCreatePositionReceipt>,
+        name: String,
+        uri: String,
+    ) -> Result<()> {
+        let (receipt_authority, receipt_authority_bump) =
+            receipt_authority_pda(&ctx.accounts.global_config.key());
+        let (receipt_asset, receipt_asset_bump) =
+            position_receipt_pda(&ctx.accounts.position.key());
+
+        require_keys_eq!(
+            ctx.accounts.receipt_authority.key(),
+            receipt_authority,
+            RodeoError::InvalidCoreAssetOwner
+        );
+        require_keys_eq!(
+            ctx.accounts.receipt_asset.key(),
+            receipt_asset,
+            RodeoError::InvalidCoreAssetOwner
+        );
+
+        let plugins = vec![
+            PluginAuthorityPair {
+                plugin: Plugin::PermanentTransferDelegate(mpl_core::types::PermanentTransferDelegate {}),
+                authority: Some(PluginAuthority::Address { address: receipt_authority }),
+            },
+            PluginAuthorityPair {
+                plugin: Plugin::PermanentBurnDelegate(mpl_core::types::PermanentBurnDelegate {}),
+                authority: Some(PluginAuthority::Address { address: receipt_authority }),
+            },
+            PluginAuthorityPair {
+                plugin: Plugin::PermanentFreezeDelegate(mpl_core::types::PermanentFreezeDelegate { frozen: true }),
+                authority: Some(PluginAuthority::Address { address: receipt_authority }),
+            },
+        ];
+
+        let instruction = CreateV2Builder::new()
+            .asset(receipt_asset)
+            .authority(Some(receipt_authority))
+            .payer(ctx.accounts.authority.key())
+            .owner(Some(ctx.accounts.asset_owner.key()))
+            .system_program(system_program::ID)
+            .data_state(DataState::AccountState)
+            .name(name)
+            .uri(uri)
+            .plugins(plugins)
+            .instruction();
+
+        let account_infos = [
+            ctx.accounts.receipt_asset.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+            ctx.accounts.receipt_authority.to_account_info(),
+            ctx.accounts.authority.to_account_info(),
+            ctx.accounts.asset_owner.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+        ];
+
+        let receipt_authority_seeds = [
+            SEED_RECEIPT_AUTHORITY,
+            ctx.accounts.global_config.key().as_ref(),
+            &[receipt_authority_bump],
+        ];
+        let receipt_asset_seeds = [
+            SEED_POSITION_RECEIPT,
+            ctx.accounts.position.key().as_ref(),
+            &[receipt_asset_bump],
+        ];
+
+        solana_program::program::invoke_signed(
+            &instruction,
+            &account_infos,
+            &[&receipt_authority_seeds, &receipt_asset_seeds],
+        )
+        .map_err(Into::into)
+    }
+
+    /// Test-only fixture that force-transfers the frozen receipt using the
+    /// permanent transfer delegate controlled by the stateless ReceiptAuthority.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_force_transfer_position_receipt(
+        ctx: Context<TestFixtureForceTransferPositionReceipt>,
+        new_owner: Pubkey,
+    ) -> Result<()> {
+        let (receipt_authority, receipt_authority_bump) =
+            receipt_authority_pda(&ctx.accounts.global_config.key());
+
+        let instruction = TransferV1Builder::new()
+            .asset(*ctx.accounts.receipt_asset.key)
+            .payer(ctx.accounts.authority.key())
+            .authority(Some(receipt_authority))
+            .new_owner(new_owner)
+            .system_program(system_program::ID)
+            .instruction();
+
+        let account_infos = [
+            ctx.accounts.receipt_asset.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+            ctx.accounts.authority.to_account_info(),
+            ctx.accounts.receipt_authority.to_account_info(),
+            ctx.accounts.new_owner_account.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+        ];
+        let seeds = [
+            SEED_RECEIPT_AUTHORITY,
+            ctx.accounts.global_config.key().as_ref(),
+            &[receipt_authority_bump],
+        ];
+
+        solana_program::program::invoke_signed(
+            &instruction,
+            &account_infos,
+            &[&seeds],
+        )
+        .map_err(Into::into)
+    }
+
+    /// Test-only fixture that force-burns the frozen receipt using the
+    /// permanent burn delegate controlled by the stateless ReceiptAuthority.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_force_burn_position_receipt(
+        ctx: Context<TestFixtureForceBurnPositionReceipt>,
+    ) -> Result<()> {
+        let (receipt_authority, receipt_authority_bump) =
+            receipt_authority_pda(&ctx.accounts.global_config.key());
+
+        let instruction = BurnV1Builder::new()
+            .asset(*ctx.accounts.receipt_asset.key)
+            .payer(ctx.accounts.authority.key())
+            .authority(Some(receipt_authority))
+            .system_program(system_program::ID)
+            .instruction();
+
+        let account_infos = [
+            ctx.accounts.receipt_asset.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+            ctx.accounts.authority.to_account_info(),
+            ctx.accounts.receipt_authority.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+        ];
+        let seeds = [
+            SEED_RECEIPT_AUTHORITY,
+            ctx.accounts.global_config.key().as_ref(),
+            &[receipt_authority_bump],
+        ];
+
+        solana_program::program::invoke_signed(
+            &instruction,
+            &account_infos,
+            &[&seeds],
+        )
+        .map_err(Into::into)
+    }
+
+    /// Test-only fixture that parses a PositionReceipt Core asset and emits a
+    /// `PositionReceiptParsed` event. Proves manual, non-Anchor Core parsing.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_parse_position_receipt(
+        ctx: Context<TestFixtureParsePositionReceipt>,
+    ) -> Result<()> {
+        let asset = parse_core_asset(&ctx.accounts.receipt_asset.to_account_info())?;
+        let owner = asset.owner.ok_or(RodeoError::InvalidCoreAssetOwner)?;
+
+        let permanent_transfer = asset.plugins.get(&PluginType::PermanentTransferDelegate);
+        let permanent_burn = asset.plugins.get(&PluginType::PermanentBurnDelegate);
+        let permanent_freeze = asset.plugins.get(&PluginType::PermanentFreezeDelegate);
+
+        let frozen = match permanent_freeze {
+            Some(p) => match &p.data {
+                Plugin::PermanentFreezeDelegate(inner) => inner.frozen,
+                _ => false,
+            },
+            None => false,
+        };
+
+        emit!(PositionReceiptParsed {
+            receipt_asset: *ctx.accounts.receipt_asset.key,
+            owner,
+            has_permanent_transfer_delegate: permanent_transfer.is_some(),
+            has_permanent_burn_delegate: permanent_burn.is_some(),
+            has_permanent_freeze_delegate: permanent_freeze.is_some(),
+            frozen,
+            permanent_transfer_authority: permanent_transfer.map(|p| p.authority.clone()),
+            permanent_burn_authority: permanent_burn.map(|p| p.authority.clone()),
+            permanent_freeze_authority: permanent_freeze.map(|p| p.authority.clone()),
+        });
+
         Ok(())
     }
 }
@@ -2526,6 +2725,22 @@ pub enum RodeoError {
     UnstakeAlreadySettled,
     #[msg("RODEO destination account is invalid")]
     InvalidRodeoDestination,
+    #[msg("Account is not owned by the MPL Core program")]
+    InvalidCoreAssetProgramOwner,
+    #[msg("Failed to deserialize a Core asset account")]
+    CoreAssetDeserializationFailed,
+    #[msg("Missing or malformed permanent transfer delegate")]
+    MissingPermanentTransferDelegate,
+    #[msg("Missing or malformed permanent burn delegate")]
+    MissingPermanentBurnDelegate,
+    #[msg("Missing or malformed permanent freeze delegate")]
+    MissingPermanentFreezeDelegate,
+    #[msg("Core receipt asset is frozen")]
+    CoreAssetFrozen,
+    #[msg("Core receipt asset is not frozen")]
+    CoreAssetNotFrozen,
+    #[msg("Core receipt asset is not owned by the expected address")]
+    InvalidCoreAssetOwner,
 }
 
 // ---------------------------------------------------------------------------

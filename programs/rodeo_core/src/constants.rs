@@ -83,6 +83,8 @@ pub const SEED_POSITION: &[u8] = b"position";
 pub const SEED_CLAIM_COOLDOWN: &[u8] = b"claim_cooldown";
 pub const SEED_RANDOMNESS: &[u8] = b"randomness";
 pub const SEED_PROTOCOL_CONFIG: &[u8] = b"protocol-config";
+pub const SEED_RECEIPT_AUTHORITY: &[u8] = b"receipt-authority";
+pub const SEED_POSITION_RECEIPT: &[u8] = b"receipt";
 
 pub const ACCOUNT_VERSION_GLOBAL_CONFIG: u8 = 2;
 pub const ACCOUNT_VERSION_REWARD_STATE: u8 = 3;
