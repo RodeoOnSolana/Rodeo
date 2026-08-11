@@ -32,5 +32,30 @@ test-fixtures = []
 [dependencies]
 anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
 anchor-spl = { version = "0.31.1", default-features = false, features = ["token", "token_2022"] }
-solana-program = "=2.1.0"
-solana-zk-sdk = "=2.1.0"
+solana-program = "=2.2.1"
+solana-zk-sdk = "=2.2.1"
+# Least-churn version proven (via `cargo tree`) to resolve to a single,
+# unified `anchor-lang 0.31.1` / `solana-program 2.2.1` dependency graph with
+# no duplicate major-version crates. See docs/mpl-core-integration-proof.md
+# for the full compatibility matrix. This dependency is compiled into the
+# production binary but is not yet used by any production instruction in
+# this PR; only `#[cfg(feature = "test-fixtures")]` code calls it.
+mpl-core = { version = "=0.11.2", default-features = false }
+# `cargo build-sbf` bundles its own older cargo/rustc (currently 1.79.0)
+# separate from this workspace's pinned Rust 1.85.1, and re-resolves
+# dependencies without honoring `--locked`. Several transitive crates have
+# since released patch versions requiring the `edition2024` Cargo feature,
+# which is not stabilized in cargo 1.79.0, so `anchor build` fails against
+# an unpinned resolution. Pin them below their edition2024-requiring
+# versions so the SBF toolchain's independent resolution never selects
+# those releases. This mirrors the same class of fix Anchor itself has
+# needed for `bytemuck_derive` (coral-xyz/anchor#3609/#3610) and Solana
+# core has needed for `zeroize` in the past (solana-labs/solana#33853).
+zeroize = "=1.8.2"
+# Bumping `solana-program`/`solana-zk-sdk` to 2.2.1 (required by mpl-core
+# 0.11.2) transitively bumps `blake3` from the previously-resolved 1.5.4 to
+# 1.8.6, which pulls in `digest 0.11` -> `ctutils` -> `cmov 0.5.4`
+# (edition2024). Pinning `blake3` back to the version this workspace
+# already resolved to before the mpl-core dependency was added avoids that
+# chain entirely.
+blake3 = "=1.5.5"

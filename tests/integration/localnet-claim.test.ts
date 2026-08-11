@@ -279,7 +279,10 @@ async function revokeMintAuthorities(
 // and recognize_rewards, yet can never trip during the test run. Deterministic
 // claim-ready state is established via the test-only fixture instructions
 // instead of relying on real epoch emissions.
-const skipClaimSuite = !localnetAvailable || process.env.RODEO_TEST_SUITE === "epoch";
+const skipClaimSuite =
+  !localnetAvailable ||
+  process.env.RODEO_TEST_SUITE === "epoch" ||
+  process.env.RODEO_TEST_SUITE === "mplcore";
 
 describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () => {
   let provider: AnchorProvider;

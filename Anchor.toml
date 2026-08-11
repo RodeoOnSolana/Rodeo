@@ -23,5 +23,15 @@ upgradeable = true
 # slow to come up, not actually failing.
 startup_wait = 20000
 
+# Loads the real Metaplex Core on-chain program into the local test
+# validator at genesis, at its canonical mainnet program ID, so localnet/CI
+# tests exercise the actual mpl-core program rather than a mock. The binary
+# itself is fetched fresh by `scripts/fetch-mpl-core-program.sh` before
+# `anchor test` runs (see docs/mpl-core-integration-proof.md) and is never
+# committed to git.
+[[test.genesis]]
+address = "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+program = "vendor/mpl-core/mpl_core_program.so"
+
 [scripts]
 test = "pnpm --filter @rodeo/integration test"
