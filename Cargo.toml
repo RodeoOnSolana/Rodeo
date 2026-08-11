@@ -36,3 +36,11 @@ codegen-units = 1
 opt-level = 3
 incremental = false
 codegen-units = 1
+
+# Patched fork of mpl-core 0.11.2 to eliminate an SBF stack-frame overflow in
+# `registry_records_to_plugin_list` (see docs/mpl-core-integration-proof.md).
+# The base is the exact crates.io 0.11.2 source; the single patch commit
+# refactors the `try_fold` closure into a plain `for` loop to reduce
+# simultaneously-live stack. Pinned by exact SHA.
+[patch.crates-io]
+mpl-core = { git = "https://github.com/RodeoOnSolana/mpl-core", rev = "e31f5de77a0bd23793ddf27bc887dc675ecaec75" }

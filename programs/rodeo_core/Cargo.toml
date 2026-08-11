@@ -40,7 +40,7 @@ solana-zk-sdk = "=2.2.1"
 # for the full compatibility matrix. This dependency is compiled into the
 # production binary but is not yet used by any production instruction in
 # this PR; only `#[cfg(feature = "test-fixtures")]` code calls it.
-mpl-core = { version = "=0.11.2", default-features = false, features = ["anchor"] }
+mpl-core = { version = "=0.11.2", default-features = false }
 # `cargo build-sbf` bundles its own older cargo/rustc (currently 1.79.0)
 # separate from this workspace's pinned Rust 1.85.1, and re-resolves
 # dependencies without honoring `--locked`. Several transitive crates have

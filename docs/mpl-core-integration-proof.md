@@ -53,7 +53,7 @@ anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
 anchor-spl = { version = "0.31.1", default-features = false, features = ["token", "token_2022"] }
 solana-program = "=2.2.1"
 solana-zk-sdk = "=2.2.1"
-mpl-core = { version = "=0.11.2", default-features = false, features = ["anchor"] }
+mpl-core = { version = "=0.11.2", default-features = false }
 ```
 
 Verified locally via `cargo tree -p rodeo_core`, `cargo tree -p rodeo_market`,
@@ -141,3 +141,91 @@ A new `RODEO_TEST_SUITE=mplcore` profile (mirroring the existing `epoch` and
 proves only that the genesis-loaded program is present, executable, and
 owned by the BPF Upgradeable Loader. It does not create, transfer, or burn
 any Metaplex Core asset -- that is 2D3A2's scope.
+
+## Why the `anchor` feature is disabled
+
+Rodeo itself remains an Anchor 0.31.1 program. Only `mpl-core`'s optional
+`anchor` feature is disabled. We do this because:
+
+- The `anchor` feature pulls `anchor-lang` macros and `Account<BaseAssetV1>`
+  wrappers into `mpl-core`, which is unnecessary for `rodeo_core`.
+- All CPI builders (`CreateV2CpiBuilder`, `TransferV1CpiBuilder`,
+  `BurnV1CpiBuilder`, `CreateCollectionV2CpiBuilder`, `UpdateV1CpiBuilder`,
+  etc.) live in `mpl_core::generated::instructions` and are independent of the
+  `anchor` feature.
+- Core account parsing is done manually via `BaseAssetV1::load` (the
+  `SolanaAccount` Borsh path) rather than `Account<'info, BaseAssetV1>`.
+- This avoids an unnecessary Anchor-specific MPL Core integration layer while
+  retaining the exact Core APIs Rodeo needs for 2D3A2–2D3A4.
+
+The workspace still depends on `anchor-lang 0.31.1` and `anchor-spl 0.31.1`
+for Rodeo's own instructions and SPL token wrappers.
+
+## SBF stack safety and the mpl-core fork
+
+`mpl-core 0.11.2` contains an SBF stack-frame overflow in
+`mpl_core::hooked::plugin::registry_records_to_plugin_list`. Under
+platform-tools v1.52 (Rust 1.89.0) the linker reports:
+
+```text
+Stack offset of 4184 exceeded max offset of 4096 by 88 bytes,
+please minimize large stack variables.
+Estimated function frame size: 4224 bytes.
+```
+
+The overflow is inside `mpl-core` itself and persists when the `anchor`
+feature is disabled.
+
+### Fork provenance
+
+- **Official upstream repository:** https://github.com/metaplex-foundation/mpl-core
+- **Upstream base/version:** `0.11.2`
+- **Exact upstream base commit (from `.cargo_vcs_info.json`):**
+  `33eaba4d1cc792f79ee1107a290375efe144dbb2`
+- **Rodeo fork URL:** https://github.com/RodeoOnSolana/mpl-core
+- **Exact pinned patch commit:** `e31f5de77a0bd23793ddf27bc887dc675ecaec75`
+- **Modified production file:** `src/hooked/plugin.rs`
+- **Patch summary:** `registry_records_to_plugin_list` rewritten from a
+  `try_fold` closure to a plain `for` loop that mutates one `PluginsList` in
+  place.
+- **Reason for patch:** eliminates the SBF stack-frame overflow caused by the
+  `try_fold` closure keeping the accumulator `PluginsList` and the `Plugin`
+  deserialization on the same stack frame.
+- **Before stack diagnostic:**
+  `Stack offset of 4184 exceeded max offset of 4096 by 88 bytes`
+- **After stack result:** zero `Stack offset ... exceeded max offset` or
+  `overwrites values in the frame` diagnostics across default, epoch, claim,
+  and mpl-core SBF build profiles.
+- **Semantic parity tests:** included in the fork; run by `cargo test --lib`
+  in `RodeoOnSolana/mpl-core`. They compare the same fixture vectors through
+  both the original `try_fold` and patched `for` loop implementations and
+  cover:
+  - `empty_registry_returns_default`
+  - `one_known_plugin_populates_correct_field`
+  - `multiple_known_plugins_populate_correct_fields`
+  - `three_permanent_plugins_are_recognized`
+  - `unknown_plugin_type_is_skipped`
+  - `malformed_plugin_data_returns_error`
+  - `out_of_range_offset_panics_same_as_upstream`
+- **Upstream issue:** https://github.com/metaplex-foundation/mpl-core/issues/299
+- **Removal condition:** delete the `[patch.crates-io]` override once an
+  official `mpl-core` release:
+  - contains an equivalent stack-safe fix for `registry_records_to_plugin_list`,
+  - remains compatible with Rodeo's Anchor 0.31.1 / `solana-program 2.2.x`
+    dependency graph, and
+  - passes the full Rodeo CI/SBF stack-safety guard.
+
+### `Cargo.toml` pinning
+
+Workspace root (`Cargo.toml`):
+
+```toml
+[patch.crates-io]
+mpl-core = { git = "https://github.com/RodeoOnSolana/mpl-core", rev = "e31f5de77a0bd23793ddf27bc887dc675ecaec75" }
+```
+
+`programs/rodeo_core/Cargo.toml`:
+
+```toml
+mpl-core = { version = "=0.11.2", default-features = false }
+```

@@ -824,7 +824,6 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f25ded719a2354f6b1a51d0c0741c25bc7afe038617664eb37f6418439eb084"
 dependencies = [
- "anchor-lang",
  "borsh 0.10.4",
  "serde",
 ]
@@ -962,10 +961,8 @@ dependencies = [
 [[package]]
 name = "mpl-core"
 version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca727be9579d95d07ad8831775314d2eee455a65c39823266f96baaa162eadb3"
+source = "git+https://github.com/RodeoOnSolana/mpl-core?rev=e31f5de77a0bd23793ddf27bc887dc675ecaec75#e31f5de77a0bd23793ddf27bc887dc675ecaec75"
 dependencies = [
- "anchor-lang",
  "base64 0.22.1",
  "borsh 0.10.4",
  "kaigan",
