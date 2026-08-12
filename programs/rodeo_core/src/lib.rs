@@ -1280,13 +1280,13 @@ pub mod rodeo_core {
 
     pub fn initialize_bull_proof(
         ctx: Context<InitializeBullProof>,
+        action_type: ActionType,
         expected_payload_length: u32,
         nonce: u64,
     ) -> Result<()> {
-        require_gt!(
-            expected_payload_length,
-            0,
-            RodeoError::BullProofBufferEmptyPayload
+        require!(
+            action_type == ActionType::Reveal || action_type == ActionType::Unstake,
+            RodeoError::BullProofBufferIncomplete
         );
         require_gte!(
             BULL_PROOF_BUFFER_MAX_PAYLOAD as u32,
@@ -1296,8 +1296,8 @@ pub mod rodeo_core {
 
         let pending_randomness = &ctx.accounts.pending_randomness;
         require!(
-            pending_randomness.action_type == ActionType::Reveal,
-            RodeoError::InvalidPendingRandomness
+            pending_randomness.action_type == action_type,
+            RodeoError::BullProofBufferIncomplete
         );
         require!(
             !pending_randomness.settled,
@@ -1311,7 +1311,7 @@ pub mod rodeo_core {
             RodeoError::InvalidPendingRandomness
         );
         require_keys_eq!(
-            pending_randomness.position,
+            position.key(),
             ctx.accounts.bull_proof_buffer.position,
             RodeoError::BullProofBufferWrongPosition
         );
@@ -1319,6 +1319,7 @@ pub mod rodeo_core {
         let buffer = &mut ctx.accounts.bull_proof_buffer;
         buffer.version = ACCOUNT_VERSION_BULL_PROOF_BUFFER;
         buffer.schema_version = BULL_PROOF_BUFFER_SCHEMA_VERSION;
+        buffer.action_type = action_type;
         buffer.pending_randomness = pending_randomness.key();
         buffer.position = position.key();
         buffer.snapshot_root = pending_randomness.registry_root_snapshot;
@@ -1327,6 +1328,7 @@ pub mod rodeo_core {
         buffer.snapshot_total_power = pending_randomness.registry_total_power_snapshot;
         buffer.refund_recipient = ctx.accounts.prover.key();
         buffer.expiry_timestamp = pending_randomness.timeout_timestamp;
+        buffer.nonce = nonce;
         buffer.expected_payload_length = expected_payload_length;
         buffer.finalized = false;
         buffer.consumed = false;
@@ -2894,6 +2896,13 @@ pub struct SettleReveal<'info> {
 
     #[account(
         mut,
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump = bull_registry.bump,
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
+
+    #[account(
+        mut,
         seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
         bump = position.bump,
         constraint = position.pending_action_active @ RodeoError::PendingActionConflict,
@@ -2916,6 +2925,36 @@ pub struct SettleReveal<'info> {
         constraint = pending_randomness.action_nonce == position.pending_action_nonce @ RodeoError::InvalidPendingRandomness,
     )]
     pub pending_randomness: Box<Account<'info, PendingRandomness>>,
+
+    #[account(
+        mut,
+        close = refund_recipient,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            pending_randomness.key().as_ref(),
+            bull_proof_buffer_prover.as_ref(),
+            &bull_proof_buffer.nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+        constraint = bull_proof_buffer.action_type == ActionType::Reveal @ RodeoError::BullProofBufferIncomplete,
+        constraint = bull_proof_buffer.pending_randomness == pending_randomness.key() @ RodeoError::BullProofBufferBindingMismatch,
+        constraint = bull_proof_buffer.position == position.key() @ RodeoError::BullProofBufferWrongPosition,
+        constraint = bull_proof_buffer.snapshot_root == pending_randomness.registry_root_snapshot @ RodeoError::BullProofBufferBindingMismatch,
+        constraint = bull_proof_buffer.snapshot_version == pending_randomness.registry_version_snapshot @ RodeoError::BullProofBufferBindingMismatch,
+        constraint = bull_proof_buffer.snapshot_total_count == pending_randomness.registry_total_count_snapshot @ RodeoError::BullProofBufferBindingMismatch,
+        constraint = bull_proof_buffer.snapshot_total_power == pending_randomness.registry_total_power_snapshot @ RodeoError::BullProofBufferBindingMismatch,
+        constraint = bull_proof_buffer.finalized @ RodeoError::BullProofBufferNotFinalized,
+        constraint = !bull_proof_buffer.consumed @ RodeoError::BullProofBufferAlreadyConsumed,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+
+    /// CHECK: The original prover that created the proof buffer; used only to
+    /// re-derive the PDA.  The actual refund destination is stored in the buffer.
+    pub bull_proof_buffer_prover: AccountInfo<'info>,
+
+    /// CHECK: Receives the proof-buffer rent refund when the buffer is consumed.
+    #[account(mut, address = bull_proof_buffer.refund_recipient)]
+    pub refund_recipient: AccountInfo<'info>,
 
     #[account(
         seeds = [
@@ -3456,7 +3495,7 @@ pub struct RecoverUnstakeTimeout<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(expected_payload_length: u32, nonce: u64)]
+#[instruction(action_type: ActionType, expected_payload_length: u32, nonce: u64)]
 pub struct InitializeBullProof<'info> {
     #[account(mut)]
     pub prover: Signer<'info>,
@@ -3475,7 +3514,7 @@ pub struct InitializeBullProof<'info> {
         ],
         bump = position.bump,
         constraint = position.pending_action_active @ RodeoError::PendingActionConflict,
-        constraint = position.pending_action_type == ActionType::Reveal @ RodeoError::WrongActionType,
+        constraint = position.pending_action_type == pending_randomness.action_type @ RodeoError::WrongActionType,
     )]
     pub position: Box<Account<'info, Position>>,
 
@@ -3483,12 +3522,11 @@ pub struct InitializeBullProof<'info> {
         seeds = [
             SEED_RANDOMNESS,
             position.key().as_ref(),
-            &[ActionType::Reveal as u8],
+            &[pending_randomness.action_type as u8],
             &position.pending_action_nonce.to_le_bytes(),
         ],
         bump = pending_randomness.bump,
         constraint = pending_randomness.position == position.key() @ RodeoError::InvalidPendingRandomness,
-        constraint = pending_randomness.action_type == ActionType::Reveal @ RodeoError::WrongActionType,
         constraint = pending_randomness.action_nonce == position.pending_action_nonce @ RodeoError::InvalidPendingRandomness,
     )]
     pub pending_randomness: Box<Account<'info, PendingRandomness>>,

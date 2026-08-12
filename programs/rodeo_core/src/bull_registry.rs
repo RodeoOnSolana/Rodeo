@@ -458,6 +458,18 @@ pub fn apply_owner_leaf_update(
     Ok(recomputed.hash)
 }
 
+pub fn leaf_contains_target(prefix: u64, leaf_power: u64, target: u64) -> bool {
+    target >= prefix && target < prefix.saturating_add(leaf_power)
+}
+
+pub fn skip_victim_interval(external_target: u64, victim_prefix: u64, victim_power: u64) -> u64 {
+    if external_target < victim_prefix {
+        external_target
+    } else {
+        external_target.saturating_add(victim_power)
+    }
+}
+
 pub fn add_bull_to_registry(
     registry: &mut crate::state::BullRegistry,
     bull_leaf: &BullLeaf,

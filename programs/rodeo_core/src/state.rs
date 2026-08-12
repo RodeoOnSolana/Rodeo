@@ -127,8 +127,9 @@ pub struct BullProofBuffer {
     pub pending_randomness: Pubkey,
     /// The Position being settled.
     pub position: Pubkey,
+    /// The action this proof buffer is for (Reveal or Unstake).
+    pub action_type: ActionType,
     /// Snapshot root the proof must be verified against.
-    pub snapshot_root: [u8; 32],
     /// Snapshot version the proof must be verified against.
     pub snapshot_version: u64,
     /// Historical snapshot total power used for external-weight calculation.
@@ -139,6 +140,8 @@ pub struct BullProofBuffer {
     pub refund_recipient: Pubkey,
     /// Timestamp after which the buffer is abandonable even if unconsumed.
     pub expiry_timestamp: i64,
+    /// Nonce used in the PDA derivation to allow multiple buffers per prover.
+    pub nonce: u64,
     /// Expected total payload length in bytes. Finalize enforces exact match.
     pub expected_payload_length: u32,
     /// True once the prover has finalized the payload; settlement may then consume it.
