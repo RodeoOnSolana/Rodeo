@@ -3823,6 +3823,37 @@ pub struct RandomnessSettled {
 }
 
 #[event]
+pub struct MintTheft {
+    pub position: Pubkey,
+    pub position_id: u64,
+    pub prospective_owner: Pubkey,
+    pub final_owner: Pubkey,
+    pub winning_bull_position: Pubkey,
+    pub winning_bull_owner: Pubkey,
+    pub registry_snapshot_version: u64,
+    pub config_version: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BullRegistryOperation {
+    Add,
+    Remove,
+}
+
+#[event]
+pub struct BullRegistryTransition {
+    pub old_root: [u8; 32],
+    pub new_root: [u8; 32],
+    pub old_version: u64,
+    pub new_version: u64,
+    pub operation: BullRegistryOperation,
+    pub bull_position: Pubkey,
+    pub position_id: u64,
+    pub owner: Pubkey,
+    pub buck_power: u8,
+}
+
+#[event]
 pub struct RandomnessTimeoutRecovered {
     pub position: Pubkey,
     pub action_type: ActionType,
@@ -4444,10 +4475,166 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
         config,
     )?;
 
+    let prospective_owner = ctx.accounts.position.owner;
+    let pending_randomness_ref = &ctx.accounts.pending_randomness;
+
+    // Parse the optional finalized proof buffer.
+    let payload = if let Some(buffer) = ctx.accounts.bull_proof_buffer.as_ref() {
+        require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
+        require!(!buffer.consumed, RodeoError::BullProofBufferAlreadyConsumed);
+        if let Some(ref refund) = ctx.accounts.refund_recipient {
+            require_keys_eq!(
+                buffer.refund_recipient,
+                refund.key(),
+                RodeoError::BullProofBufferWrongProver
+            );
+        }
+        Some(bull_registry::verify_bull_proof_payload(&buffer.payload)?)
+    } else {
+        None
+    };
+
+    // Determine final owner and theft.
+    let mut final_owner = prospective_owner;
+    let mut stolen = false;
+
+    let completed_reveals = ctx.accounts.global_game_state.total_completed_reveals;
+    if completed_reveals >= config.min_reveals_for_theft {
+        let p = payload
+            .as_ref()
+            .ok_or(RodeoError::BullProofBufferIncomplete)?;
+        let victim_proof = p
+            .victim_owner
+            .as_ref()
+            .ok_or(RodeoError::BullProofBufferIncomplete)?;
+        let (victim_count, victim_power, victim_prefix) = bull_registry::verify_owner(
+            &pending_randomness_ref.registry_root_snapshot,
+            &prospective_owner,
+            victim_proof,
+        )?;
+        let external_count = math::checked_sub_u64(
+            pending_randomness_ref.registry_total_count_snapshot,
+            victim_count,
+        )?;
+        let external_power = math::checked_sub_u64(
+            pending_randomness_ref.registry_total_power_snapshot,
+            victim_power,
+        )?;
+
+        if external_count >= config.min_bulls_for_theft && external_power > 0 {
+            let theft = probability::map_mint_theft_flag(
+                probability::RandomnessSampleContext {
+                    random_output,
+                    domain: probability::RandomnessDomain::MintTheft,
+                    position: position_key,
+                    action_nonce,
+                },
+                config,
+            )?;
+            if theft {
+                stolen = true;
+                let selected_owner = p
+                    .selected_owner
+                    .as_ref()
+                    .ok_or(RodeoError::BullProofBufferIncomplete)?;
+                let selected_bull = p
+                    .selected_bull
+                    .as_ref()
+                    .ok_or(RodeoError::BullProofBufferIncomplete)?;
+                require!(
+                    selected_owner.leaf.owner != prospective_owner,
+                    RodeoError::BullProofBufferIncomplete
+                );
+
+                let owner_target = probability::rejection_sample_draw(
+                    probability::RandomnessSampleContext {
+                        random_output,
+                        domain: probability::RandomnessDomain::OwnerSelection,
+                        position: position_key,
+                        action_nonce,
+                    },
+                    external_power,
+                )?;
+                let safe_owner_target =
+                    bull_registry::skip_victim_interval(owner_target, victim_prefix, victim_power);
+                let (_selected_owner_count, selected_owner_power, selected_owner_prefix) =
+                    bull_registry::verify_owner(
+                        &pending_randomness_ref.registry_root_snapshot,
+                        &selected_owner.leaf.owner,
+                        selected_owner,
+                    )?;
+                require!(
+                    bull_registry::leaf_contains_target(
+                        selected_owner_prefix,
+                        selected_owner_power,
+                        safe_owner_target,
+                    ),
+                    RodeoError::BullProofBufferIncomplete
+                );
+
+                let bull_target = probability::rejection_sample_draw(
+                    probability::RandomnessSampleContext {
+                        random_output,
+                        domain: probability::RandomnessDomain::BullSelection,
+                        position: position_key,
+                        action_nonce,
+                    },
+                    selected_owner_power,
+                )?;
+                let (_selected_bull_count, selected_bull_power, selected_bull_prefix) =
+                    bull_registry::verify_bull(
+                        &selected_owner.leaf.bull_tree_root,
+                        &selected_bull.leaf.position,
+                        selected_bull,
+                    )?;
+                require!(
+                    bull_registry::leaf_contains_target(
+                        selected_bull_prefix,
+                        selected_bull_power,
+                        bull_target,
+                    ),
+                    RodeoError::BullProofBufferIncomplete
+                );
+                require!(
+                    selected_bull.leaf.owner == selected_owner.leaf.owner,
+                    RodeoError::BullProofBufferIncomplete
+                );
+
+                final_owner = selected_bull.leaf.owner;
+            }
+        }
+    }
+
+    if role == Role::Bull {
+        let p = payload
+            .as_ref()
+            .ok_or(RodeoError::BullProofBufferIncomplete)?;
+        let current_owner = p
+            .current_owner
+            .as_ref()
+            .ok_or(RodeoError::BullProofBufferIncomplete)?;
+        let current_bull = p
+            .current_bull
+            .as_ref()
+            .ok_or(RodeoError::BullProofBufferIncomplete)?;
+        bull_registry::verify_owner(
+            &ctx.accounts.bull_registry.owner_tree_root,
+            &final_owner,
+            current_owner,
+        )?;
+        let owner_bull_root = if current_owner.leaf.is_empty() {
+            empty_bull_tree_root()
+        } else {
+            current_owner.leaf.bull_tree_root
+        };
+        bull_registry::verify_bull(&owner_bull_root, &position_key, current_bull)?;
+    }
+
     let position = &mut ctx.accounts.position;
     let pending_randomness = &mut ctx.accounts.pending_randomness;
     let now = Clock::get()?.unix_timestamp;
 
+    position.owner = final_owner;
     position.status = PositionStatus::Active;
     position.active_since = now;
     position.unstake_eligible_at = now
@@ -4470,7 +4657,6 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
     let active_since = position.active_since;
     let unstake_eligible_at = position.unstake_eligible_at;
     let settlement_nonce = position.settlement_nonce;
-    let final_owner = position.owner;
     let config_version = position.reveal_config_version;
 
     match role {
@@ -4563,6 +4749,45 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
                         .bull_pool_unallocated_liability_atomic = 0;
                 }
             }
+
+            // Register the newly revealed Bull in the current BullRegistry.
+            let p = payload
+                .as_ref()
+                .ok_or(RodeoError::BullProofBufferIncomplete)?;
+            let current_owner = p
+                .current_owner
+                .as_ref()
+                .ok_or(RodeoError::BullProofBufferIncomplete)?;
+            let current_bull = p
+                .current_bull
+                .as_ref()
+                .ok_or(RodeoError::BullProofBufferIncomplete)?;
+            let bull_leaf = BullLeaf {
+                position: position_key,
+                position_id: position.position_id,
+                owner: position.owner,
+                buck_power: power,
+                reveal_config_version: position.reveal_config_version,
+            };
+            let old_root = ctx.accounts.bull_registry.owner_tree_root;
+            let old_version = ctx.accounts.bull_registry.registry_version;
+            bull_registry::add_bull_to_registry(
+                &mut ctx.accounts.bull_registry,
+                &bull_leaf,
+                current_owner,
+                current_bull,
+            )?;
+            emit!(BullRegistryTransition {
+                old_root,
+                new_root: ctx.accounts.bull_registry.owner_tree_root,
+                old_version,
+                new_version: ctx.accounts.bull_registry.registry_version,
+                operation: BullRegistryOperation::Add,
+                bull_position: position_key,
+                position_id: position.position_id,
+                owner: position.owner,
+                buck_power: power,
+            });
         }
         Role::Unassigned => {
             return Err(error!(RodeoError::InvalidProbabilityOutcome));
@@ -4634,7 +4859,7 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
         .collection(Some(collection))
         .authority(Some(receipt_authority))
         .payer(funder)
-        .owner(Some(ctx.accounts.owner.key()))
+        .owner(Some(position.owner))
         .system_program(solana_program::system_program::ID)
         .data_state(DataState::AccountState)
         .name(name)
@@ -4686,14 +4911,35 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
         bull_tier: position.bull_tier,
         suit: position.suit,
         final_owner: position.owner,
-        previous_owner: None,
-        stolen: false,
+        previous_owner: if stolen {
+            Some(prospective_owner)
+        } else {
+            None
+        },
+        stolen,
         receipt_asset,
         active_since,
         unstake_eligible_at,
         settlement_nonce,
         config_version,
     });
+
+    if stolen {
+        emit!(MintTheft {
+            position: position_key,
+            position_id: position.position_id,
+            prospective_owner,
+            final_owner: position.owner,
+            winning_bull_position: payload
+                .as_ref()
+                .and_then(|p| p.selected_bull.as_ref())
+                .map(|p| p.leaf.position)
+                .unwrap_or_default(),
+            winning_bull_owner: position.owner,
+            registry_snapshot_version: pending_randomness.registry_version_snapshot,
+            config_version,
+        });
+    }
 
     emit!(ReceiptCreated {
         position: position_key,
@@ -4713,6 +4959,13 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
         settled_at: now,
         config_version_snapshot: pending_randomness.config_version_snapshot,
     });
+
+    if let Some(buffer) = ctx.accounts.bull_proof_buffer.as_deref_mut() {
+        buffer.consumed = true;
+        if let Some(refund) = ctx.accounts.refund_recipient.as_ref() {
+            buffer.close(refund.to_account_info())?;
+        }
+    }
 
     Ok(())
 }
