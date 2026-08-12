@@ -86,6 +86,7 @@ pub const SEED_PROTOCOL_CONFIG: &[u8] = b"protocol-config";
 pub const SEED_RECEIPT_AUTHORITY: &[u8] = b"receipt-authority";
 pub const SEED_POSITION_RECEIPT: &[u8] = b"receipt";
 pub const SEED_RECEIPT_COLLECTION: &[u8] = b"receipt-collection";
+pub const SEED_RECEIPT_FUNDER: &[u8] = b"receipt-funder";
 
 pub const ACCOUNT_VERSION_GLOBAL_CONFIG: u8 = 2;
 pub const ACCOUNT_VERSION_REWARD_STATE: u8 = 3;
