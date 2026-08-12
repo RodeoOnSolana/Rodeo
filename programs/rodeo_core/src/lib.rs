@@ -519,31 +519,33 @@ pub mod rodeo_core {
             // The provider randomness account must be the same one recorded at
             // stake time, must be owned by the expected Switchboard program, and
             // must have revealed a value for the current slot before settlement.
-            let randomness_account = ctx
-                .accounts
-                .provider_randomness_account
-                .as_ref()
-                .ok_or(RodeoError::InvalidProviderAccount)?;
-            require_keys_eq!(
-                randomness_account.key(),
-                pending_randomness.provider_randomness_account,
-                RodeoError::InvalidProviderAccount
-            );
-            require!(
-                randomness_account.owner == &pending_randomness.provider_program,
-                RodeoError::InvalidProviderAccount
-            );
-            let randomness_data = RandomnessAccountData::parse(randomness_account.data.borrow())
-                .map_err(|_| RodeoError::InvalidProviderAccount)?;
-            require!(
-                randomness_data.seed_slot == pending_randomness.committed_slot,
-                RodeoError::InvalidProviderAccount
-            );
-
             let clock = &ctx.accounts.clock;
-            let random_output = randomness_data
-                .get_value(clock.slot)
-                .map_err(|_| RodeoError::RandomnessNotReady)?;
+            let random_output = {
+                let randomness_account = ctx
+                    .accounts
+                    .provider_randomness_account
+                    .as_ref()
+                    .ok_or(RodeoError::InvalidProviderAccount)?;
+                require_keys_eq!(
+                    randomness_account.key(),
+                    pending_randomness.provider_randomness_account,
+                    RodeoError::InvalidProviderAccount
+                );
+                require!(
+                    randomness_account.owner == &pending_randomness.provider_program,
+                    RodeoError::InvalidProviderAccount
+                );
+                let randomness_data =
+                    RandomnessAccountData::parse(randomness_account.data.borrow())
+                        .map_err(|_| RodeoError::InvalidProviderAccount)?;
+                require!(
+                    randomness_data.seed_slot == pending_randomness.committed_slot,
+                    RodeoError::InvalidProviderAccount
+                );
+                randomness_data
+                    .get_value(clock.slot)
+                    .map_err(|_| RodeoError::RandomnessNotReady)?
+            };
             settle_reveal_common(&mut ctx, random_output)
         }
     }
