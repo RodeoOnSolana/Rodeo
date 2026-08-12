@@ -1619,12 +1619,19 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     }
   }, 60_000);
 
-  it("does not create a receipt asset or emit ReceiptCreated", async () => {
+  it("creates a receipt asset owned by the position owner on reveal", async () => {
     const positionId = new BN(nextPositionId++);
     const { position } = await stakeAndCommit(positionId);
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
     await settleReveal(positionId);
     const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
-    expect(pos.receiptAsset.toBase58()).toBe(web3.PublicKey.default.toBase58());
+    expect(pos.receiptAsset.toBase58()).toBe(receiptAsset.toBase58());
+    const receipt = await provider.connection.getAccountInfo(receiptAsset);
+    expect(receipt).not.toBeNull();
+    expect(receipt!.owner.toBase58()).toBe(MPL_CORE_PROGRAM_ID.toBase58());
   }, 60_000);
 
   it("does not change position ownership during reveal", async () => {
