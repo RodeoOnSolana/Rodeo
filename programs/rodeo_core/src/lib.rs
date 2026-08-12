@@ -188,6 +188,15 @@ pub mod rodeo_core {
         probability::validate_protocol_config(&v1_config)?;
         protocol_config.set_inner(v1_config);
 
+        let bull_registry = &mut ctx.accounts.bull_registry;
+        bull_registry.version = ACCOUNT_VERSION_BULL_REGISTRY;
+        bull_registry.global_config = global_config.key();
+        bull_registry.owner_tree_root = bull_registry::empty_owner_tree_root();
+        bull_registry.total_bull_count = 0;
+        bull_registry.total_buck_power = 0;
+        bull_registry.registry_version = 0;
+        bull_registry.bump = ctx.bumps.bull_registry;
+
         // Create the official Rodeo PositionReceipt Collection. This is a
         // one-time action paid for by the initializer and uses the stateless
         // ReceiptAuthority PDA as the update authority.
@@ -244,6 +253,7 @@ pub mod rodeo_core {
             reward_state: reward_state.key(),
             global_game_state: global_game_state.key(),
             bull_accumulator: bull_accumulator.key(),
+            bull_registry: bull_registry.key(),
             protocol_config: protocol_config.key(),
             rodeo_mint: global_config.rodeo_mint,
             ansem_mint: global_config.ansem_mint,
@@ -429,8 +439,12 @@ pub mod rodeo_core {
         pending_randomness.timeout_timestamp = now
             .checked_add(RANDOMNESS_TIMEOUT_SECONDS)
             .ok_or(RodeoError::ArithmeticOverflow)?;
-        pending_randomness.registry_root_snapshot = [0u8; 32];
-        pending_randomness.registry_version_snapshot = 0;
+        pending_randomness.registry_root_snapshot = ctx.accounts.bull_registry.owner_tree_root;
+        pending_randomness.registry_version_snapshot = ctx.accounts.bull_registry.registry_version;
+        pending_randomness.registry_total_count_snapshot =
+            ctx.accounts.bull_registry.total_bull_count;
+        pending_randomness.registry_total_power_snapshot =
+            ctx.accounts.bull_registry.total_buck_power;
         pending_randomness.config_version_snapshot =
             ctx.accounts.global_config.current_config_version;
         pending_randomness.settled = false;
@@ -462,8 +476,10 @@ pub mod rodeo_core {
             provider_randomness_account,
             vrf_key: Some(provider_randomness_account),
             callback_id: None,
-            registry_root_snapshot: [0u8; 32],
-            registry_version_snapshot: 0,
+            registry_root_snapshot: pending_randomness.registry_root_snapshot,
+            registry_version_snapshot: pending_randomness.registry_version_snapshot,
+            registry_total_count_snapshot: pending_randomness.registry_total_count_snapshot,
+            registry_total_power_snapshot: pending_randomness.registry_total_power_snapshot,
             config_version_snapshot: pending_randomness.config_version_snapshot,
             commitment,
         });
@@ -1125,6 +1141,8 @@ pub mod rodeo_core {
             .ok_or(RodeoError::ArithmeticOverflow)?;
         pending_randomness.registry_root_snapshot = [0u8; 32];
         pending_randomness.registry_version_snapshot = 0;
+        pending_randomness.registry_total_count_snapshot = 0;
+        pending_randomness.registry_total_power_snapshot = 0;
         pending_randomness.config_version_snapshot =
             ctx.accounts.global_config.current_config_version;
         pending_randomness.settled = false;
@@ -1148,8 +1166,10 @@ pub mod rodeo_core {
             provider_randomness_account: Pubkey::default(),
             vrf_key: None,
             callback_id: None,
-            registry_root_snapshot: [0u8; 32],
-            registry_version_snapshot: 0,
+            registry_root_snapshot: pending_randomness.registry_root_snapshot,
+            registry_version_snapshot: pending_randomness.registry_version_snapshot,
+            registry_total_count_snapshot: pending_randomness.registry_total_count_snapshot,
+            registry_total_power_snapshot: pending_randomness.registry_total_power_snapshot,
             config_version_snapshot: pending_randomness.config_version_snapshot,
             commitment,
         });
@@ -2554,6 +2574,15 @@ pub struct InitializeProtocol<'info> {
     #[account(
         init,
         payer = payer,
+        space = 8 + BullRegistry::INIT_SPACE,
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
+
+    #[account(
+        init,
+        payer = payer,
         space = 8 + ProtocolConfig::INIT_SPACE,
         seeds = [SEED_PROTOCOL_CONFIG, global_config.key().as_ref(), &[1, 0, 0, 0, 0, 0, 0, 0]],
         bump
@@ -2680,6 +2709,12 @@ pub struct StakeAndCommit<'info> {
         bump = global_game_state.bump,
     )]
     pub global_game_state: Box<Account<'info, GlobalGameState>>,
+
+    #[account(
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump = bull_registry.bump,
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
 
     /// CHECK: The System-Program-owned ReceiptFunder PDA for this Position.
     /// Created and prefunded by the player during stake_and_commit; it is
@@ -3306,6 +3341,7 @@ pub struct ProtocolInitialized {
     pub reward_state: Pubkey,
     pub global_game_state: Pubkey,
     pub bull_accumulator: Pubkey,
+    pub bull_registry: Pubkey,
     pub protocol_config: Pubkey,
     pub rodeo_mint: Pubkey,
     pub ansem_mint: Pubkey,
@@ -3354,6 +3390,8 @@ pub struct RandomnessRequested {
     pub callback_id: Option<[u8; 32]>,
     pub registry_root_snapshot: [u8; 32],
     pub registry_version_snapshot: u64,
+    pub registry_total_count_snapshot: u64,
+    pub registry_total_power_snapshot: u64,
     pub config_version_snapshot: u64,
     pub commitment: [u8; 32],
 }

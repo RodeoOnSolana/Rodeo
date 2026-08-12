@@ -39,6 +39,15 @@ pub struct BullLeaf {
 }
 
 impl OwnerLeaf {
+    pub fn empty() -> Self {
+        Self {
+            owner: Pubkey::default(),
+            active_bull_count: 0,
+            total_buck_power: 0,
+            bull_tree_root: empty_bull_tree_root(),
+        }
+    }
+
     pub fn hash(&self) -> [u8; 32] {
         hashv(&[
             PREFIX_BULL_OWNER_LEAF,
@@ -52,13 +61,20 @@ impl OwnerLeaf {
 
     pub fn is_empty(&self) -> bool {
         self.owner == Pubkey::default()
-            && self.active_bull_count == 0
-            && self.total_buck_power == 0
-            && self.bull_tree_root == [0u8; 32]
     }
 }
 
 impl BullLeaf {
+    pub fn empty() -> Self {
+        Self {
+            position: Pubkey::default(),
+            position_id: 0,
+            owner: Pubkey::default(),
+            buck_power: 0,
+            reveal_config_version: 0,
+        }
+    }
+
     pub fn hash(&self) -> [u8; 32] {
         hashv(&[
             PREFIX_BULL_LEAF,
@@ -73,10 +89,6 @@ impl BullLeaf {
 
     pub fn is_empty(&self) -> bool {
         self.position == Pubkey::default()
-            && self.position_id == 0
-            && self.owner == Pubkey::default()
-            && self.buck_power == 0
-            && self.reveal_config_version == 0
     }
 }
 
@@ -84,12 +96,46 @@ impl BullLeaf {
 // Default empty leaves.  These are the canonical default values for a zero slot.
 // ---------------------------------------------------------------------------
 
-pub fn default_owner_leaf_hash() -> [u8; 32] {
-    hashv(&[PREFIX_BULL_OWNER_LEAF, EMPTY_LEAF_HASH_OWNER]).to_bytes()
+pub fn default_bull_leaf_hash() -> [u8; 32] {
+    BullLeaf::empty().hash()
 }
 
-pub fn default_bull_leaf_hash() -> [u8; 32] {
-    hashv(&[PREFIX_BULL_LEAF, EMPTY_LEAF_HASH_BULL]).to_bytes()
+pub fn default_owner_leaf_hash() -> [u8; 32] {
+    OwnerLeaf::empty().hash()
+}
+
+fn empty_tree_root(depth: u32, leaf_hash: [u8; 32], prefix: &[u8]) -> Result<[u8; 32]> {
+    let mut current_hash = leaf_hash;
+    let mut current_power = 0u64;
+    for _ in 0..depth {
+        let (parent_hash, _) = node_hash(
+            prefix,
+            &current_hash,
+            current_power,
+            &current_hash,
+            current_power,
+        )?;
+        current_hash = parent_hash;
+    }
+    Ok(current_hash)
+}
+
+pub fn empty_bull_tree_root() -> [u8; 32] {
+    empty_tree_root(
+        BULL_REGISTRY_BULL_TREE_DEPTH,
+        default_bull_leaf_hash(),
+        PREFIX_BULL_NODE,
+    )
+    .expect("empty bull tree root is well-formed")
+}
+
+pub fn empty_owner_tree_root() -> [u8; 32] {
+    empty_tree_root(
+        BULL_REGISTRY_OWNER_TREE_DEPTH,
+        default_owner_leaf_hash(),
+        PREFIX_BULL_OWNER_NODE,
+    )
+    .expect("empty owner tree root is well-formed")
 }
 
 // ---------------------------------------------------------------------------
@@ -345,63 +391,75 @@ pub fn recompute_bull_root_after_replace(
 // Convenience helpers for add/remove.
 // ---------------------------------------------------------------------------
 
-pub fn add_bull_to_owner_tree(
-    current_bull_root: &[u8; 32],
-    current_owner_bucket: &mut crate::state::BullRegistryOwnerBucket,
+pub fn add_bull_to_owner_leaf(
+    current_owner_leaf: &OwnerLeaf,
     bull_leaf: &BullLeaf,
     empty_leaf_proof: &BullTreeProof,
-) -> Result<()> {
+) -> Result<OwnerLeaf> {
     require!(
         empty_leaf_proof.leaf.is_empty(),
         RodeoError::BullRegistrySlotOccupied
     );
-    verify_bull_tree_proof(current_bull_root, empty_leaf_proof)?;
+    require!(
+        current_owner_leaf.is_empty() || current_owner_leaf.owner == bull_leaf.owner,
+        RodeoError::BullRegistryOwnerMismatch
+    );
+
+    verify_bull_tree_proof(&current_owner_leaf.bull_tree_root, empty_leaf_proof)?;
     let (new_bull_root, _) = recompute_bull_root_after_replace(empty_leaf_proof, bull_leaf)?;
 
-    current_owner_bucket.bull_tree_root = new_bull_root;
-    current_owner_bucket.active_bull_count =
-        math::checked_add_u64(current_owner_bucket.active_bull_count, 1)?;
-    current_owner_bucket.total_buck_power = math::checked_add_u64(
-        current_owner_bucket.total_buck_power,
-        bull_leaf.buck_power as u64,
-    )?;
-    Ok(())
+    if current_owner_leaf.is_empty() {
+        Ok(OwnerLeaf {
+            owner: bull_leaf.owner,
+            active_bull_count: 1,
+            total_buck_power: bull_leaf.buck_power as u64,
+            bull_tree_root: new_bull_root,
+        })
+    } else {
+        Ok(OwnerLeaf {
+            owner: current_owner_leaf.owner,
+            active_bull_count: math::checked_add_u64(current_owner_leaf.active_bull_count, 1)?,
+            total_buck_power: math::checked_add_u64(
+                current_owner_leaf.total_buck_power,
+                bull_leaf.buck_power as u64,
+            )?,
+            bull_tree_root: new_bull_root,
+        })
+    }
 }
 
-pub fn remove_bull_from_owner_tree(
-    current_bull_root: &[u8; 32],
-    current_owner_bucket: &mut crate::state::BullRegistryOwnerBucket,
+pub fn remove_bull_from_owner_leaf(
+    current_owner_leaf: &OwnerLeaf,
     bull_proof: &BullTreeProof,
-) -> Result<()> {
+) -> Result<OwnerLeaf> {
     require!(
         !bull_proof.leaf.is_empty(),
         RodeoError::BullRegistrySlotEmpty
     );
     require!(
-        bull_proof.leaf.owner == current_owner_bucket.owner,
+        bull_proof.leaf.owner == current_owner_leaf.owner,
         RodeoError::BullRegistryOwnerMismatch
     );
 
-    verify_bull_tree_proof(current_bull_root, bull_proof)?;
-    let (new_bull_root, _) = recompute_bull_root_after_replace(
-        bull_proof,
-        &BullLeaf {
-            position: Pubkey::default(),
-            position_id: 0,
-            owner: Pubkey::default(),
-            buck_power: 0,
-            reveal_config_version: 0,
-        },
-    )?;
+    verify_bull_tree_proof(&current_owner_leaf.bull_tree_root, bull_proof)?;
+    let (new_bull_root, _) = recompute_bull_root_after_replace(bull_proof, &BullLeaf::empty())?;
 
-    current_owner_bucket.bull_tree_root = new_bull_root;
-    current_owner_bucket.active_bull_count =
-        math::checked_sub_u64(current_owner_bucket.active_bull_count, 1)?;
-    current_owner_bucket.total_buck_power = math::checked_sub_u64(
-        current_owner_bucket.total_buck_power,
+    let new_count = math::checked_sub_u64(current_owner_leaf.active_bull_count, 1)?;
+    let new_power = math::checked_sub_u64(
+        current_owner_leaf.total_buck_power,
         bull_proof.leaf.buck_power as u64,
     )?;
-    Ok(())
+
+    if new_count == 0 {
+        Ok(OwnerLeaf::empty())
+    } else {
+        Ok(OwnerLeaf {
+            owner: current_owner_leaf.owner,
+            active_bull_count: new_count,
+            total_buck_power: new_power,
+            bull_tree_root: new_bull_root,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

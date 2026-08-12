@@ -119,24 +119,6 @@ pub struct BullRegistry {
 
 #[account]
 #[derive(InitSpace)]
-pub struct BullRegistryOwnerBucket {
-    pub version: u8,
-    pub bull_registry: Pubkey,
-    /// The wallet that owns the Bulls in this bucket.
-    pub owner: Pubkey,
-    /// Number of active Bulls owned by this wallet.
-    pub active_bull_count: u64,
-    /// Total buck power for this owner.
-    pub total_buck_power: u64,
-    /// Merkle-sum root of this owner's Bull tree.
-    pub bull_tree_root: [u8; 32],
-    /// Registry version at which this bucket was last updated.
-    pub bucket_version: u64,
-    pub bump: u8,
-}
-
-#[account]
-#[derive(InitSpace)]
 pub struct BullProofBuffer {
     pub version: u8,
     /// Schema version of the payload layout.

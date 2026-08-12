@@ -78,7 +78,6 @@ pub const SEED_REWARD_STATE: &[u8] = b"reward-state";
 pub const SEED_GLOBAL_GAME_STATE: &[u8] = b"global-game-state";
 pub const SEED_BULL_ACCUMULATOR: &[u8] = b"bull-accumulator";
 pub const SEED_BULL_REGISTRY: &[u8] = b"bull-registry";
-pub const SEED_BULL_REGISTRY_OWNER_BUCKET: &[u8] = b"bull-owner-bucket";
 pub const SEED_BULL_PROOF_BUFFER: &[u8] = b"bull-proof-buffer";
 pub const SEED_PRINCIPAL_VAULT: &[u8] = b"principal-vault";
 pub const SEED_REWARD_VAULT: &[u8] = b"reward-vault";
@@ -115,7 +114,6 @@ pub const ACCOUNT_VERSION_WALLET_CLAIM_COOLDOWN: u8 = 1;
 pub const ACCOUNT_VERSION_PENDING_RANDOMNESS: u8 = 4;
 pub const ACCOUNT_VERSION_PROTOCOL_CONFIG: u8 = 1;
 pub const ACCOUNT_VERSION_BULL_REGISTRY: u8 = 1;
-pub const ACCOUNT_VERSION_BULL_REGISTRY_OWNER_BUCKET: u8 = 1;
 pub const ACCOUNT_VERSION_BULL_PROOF_BUFFER: u8 = 1;
 
 // BullRegistry v1: two-level ordered binary Merkle-sum tree.
