@@ -1403,6 +1403,85 @@ pub mod rodeo_core {
         Ok(())
     }
 
+    /// Benchmark fixture for the sparse-tree verifier.  It exercises the exact
+    /// production verification and add/remove paths and then restores the
+    /// registry so the benchmark is non-destructive.  Compute units are read
+    /// from the Solana runtime after the transaction.
+    pub fn benchmark_sparse_tree(
+        ctx: Context<BenchmarkSparseTree>,
+        victim: Option<Pubkey>,
+        new_bull: Option<BullLeaf>,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        let payload = bull_registry::verify_bull_proof_payload(&payload)?;
+        let registry = &mut ctx.accounts.bull_registry;
+
+        let snapshot = SparseTreeBenchmarkSnapshot {
+            owner_tree_root: registry.owner_tree_root,
+            total_bull_count: registry.total_bull_count,
+            total_buck_power: registry.total_buck_power,
+            registry_version: registry.registry_version,
+        };
+
+        // 1. Owner membership / non-membership.
+        if let Some(ref key) = victim {
+            if let Some(ref proof) = payload.victim_owner {
+                bull_registry::verify_owner(&snapshot.owner_tree_root, key, proof)?;
+            }
+        }
+
+        // 2. Selected owner + Bull (composed theft selection).
+        if let Some(ref selected_owner) = payload.selected_owner {
+            let selected_key = selected_owner.leaf.owner;
+            bull_registry::verify_owner(&snapshot.owner_tree_root, &selected_key, selected_owner)?;
+
+            if let Some(ref selected_bull) = payload.selected_bull {
+                bull_registry::verify_bull(
+                    &selected_owner.leaf.bull_tree_root,
+                    &selected_bull.leaf.position,
+                    selected_bull,
+                )?;
+            }
+        }
+
+        // 3. Bull add (under existing or absent owner).
+        if let Some(ref bull_leaf) = new_bull {
+            if let (Some(ref owner_proof), Some(ref bull_proof)) = (
+                payload.current_owner.as_ref(),
+                payload.current_bull.as_ref(),
+            ) {
+                bull_registry::add_bull_to_registry(registry, bull_leaf, owner_proof, bull_proof)?;
+            }
+        }
+
+        // 4. Bull remove.
+        if let Some(ref owner_proof) = payload.current_owner {
+            if let Some(ref remove_bull) = payload.remove_bull {
+                bull_registry::remove_bull_from_registry(
+                    registry,
+                    &remove_bull.leaf,
+                    owner_proof,
+                    remove_bull,
+                )?;
+            }
+        }
+
+        // Restore registry to keep the fixture non-destructive.
+        registry.owner_tree_root = snapshot.owner_tree_root;
+        registry.total_bull_count = snapshot.total_bull_count;
+        registry.total_buck_power = snapshot.total_buck_power;
+        registry.registry_version = snapshot.registry_version;
+
+        emit!(SparseTreeBenchmarked {
+            owner_tree_root: snapshot.owner_tree_root,
+            total_bull_count: snapshot.total_bull_count,
+            total_buck_power: snapshot.total_buck_power,
+            registry_version: snapshot.registry_version,
+        });
+
+        Ok(())
+    }
+
     /// Test-only fixture to set pause flags for localnet/CI coverage. It is
     /// compiled only when the `test-fixtures` feature is enabled and is never
     /// part of the production ABI.
@@ -3596,9 +3675,44 @@ pub struct CloseBullProof<'info> {
     pub clock: Sysvar<'info, Clock>,
 }
 
+#[derive(Accounts)]
+pub struct BenchmarkSparseTree<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump = bull_registry.bump,
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug)]
+struct SparseTreeBenchmarkSnapshot {
+    pub owner_tree_root: [u8; 32],
+    pub total_bull_count: u64,
+    pub total_buck_power: u64,
+    pub registry_version: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
+
+#[event]
+pub struct SparseTreeBenchmarked {
+    pub owner_tree_root: [u8; 32],
+    pub total_bull_count: u64,
+    pub total_buck_power: u64,
+    pub registry_version: u64,
+}
 
 #[event]
 pub struct ProtocolInitialized {
