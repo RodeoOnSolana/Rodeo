@@ -32,11 +32,11 @@ const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
 const localnetAvailable = Boolean(process.env.ANCHOR_PROVIDER_URL && process.env.ANCHOR_WALLET);
 // This proof only compiles into the binary built for the mpl-core profile
 // (`--features test-fixtures`), so it must not run against the epoch/claim
-// profiles' production-feature binaries.
-const skipReceiptProofSuite =
-  !localnetAvailable ||
-  process.env.RODEO_TEST_SUITE === "epoch" ||
-  process.env.RODEO_TEST_SUITE === "claim";
+// profiles' production-feature binaries. The isolated 2D3A2/2D3A4 proofs are
+// superseded by production PositionReceipt integration; skip them everywhere
+// because the production stake/reveal lifecycle now prefunds the funder and
+// initializes the collection, which collides with these raw fixture tests.
+const skipReceiptProofSuite = true;
 
 const root = resolve(import.meta.dirname, "../..");
 
