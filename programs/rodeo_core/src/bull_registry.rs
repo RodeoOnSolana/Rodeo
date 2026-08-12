@@ -176,10 +176,7 @@ pub struct BullTreeProof {
 // Proof verification.  Returns the leaf's in-order prefix (cumulative power before it).
 // ---------------------------------------------------------------------------
 
-pub fn verify_owner_tree_proof(
-    expected_root: &[u8; 32],
-    proof: &OwnerTreeProof,
-) -> Result<u64> {
+pub fn verify_owner_tree_proof(expected_root: &[u8; 32], proof: &OwnerTreeProof) -> Result<u64> {
     require_eq!(
         proof.siblings.len(),
         BULL_REGISTRY_OWNER_TREE_DEPTH as usize,
@@ -205,21 +202,11 @@ pub fn verify_owner_tree_proof(
     for (level, sibling) in proof.siblings.iter().enumerate() {
         let (parent_hash, parent_power) = if sibling.is_right {
             // current is left child
-            owner_node_hash(
-                &current_hash,
-                current_power,
-                &sibling.hash,
-                sibling.power,
-            )?
+            owner_node_hash(&current_hash, current_power, &sibling.hash, sibling.power)?
         } else {
             // current is right child: all leaves in the left sibling come before us
             prefix = math::checked_add_u64(prefix, sibling.power)?;
-            owner_node_hash(
-                &sibling.hash,
-                sibling.power,
-                &current_hash,
-                current_power,
-            )?
+            owner_node_hash(&sibling.hash, sibling.power, &current_hash, current_power)?
         };
         current_hash = parent_hash;
         current_power = parent_power;
@@ -236,10 +223,7 @@ pub fn verify_owner_tree_proof(
     Ok(prefix)
 }
 
-pub fn verify_bull_tree_proof(
-    expected_root: &[u8; 32],
-    proof: &BullTreeProof,
-) -> Result<u64> {
+pub fn verify_bull_tree_proof(expected_root: &[u8; 32], proof: &BullTreeProof) -> Result<u64> {
     require_eq!(
         proof.siblings.len(),
         BULL_REGISTRY_BULL_TREE_DEPTH as usize,
@@ -264,20 +248,10 @@ pub fn verify_bull_tree_proof(
 
     for sibling in proof.siblings.iter() {
         let (parent_hash, parent_power) = if sibling.is_right {
-            bull_node_hash(
-                &current_hash,
-                current_power,
-                &sibling.hash,
-                sibling.power,
-            )?
+            bull_node_hash(&current_hash, current_power, &sibling.hash, sibling.power)?
         } else {
             prefix = math::checked_add_u64(prefix, sibling.power)?;
-            bull_node_hash(
-                &sibling.hash,
-                sibling.power,
-                &current_hash,
-                current_power,
-            )?
+            bull_node_hash(&sibling.hash, sibling.power, &current_hash, current_power)?
         };
         current_hash = parent_hash;
         current_power = parent_power;
@@ -387,8 +361,10 @@ pub fn add_bull_to_owner_tree(
     current_owner_bucket.bull_tree_root = new_bull_root;
     current_owner_bucket.active_bull_count =
         math::checked_add_u64(current_owner_bucket.active_bull_count, 1)?;
-    current_owner_bucket.total_buck_power =
-        math::checked_add_u64(current_owner_bucket.total_buck_power, bull_leaf.buck_power as u64)?;
+    current_owner_bucket.total_buck_power = math::checked_add_u64(
+        current_owner_bucket.total_buck_power,
+        bull_leaf.buck_power as u64,
+    )?;
     Ok(())
 }
 
