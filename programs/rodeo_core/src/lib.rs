@@ -17,6 +17,9 @@ use mpl_core::types::{DataState, Plugin, PluginAuthority, PluginAuthorityPair, P
 use receipt::*;
 use state::*;
 
+#[cfg(not(feature = "mock-randomness"))]
+use switchboard_on_demand::accounts::RandomnessAccountData;
+
 #[program]
 pub mod rodeo_core {
     use super::*;
@@ -296,12 +299,42 @@ pub mod rodeo_core {
             RodeoError::InvalidPositionId
         );
 
-        let commitment = derive_commitment(
-            ctx.accounts.position.key(),
-            ActionType::Reveal,
-            action_nonce,
-            ctx.accounts.reward_state.current_epoch,
-        );
+        #[cfg(feature = "mock-randomness")]
+        let (provider_program, provider_randomness_account, commitment, committed_slot) = {
+            let commitment = derive_commitment(
+                ctx.accounts.position.key(),
+                ActionType::Reveal,
+                action_nonce,
+                ctx.accounts.reward_state.current_epoch,
+            );
+            (Pubkey::default(), Pubkey::default(), commitment, clock.slot)
+        };
+
+        #[cfg(not(feature = "mock-randomness"))]
+        let (provider_program, provider_randomness_account, commitment, committed_slot) = {
+            let randomness_account = ctx
+                .accounts
+                .provider_randomness_account
+                .as_ref()
+                .ok_or(RodeoError::InvalidProviderAccount)?;
+            require!(
+                randomness_account.owner == &switchboard_on_demand::ON_DEMAND_MAINNET_PID
+                    || randomness_account.owner == &switchboard_on_demand::ON_DEMAND_DEVNET_PID,
+                RodeoError::InvalidProviderAccount
+            );
+            let randomness_data = RandomnessAccountData::parse(randomness_account.data.borrow())
+                .map_err(|_| RodeoError::InvalidProviderAccount)?;
+            require!(
+                randomness_data.get_value(clock.slot).is_err(),
+                RodeoError::RandomnessNotResolved
+            );
+            (
+                *randomness_account.owner,
+                randomness_account.key(),
+                randomness_data.seed_slothash,
+                randomness_data.seed_slot,
+            )
+        };
 
         // Transfer the configured stake into the principal vault.
         let transfer_ctx = CpiContext::new(
@@ -386,10 +419,10 @@ pub mod rodeo_core {
         pending_randomness.position = position.key();
         pending_randomness.action_type = ActionType::Reveal;
         pending_randomness.action_nonce = action_nonce;
-        pending_randomness.provider_program = Pubkey::default();
-        pending_randomness.provider_randomness_account = Pubkey::default();
+        pending_randomness.provider_program = provider_program;
+        pending_randomness.provider_randomness_account = provider_randomness_account;
         pending_randomness.commitment = commitment;
-        pending_randomness.committed_slot = clock.slot;
+        pending_randomness.committed_slot = committed_slot;
         pending_randomness.committed_protocol_epoch = ctx.accounts.reward_state.current_epoch;
         pending_randomness.timeout_timestamp = now
             .checked_add(RANDOMNESS_TIMEOUT_SECONDS)
@@ -420,12 +453,12 @@ pub mod rodeo_core {
             position: position.key(),
             action_type: ActionType::Reveal,
             action_nonce,
-            committed_slot: clock.slot,
+            committed_slot,
             committed_protocol_epoch: ctx.accounts.reward_state.current_epoch,
             timeout_timestamp: pending_randomness.timeout_timestamp,
-            provider_program: Pubkey::default(),
-            provider_randomness_account: Pubkey::default(),
-            vrf_key: None,
+            provider_program,
+            provider_randomness_account,
+            vrf_key: Some(provider_randomness_account),
             callback_id: None,
             registry_root_snapshot: [0u8; 32],
             registry_version_snapshot: 0,
@@ -482,10 +515,36 @@ pub mod rodeo_core {
 
         #[cfg(not(feature = "mock-randomness"))]
         {
-            // Production builds require a verified Switchboard randomness proof.
-            // That adapter is intentionally not implemented in Phase 2B, so
-            // settlement is disabled in production.
-            err!(RodeoError::RandomnessNotReady)
+            // Production builds use Switchboard On-Demand verifiable randomness.
+            // The provider randomness account must be the same one recorded at
+            // stake time, must be owned by the expected Switchboard program, and
+            // must have revealed a value for the current slot before settlement.
+            let randomness_account = ctx
+                .accounts
+                .provider_randomness_account
+                .as_ref()
+                .ok_or(RodeoError::InvalidProviderAccount)?;
+            require_keys_eq!(
+                randomness_account.key(),
+                pending_randomness.provider_randomness_account,
+                RodeoError::InvalidProviderAccount
+            );
+            require!(
+                randomness_account.owner == &pending_randomness.provider_program,
+                RodeoError::InvalidProviderAccount
+            );
+            let randomness_data = RandomnessAccountData::parse(randomness_account.data.borrow())
+                .map_err(|_| RodeoError::InvalidProviderAccount)?;
+            require!(
+                randomness_data.seed_slot == pending_randomness.committed_slot,
+                RodeoError::InvalidProviderAccount
+            );
+
+            let clock = &ctx.accounts.clock;
+            let random_output = randomness_data
+                .get_value(clock.slot)
+                .map_err(|_| RodeoError::RandomnessNotReady)?;
+            settle_reveal_common(&mut ctx, random_output)
         }
     }
 
@@ -2621,6 +2680,10 @@ pub struct StakeAndCommit<'info> {
     )]
     pub receipt_funder: UncheckedAccount<'info>,
 
+    /// CHECK: Switchboard On-Demand randomness account used for the reveal.
+    /// Required in production builds; ignored when the `mock-randomness` feature is enabled.
+    pub provider_randomness_account: Option<AccountInfo<'info>>,
+
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
@@ -2735,6 +2798,10 @@ pub struct SettleReveal<'info> {
     /// CHECK: MPL Core program.
     #[account(address = mpl_core::ID)]
     pub mpl_core_program: UncheckedAccount<'info>,
+
+    /// CHECK: Switchboard On-Demand randomness account used to settle the reveal.
+    /// Required in production builds; ignored when the `mock-randomness` feature is enabled.
+    pub provider_randomness_account: Option<AccountInfo<'info>>,
 
     pub system_program: Program<'info, System>,
     pub clock: Sysvar<'info, Clock>,
@@ -3617,6 +3684,10 @@ pub enum RodeoError {
     CoreAssetNotFrozen,
     #[msg("Core receipt asset is not owned by the expected address")]
     InvalidCoreAssetOwner,
+    #[msg("The provided randomness account is not a valid Switchboard randomness account")]
+    InvalidProviderAccount,
+    #[msg("The Switchboard randomness account has not yet been revealed for this slot")]
+    RandomnessNotResolved,
 }
 
 // ---------------------------------------------------------------------------

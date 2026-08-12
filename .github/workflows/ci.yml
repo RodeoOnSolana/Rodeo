@@ -236,7 +236,7 @@ jobs:
       # receipt creation/transfer/burn logic yet -- that is scoped to a
       # follow-up PR (see docs/mpl-core-integration-proof.md).
       - name: Build mpl-core-profile test program binary
-        run: scripts/check-sbf-stack-safety.sh anchor build --no-idl --program-name rodeo_core -- --features test-fixtures
+        run: scripts/check-sbf-stack-safety.sh anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-fixtures
 
       - name: Anchor localnet integration tests (mpl-core profile)
         run: RODEO_TEST_SUITE=mplcore anchor test --skip-build --no-idl
