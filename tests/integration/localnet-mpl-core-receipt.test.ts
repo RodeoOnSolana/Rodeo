@@ -1581,8 +1581,8 @@ describe.skipIf(skipReceiptProofSuite)(
     it(
       "measures the exact collection-aware PositionReceipt create/burn lifecycle cost via the funder-prefunded final layout",
       async () => {
-        // 1. Prefund a Rodeo-owned ReceiptFunder PDA for position3.
-        const initialFunderLamports = 5_000_000;
+        // 1. Prefund a System-Program-owned ReceiptFunder PDA for position3.
+        const initialFunderLamports = 10_000_000;
         await fixtureCreateReceiptFunderGeneric(position3, receiptFunder3, new BN(initialFunderLamports));
         const funderBeforeCreate = await provider.connection.getBalance(receiptFunder3);
 
@@ -1695,7 +1695,7 @@ describe.skipIf(skipReceiptProofSuite)(
     it(
       "proves the owner-prefunded Rodeo ReceiptFunder lifecycle: create -> reveal-timeout -> close/refund",
       async () => {
-        const initialFunderLamports = 5_000_000;
+        const initialFunderLamports = 10_000_000;
         const beneficiary = walletA.publicKey;
 
         const beneficiaryBefore = await provider.connection.getBalance(beneficiary);
@@ -1719,9 +1719,11 @@ describe.skipIf(skipReceiptProofSuite)(
         console.log("[2D3A4 funder-timeout] funder account after close:", funderAfter === null ? "null (closed)" : "exists");
 
         expect(funderAfter === null || funderAfter.lamports === 0).toBe(true);
-        // The beneficiary received their money back (less the Solana tx
-        // fee paid by the closer, not by the funder).
-        expect(beneficiaryAfter).toBeGreaterThan(beneficiaryBefore);
+        // The beneficiary (also the `payer` in this fixture) receives the
+        // funder's lamports back, net of the two Solana tx fees (create +
+        // close). Both fees are small (<0.00002 SOL), so the balance is
+        // essentially restored.
+        expect(beneficiaryAfter).toBeGreaterThanOrEqual(beneficiaryBefore - 20_000);
       },
       30_000,
     );
