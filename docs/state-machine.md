@@ -148,3 +148,16 @@ Neither record alone is sufficient proof of ownership. All ownership-changing in
 - Multiple claims by the same wallet may be batched, but the one-hour wallet cooldown is checked once per batch using the `WalletClaimCooldown` PDA.
 - The settlement nonce in `Position.settlement_nonce` increments on every successful randomness settlement, including the initial reveal and any subsequent unstake.
 - Any instruction that changes active Cowboy weight, active Bull power, reward-vault funding, ANSEM liabilities, or position ownership with forced settlement must first close all elapsed epochs or invoke the permissionless `close_epochs` catch-up path.
+
+## PositionReceipt lifecycle (production)
+
+The following Metaplex Core PositionReceipt behavior is now integrated into the production program and is no longer test-fixture-only:
+
+- `initialize_protocol` creates the official `Rodeo Position Receipts` MPL Core Collection and stores it in `ProtocolConfig.receipt_collection`.
+- `stake_and_commit` stakes `100,000` RODEO, derives the position PDA, and prefunds a System-owned `ReceiptFunder` PDA with `RECEIPT_RESERVE_LAMPORTS`.
+- `settle_reveal` (via `settle_reveal_common`) resolves the role, Cowboy/Bull traits, and suit from verified randomness, then creates an official frozen `PositionReceipt` with the final owner, collection membership, code-pinned metadata, and permanent transfer/burn/freeze delegates. It stores the `receipt_asset` address on `Position.receipt_asset` and emits `ReceiptCreated`.
+- `claim_position` runs the existing reward economics; the receipt remains unchanged.
+- `request_unstake` keeps the position `Active` and the receipt frozen; only `pending_action_active` and `pending_action_type` change.
+- `recover_unstake_timeout` restores the position to an unstaked-pending-cleared `Active` state and does not touch the receipt or the `ReceiptFunder`.
+- `settle_unstake` executes existing principal/reward economics, burns the receipt into the MPL Core 1-byte tombstone, closes the `ReceiptFunder`, and removes the `Position` and `PendingRandomness` accounts. It emits `ReceiptBurned`.
+- `recover_reveal_timeout` refunds the unused `ReceiptFunder` reserve to the owner (when no receipt was created), refunds the full RODEO principal, and removes the position; no receipt asset exists.
