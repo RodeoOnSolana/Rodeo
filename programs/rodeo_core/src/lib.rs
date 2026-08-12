@@ -183,6 +183,57 @@ pub mod rodeo_core {
         probability::validate_protocol_config(&v1_config)?;
         protocol_config.set_inner(v1_config);
 
+        // Create the official Rodeo PositionReceipt Collection. This is a
+        // one-time action paid for by the initializer and uses the stateless
+        // ReceiptAuthority PDA as the update authority.
+        let global_config_key = global_config.key();
+        let (receipt_authority, receipt_authority_bump) = receipt_authority_pda(&global_config_key);
+        let (collection, _collection_bump) = receipt_collection_pda(&global_config_key);
+
+        require_keys_eq!(
+            ctx.accounts.receipt_authority.key(),
+            receipt_authority,
+            RodeoError::InvalidCoreAssetOwner
+        );
+        require_keys_eq!(
+            ctx.accounts.receipt_collection.key(),
+            collection,
+            RodeoError::InvalidCoreAssetOwner
+        );
+
+        let collection_ix = CreateCollectionV2Builder::new()
+            .collection(collection)
+            .update_authority(Some(receipt_authority))
+            .payer(ctx.accounts.payer.key())
+            .system_program(solana_program::system_program::ID)
+            .name(RECEIPT_COLLECTION_NAME.to_string())
+            .uri(RECEIPT_COLLECTION_URI.to_string())
+            .instruction();
+
+        let account_infos = [
+            ctx.accounts.receipt_collection.to_account_info(),
+            ctx.accounts.receipt_authority.to_account_info(),
+            ctx.accounts.payer.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ];
+        let authority_seeds = [
+            SEED_RECEIPT_AUTHORITY,
+            global_config_key.as_ref(),
+            &[receipt_authority_bump],
+        ];
+        let collection_seeds = [
+            SEED_RECEIPT_COLLECTION,
+            global_config_key.as_ref(),
+            &[ctx.bumps.receipt_collection],
+        ];
+
+        solana_program::program::invoke_signed(
+            &collection_ix,
+            &account_infos,
+            &[&collection_seeds, &authority_seeds],
+        )
+        .map_err(Into::into)?;
+
         emit!(ProtocolInitialized {
             global_config: global_config.key(),
             reward_state: reward_state.key(),
@@ -293,6 +344,41 @@ pub mod rodeo_core {
         position.pending_action_nonce = action_nonce;
         position.next_action_nonce = math::checked_add_u64(action_nonce, 1)?;
         position.bump = ctx.bumps.position;
+
+        // Create and prefund the System-Program-owned ReceiptFunder PDA.
+        // The player supplies the SOL; Rodeo signs for the PDA address.
+        let position_key = position.key();
+        let (receipt_funder, receipt_funder_bump) = receipt_funder_pda(&position_key);
+        require_keys_eq!(
+            ctx.accounts.receipt_funder.key(),
+            receipt_funder,
+            RodeoError::InvalidCoreAssetOwner
+        );
+
+        let funder_create_ix = solana_program::system_instruction::create_account(
+            ctx.accounts.owner.key,
+            &receipt_funder,
+            RECEIPT_RESERVE_LAMPORTS,
+            0,
+            &solana_program::system_program::ID,
+        );
+        let funder_account_infos = [
+            ctx.accounts.owner.to_account_info(),
+            ctx.accounts.receipt_funder.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ];
+        let funder_seeds = [
+            SEED_RECEIPT_FUNDER,
+            position_key.as_ref(),
+            &[receipt_funder_bump],
+        ];
+
+        solana_program::program::invoke_signed(
+            &funder_create_ix,
+            &funder_account_infos,
+            &[&funder_seeds],
+        )
+        .map_err(Into::into)?;
 
         // Initialize the reveal PendingRandomness account.
         let pending_randomness = &mut ctx.accounts.pending_randomness;
@@ -2372,6 +2458,27 @@ pub struct InitializeProtocol<'info> {
     )]
     pub reward_vault: Account<'info, TokenAccount>,
 
+    /// CHECK: The official Rodeo PositionReceipt Collection PDA. Created by
+    /// `initialize_protocol` via the MPL Core `CreateCollectionV2` CPI.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA used as the collection update
+    /// authority and as the signer for all receipt lifecycle actions.
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    /// CHECK: MPL Core program.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
@@ -2451,6 +2558,16 @@ pub struct StakeAndCommit<'info> {
         bump = global_game_state.bump,
     )]
     pub global_game_state: Box<Account<'info, GlobalGameState>>,
+
+    /// CHECK: The System-Program-owned ReceiptFunder PDA for this Position.
+    /// Created and prefunded by the player during stake_and_commit; it is
+    /// later used as the MPL Core payer for receipt create/burn.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_funder: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,

@@ -88,6 +88,21 @@ pub const SEED_POSITION_RECEIPT: &[u8] = b"receipt";
 pub const SEED_RECEIPT_COLLECTION: &[u8] = b"receipt-collection";
 pub const SEED_RECEIPT_FUNDER: &[u8] = b"receipt-funder";
 
+// PositionReceipt v1 configuration. The reserve covers the measured MPL
+// Core `CreateV2` rent for a collection-member frozen receipt plus a small
+// buffer to keep the zero-data ReceiptFunder PDA rent-exempt. The net SOL
+// cost to a player is only the unrecoverable tombstone rent; the rest is
+// refunded when the Position exits successfully.
+pub const RECEIPT_RESERVE_LAMPORTS: u64 = 5_000_000;
+
+// v1 metadata is code-pinned; callers cannot supply arbitrary URIs.
+pub const RECEIPT_NAME_PREFIX: &str = "Rodeo Position #";
+pub const RECEIPT_METADATA_BASE_URI: &str = "https://rodeo.invalid/receipts/";
+pub const RECEIPT_METADATA_URI_SUFFIX: &str = ".json";
+
+pub const RECEIPT_COLLECTION_NAME: &str = "Rodeo Position Receipts";
+pub const RECEIPT_COLLECTION_URI: &str = "https://rodeo.invalid/collection/receipts.json";
+
 pub const ACCOUNT_VERSION_GLOBAL_CONFIG: u8 = 2;
 pub const ACCOUNT_VERSION_REWARD_STATE: u8 = 3;
 pub const ACCOUNT_VERSION_GLOBAL_GAME_STATE: u8 = 4;
