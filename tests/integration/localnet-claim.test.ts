@@ -539,6 +539,33 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       .rpc();
   }
 
+  async function recoverRevealTimeout(positionId: BN, caller = payer, owner = payer) {
+    const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const ownerRodeo = payerRodeoAccount;
+    await rodeoCoreProgram.methods
+      .recoverRevealTimeout()
+      .accounts({
+        caller: caller.publicKey,
+        position,
+        pendingRandomness,
+        globalConfig,
+        principalVault,
+        ownerRodeoAccount: ownerRodeo,
+        owner: owner.publicKey,
+        globalGameState,
+        receiptFunder,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: web3.SystemProgram.programId,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      })
+      .signers([caller])
+      .rpc();
+  }
+
   function deriveWalletCooldown(
     programId: web3.PublicKey,
     globalConfig: web3.PublicKey,
@@ -1207,6 +1234,73 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     const tx = new web3.Transaction().add(ix);
     await provider.sendAndConfirm(tx, [payer]);
   }
+
+  it("settle_reveal resolves the position, creates a PositionReceipt, and clears the pending action", async () => {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const positionId = game.nextPositionId;
+    const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+
+    await stakeAndCommit(positionId);
+    await settleReveal(positionId);
+
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(pos.pendingActionActive).toBe(false);
+    expect(pos.receiptAsset.toBase58()).toBe(receiptAsset.toBase58());
+    expect(pos.role.cowboy || pos.role.bull).toBeTruthy();
+    expect(pos.suit.unassigned).toBeUndefined();
+
+    const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetchNullable(pendingRandomness);
+    expect(pending).toBeNull();
+
+    const receiptInfo = await provider.connection.getAccountInfo(receiptAsset);
+    expect(receiptInfo).not.toBeNull();
+  }, 60_000);
+
+  it("settle_reveal is rejected when the reveal has already settled", async () => {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const positionId = game.nextPositionId;
+    await stakeAndCommit(positionId);
+    await settleReveal(positionId);
+
+    await expect(settleReveal(positionId)).rejects.toThrow();
+  }, 30_000);
+
+  it("recover_reveal_timeout is rejected before the timeout window", async () => {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const positionId = game.nextPositionId;
+    await stakeAndCommit(positionId);
+
+    await expect(recoverRevealTimeout(positionId)).rejects.toThrow();
+
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(
+      (await deriveStakeAccounts(positionId)).position,
+    );
+    expect(pos.pendingActionActive).toBe(true);
+  }, 30_000);
+
+  it("recover_reveal_timeout after timeout refunds principal and clears the pending action", async () => {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const positionId = game.nextPositionId;
+    const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const before = await getAccount(provider.connection, payerRodeoAccount);
+    await stakeAndCommit(positionId);
+    await sleep(2_500);
+    await recoverRevealTimeout(positionId);
+
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(pos.pendingActionActive).toBe(false);
+
+    const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetchNullable(pendingRandomness);
+    expect(pending).toBeNull();
+
+    const after = await getAccount(provider.connection, payerRodeoAccount);
+    const refunded = new BN(after.amount.toString()).sub(new BN(before.amount.toString()));
+    expect(refunded.toString()).toBe(stakeAmountAtomic.toString());
+  }, 60_000);
 
   it("recognizes reward-vault funding immediately after funding (no epoch elapses)", async () => {
     const fundAmount = new BN(5_000_000_000);

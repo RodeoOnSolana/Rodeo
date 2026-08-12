@@ -551,7 +551,7 @@ pub mod rodeo_core {
     }
 
     pub fn recover_reveal_timeout(ctx: Context<RecoverRevealTimeout>) -> Result<()> {
-        let position = &ctx.accounts.position;
+        let position = &mut ctx.accounts.position;
         let pending_randomness = &ctx.accounts.pending_randomness;
         let now = Clock::get()?.unix_timestamp;
 
@@ -650,6 +650,13 @@ pub mod rodeo_core {
                 &[&funder_seeds],
             )?;
         }
+
+        // The reveal action is now permanently resolved by timeout; clear the
+        // pending-action lock so the same position cannot be recovered or settled
+        // again and downstream instructions treat the reveal as complete.
+        position.pending_action_active = false;
+        position.pending_action_type = ActionType::Reveal;
+        position.pending_action_nonce = 0;
 
         emit!(RandomnessTimeoutRecovered {
             position: position.key(),
@@ -4673,6 +4680,9 @@ mod tests {
     use crate::probability;
     use crate::state;
 
+    #[cfg(not(feature = "mock-randomness"))]
+    use switchboard_on_demand::{ON_DEMAND_DEVNET_PID, ON_DEMAND_MAINNET_PID};
+
     fn pubkey_from_u64(n: u64) -> Pubkey {
         let mut bytes = [0u8; 32];
         bytes[0..8].copy_from_slice(&n.to_le_bytes());
@@ -5569,5 +5579,98 @@ mod tests {
 
         assert_eq!(reward.total_ansem_liability_atomic, before_total);
         assert_eq!(reward.orphaned_reward_released_atomic, before_released);
+    }
+
+    #[cfg(not(feature = "mock-randomness"))]
+    fn switchboard_randomness_account_data(
+        seed_slot: u64,
+        reveal_slot: u64,
+        value: [u8; 32],
+    ) -> Vec<u8> {
+        let mut data = vec![0u8; RandomnessAccountData::size()];
+        data[0..8].copy_from_slice(RandomnessAccountData::DISCRIMINATOR);
+        data[8 + 96..8 + 104].copy_from_slice(&seed_slot.to_le_bytes());
+        data[8 + 136..8 + 144].copy_from_slice(&reveal_slot.to_le_bytes());
+        data[8 + 144..8 + 176].copy_from_slice(&value);
+        data
+    }
+
+    #[test]
+    #[cfg(not(feature = "mock-randomness"))]
+    fn switchboard_randomness_parses_and_returns_value_for_reveal_slot() {
+        let seed_slot = 123u64;
+        let reveal_slot = 456u64;
+        let value = [7u8; 32];
+        let mut data = switchboard_randomness_account_data(seed_slot, reveal_slot, value);
+        let mut lamports = 0u64;
+        let owner = ON_DEMAND_MAINNET_PID;
+        let key = Pubkey::new_unique();
+        let info = AccountInfo::new(
+            &key,
+            false,
+            false,
+            &mut lamports,
+            &mut data,
+            &owner,
+            false,
+            0,
+        );
+
+        let parsed = RandomnessAccountData::parse(info.data.borrow()).unwrap();
+        assert_eq!(parsed.seed_slot, seed_slot);
+        assert_eq!(parsed.reveal_slot, reveal_slot);
+        assert_eq!(parsed.value, value);
+        assert_eq!(parsed.get_value(reveal_slot).unwrap(), value);
+        assert!(parsed.get_value(reveal_slot + 1).is_err());
+        assert!(parsed.get_value(reveal_slot - 1).is_err());
+    }
+
+    #[test]
+    #[cfg(not(feature = "mock-randomness"))]
+    fn switchboard_randomness_parse_rejects_invalid_discriminator() {
+        let mut data = vec![0u8; RandomnessAccountData::size()];
+        data[0..8].copy_from_slice(&[1u8; 8]);
+        let mut lamports = 0u64;
+        let owner = ON_DEMAND_MAINNET_PID;
+        let key = Pubkey::new_unique();
+        let info = AccountInfo::new(
+            &key,
+            false,
+            false,
+            &mut lamports,
+            &mut data,
+            &owner,
+            false,
+            0,
+        );
+        assert!(RandomnessAccountData::parse(info.data.borrow()).is_err());
+    }
+
+    #[test]
+    #[cfg(not(feature = "mock-randomness"))]
+    fn switchboard_randomness_parse_rejects_short_data() {
+        let mut data = vec![0u8; 7];
+        let mut lamports = 0u64;
+        let owner = ON_DEMAND_MAINNET_PID;
+        let key = Pubkey::new_unique();
+        let info = AccountInfo::new(
+            &key,
+            false,
+            false,
+            &mut lamports,
+            &mut data,
+            &owner,
+            false,
+            0,
+        );
+        assert!(RandomnessAccountData::parse(info.data.borrow()).is_err());
+    }
+
+    #[test]
+    #[cfg(not(feature = "mock-randomness"))]
+    fn switchboard_program_ids_are_non_default_and_distinct() {
+        assert_ne!(ON_DEMAND_MAINNET_PID, Pubkey::default());
+        assert_ne!(ON_DEMAND_DEVNET_PID, Pubkey::default());
+        assert_ne!(ON_DEMAND_MAINNET_PID, ON_DEMAND_DEVNET_PID);
     }
 }
