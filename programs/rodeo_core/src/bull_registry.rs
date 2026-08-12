@@ -230,7 +230,9 @@ pub fn verify_owner_tree_proof(
         }
     }
 
-    require_eq!(current_hash, *expected_root, RodeoError::BullRegistryInvalidRoot);
+    if current_hash != *expected_root {
+        return Err(error!(RodeoError::BullRegistryInvalidRoot));
+    }
     Ok(prefix)
 }
 
@@ -281,7 +283,9 @@ pub fn verify_bull_tree_proof(
         current_power = parent_power;
     }
 
-    require_eq!(current_hash, *expected_root, RodeoError::BullRegistryInvalidRoot);
+    if current_hash != *expected_root {
+        return Err(error!(RodeoError::BullRegistryInvalidRoot));
+    }
     Ok(prefix)
 }
 
@@ -377,15 +381,8 @@ pub fn add_bull_to_owner_tree(
         empty_leaf_proof.leaf.is_empty(),
         RodeoError::BullRegistrySlotOccupied
     );
-    let (new_bull_root, new_bull_total) = recompute_bull_root_after_replace(
-        empty_leaf_proof,
-        bull_leaf,
-    )?;
-    require_eq!(
-        *current_bull_root,
-        new_bull_root,
-        RodeoError::BullRegistryInvalidRoot
-    );
+    verify_bull_tree_proof(current_bull_root, empty_leaf_proof)?;
+    let (new_bull_root, _) = recompute_bull_root_after_replace(empty_leaf_proof, bull_leaf)?;
 
     current_owner_bucket.bull_tree_root = new_bull_root;
     current_owner_bucket.active_bull_count =
@@ -409,6 +406,7 @@ pub fn remove_bull_from_owner_tree(
         RodeoError::BullRegistryOwnerMismatch
     );
 
+    verify_bull_tree_proof(current_bull_root, bull_proof)?;
     let (new_bull_root, _) = recompute_bull_root_after_replace(
         bull_proof,
         &BullLeaf {
@@ -419,11 +417,6 @@ pub fn remove_bull_from_owner_tree(
             reveal_config_version: 0,
         },
     )?;
-    require_eq!(
-        *current_bull_root,
-        new_bull_root,
-        RodeoError::BullRegistryInvalidRoot
-    );
 
     current_owner_bucket.bull_tree_root = new_bull_root;
     current_owner_bucket.active_bull_count =
