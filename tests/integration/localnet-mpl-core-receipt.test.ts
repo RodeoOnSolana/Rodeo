@@ -1044,8 +1044,13 @@ describe.skipIf(skipReceiptProofSuite)(
     }
 
     async function fixtureForceTransferPositionReceipt2(newOwner: web3.PublicKey) {
+      // MPL Core's `TransferV1` requires the collection account when the
+      // asset's `UpdateAuthority` is `Collection(...)` (rejects otherwise
+      // with `MissingCollection`, error 25 / 0x19), so this uses the
+      // collection-aware fixture variant rather than the standalone one
+      // used for `receiptAsset` above.
       const data = Buffer.concat([
-        anchorDiscriminator("test_fixture_force_transfer_position_receipt"),
+        anchorDiscriminator("test_fixture_force_transfer_position_receipt_in_collection"),
         newOwner.toBuffer(),
       ]);
       const ix = new web3.TransactionInstruction({
@@ -1054,6 +1059,7 @@ describe.skipIf(skipReceiptProofSuite)(
           { pubkey: globalConfig, isSigner: false, isWritable: false },
           { pubkey: position2, isSigner: false, isWritable: false },
           { pubkey: receiptAsset2, isSigner: false, isWritable: true },
+          { pubkey: collectionPda, isSigner: false, isWritable: true },
           { pubkey: receiptAuthority, isSigner: false, isWritable: false },
           { pubkey: newOwner, isSigner: false, isWritable: false },
           { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false },

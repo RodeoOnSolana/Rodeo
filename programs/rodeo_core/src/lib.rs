@@ -1388,6 +1388,48 @@ pub mod rodeo_core {
             .map_err(Into::into)
     }
 
+    /// Same as `test_fixture_force_transfer_position_receipt`, but for a
+    /// receipt that belongs to the official Rodeo receipt Collection: MPL
+    /// Core's `TransferV1` requires the collection account when the asset's
+    /// `UpdateAuthority` is `Collection(...)` (otherwise it rejects with
+    /// `MissingCollection`).
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_force_transfer_position_receipt_in_collection(
+        ctx: Context<TestFixtureForceTransferPositionReceiptInCollection>,
+        new_owner: Pubkey,
+    ) -> Result<()> {
+        let (receipt_authority, receipt_authority_bump) =
+            receipt_authority_pda(&ctx.accounts.global_config.key());
+
+        let instruction = TransferV1Builder::new()
+            .asset(*ctx.accounts.receipt_asset.key)
+            .collection(Some(*ctx.accounts.collection.key))
+            .payer(ctx.accounts.authority.key())
+            .authority(Some(receipt_authority))
+            .new_owner(new_owner)
+            .system_program(Some(solana_program::system_program::ID))
+            .instruction();
+
+        let account_infos = [
+            ctx.accounts.receipt_asset.to_account_info(),
+            ctx.accounts.collection.to_account_info(),
+            ctx.accounts.authority.to_account_info(),
+            ctx.accounts.receipt_authority.to_account_info(),
+            ctx.accounts.new_owner_account.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+        ];
+        let global_config_key = ctx.accounts.global_config.key();
+        let seeds = [
+            SEED_RECEIPT_AUTHORITY,
+            global_config_key.as_ref(),
+            &[receipt_authority_bump],
+        ];
+
+        solana_program::program::invoke_signed(&instruction, &account_infos, &[&seeds])
+            .map_err(Into::into)
+    }
+
     /// Test-only fixture that force-burns the frozen receipt using the
     /// permanent burn delegate controlled by the stateless ReceiptAuthority.
     #[cfg(feature = "test-fixtures")]

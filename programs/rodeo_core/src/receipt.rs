@@ -225,6 +225,62 @@ pub struct TestFixtureForceTransferPositionReceipt<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// Same as `TestFixtureForceTransferPositionReceipt`, but for a receipt that
+/// belongs to the official Rodeo receipt Collection: MPL Core's `TransferV1`
+/// requires the collection account to be supplied when the asset has
+/// `UpdateAuthority::Collection(...)` (otherwise it rejects with
+/// `MissingCollection`), so this variant carries an extra `collection`
+/// account. Kept separate from the standalone-receipt fixture above so the
+/// already-proven 2D3A2 behavior is untouched.
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(new_owner: Pubkey)]
+pub struct TestFixtureForceTransferPositionReceiptInCollection<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    pub position: Box<Account<'info, Position>>,
+
+    /// CHECK: The existing Core Asset account at the PositionReceipt PDA.
+    #[account(
+        mut,
+        seeds = [SEED_POSITION_RECEIPT, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_asset: UncheckedAccount<'info>,
+
+    /// CHECK: The official Rodeo receipt Collection this asset belongs to.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
+        bump,
+    )]
+    pub collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA signing the transfer.
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    /// CHECK: The new embedded owner wallet. Only its public key is used.
+    #[account(address = new_owner)]
+    pub new_owner_account: UncheckedAccount<'info>,
+
+    /// CHECK: MPL Core program.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
 #[cfg(feature = "test-fixtures")]
 #[derive(Accounts)]
 pub struct TestFixtureForceBurnPositionReceipt<'info> {
