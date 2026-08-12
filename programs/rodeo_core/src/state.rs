@@ -130,6 +130,7 @@ pub struct BullProofBuffer {
     /// The action this proof buffer is for (Reveal or Unstake).
     pub action_type: ActionType,
     /// Snapshot root the proof must be verified against.
+    pub snapshot_root: [u8; 32],
     /// Snapshot version the proof must be verified against.
     pub snapshot_version: u64,
     /// Historical snapshot total power used for external-weight calculation.

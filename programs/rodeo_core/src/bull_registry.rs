@@ -336,7 +336,7 @@ pub fn add_bull_to_owner_leaf(
     );
 
     let empty_leaf_node = empty_bull_proof.leaf.to_node();
-    let (new_bull_root, _) = recompute_root_after_replace(
+    let new_bull_root = recompute_root_after_replace(
         &bull_leaf.position.to_bytes(),
         &empty_bull_proof.proof,
         &bull_leaf.to_node(),
@@ -377,7 +377,7 @@ pub fn remove_bull_from_owner_leaf(
         RodeoError::BullRegistryOwnerMismatch
     );
 
-    let (new_bull_root, _) = recompute_root_after_replace(
+    let new_bull_root = recompute_root_after_replace(
         &bull_proof.leaf.position.to_bytes(),
         &bull_proof.proof,
         &BullLeaf::empty().to_node(),
@@ -432,7 +432,7 @@ pub fn apply_owner_leaf_update(
         );
     }
 
-    let (recomputed, _) = recompute_root_after_replace(
+    let recomputed = recompute_root_after_replace(
         &owner.to_bytes(),
         &owner_proof.proof,
         &new_node,
@@ -442,7 +442,7 @@ pub fn apply_owner_leaf_update(
 
     if current_root != &[0u8; 32] {
         // The supplied proof must reconstruct the current canonical root.
-        let (check_root, _) = recompute_root_after_replace(
+        let check_root = recompute_root_after_replace(
             &owner.to_bytes(),
             &owner_proof.proof,
             &current,
