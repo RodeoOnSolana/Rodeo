@@ -1626,12 +1626,26 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       [Buffer.from("receipt"), position.toBuffer()],
       rodeoCoreProgram.programId,
     );
+    const receiptCreatedPromise = collectOneEvent<{
+      position: web3.PublicKey;
+      positionId: BN;
+      receiptAsset: web3.PublicKey;
+      owner: web3.PublicKey;
+      collection: web3.PublicKey;
+    }>("receiptCreated");
     await settleReveal(positionId);
     const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     expect(pos.receiptAsset.toBase58()).toBe(receiptAsset.toBase58());
     const receipt = await provider.connection.getAccountInfo(receiptAsset);
     expect(receipt).not.toBeNull();
     expect(receipt!.owner.toBase58()).toBe(MPL_CORE_PROGRAM_ID.toBase58());
+
+    const receiptCreated = await receiptCreatedPromise;
+    expect(receiptCreated.position.toBase58()).toBe(position.toBase58());
+    expect(receiptCreated.positionId.toString()).toBe(positionId.toString());
+    expect(receiptCreated.receiptAsset.toBase58()).toBe(receiptAsset.toBase58());
+    expect(receiptCreated.owner.toBase58()).toBe(payer.publicKey.toBase58());
+    expect(receiptCreated.collection.toBase58()).toBe(receiptCollection.toBase58());
   }, 60_000);
 
   it("does not change position ownership during reveal", async () => {
@@ -1950,6 +1964,16 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   it("recovers a reveal timeout and refunds the full principal", async () => {
     const positionId = new BN(nextPositionId++);
     const { position } = await stakeAndCommit(positionId);
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const funderBefore = await provider.connection.getAccountInfo(receiptFunder);
+    expect(funderBefore).not.toBeNull();
 
     const vaultBefore = await getAccount(provider.connection, principalVault);
     const ownerBefore = await getAccount(provider.connection, payerRodeoAccount);
@@ -1977,6 +2001,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     ).toBe(gameBefore.accountedPrincipalAtomic.toString());
 
     await expect(rodeoAccounts(rodeoCoreProgram).position.fetch(position)).rejects.toThrow();
+    expect(await provider.connection.getAccountInfo(position)).toBeNull();
+    expect(await provider.connection.getAccountInfo(receiptFunder)).toBeNull();
+    expect(await provider.connection.getAccountInfo(receiptAsset)).toBeNull();
   }, 60_000);
 
   it("cannot recover a reveal timeout after settlement", async () => {
@@ -2680,6 +2707,26 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       configVersion: BN;
     }>("positionUnstaked");
 
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), positionAddr.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), positionAddr.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const receiptBeforeSettle = await provider.connection.getAccountInfo(receiptAsset);
+    expect(receiptBeforeSettle).not.toBeNull();
+    expect(receiptBeforeSettle!.owner.toBase58()).toBe(MPL_CORE_PROGRAM_ID.toBase58());
+
+    const receiptBurnedPromise = collectOneEvent<{
+      position: web3.PublicKey;
+      positionId: BN;
+      receiptAsset: web3.PublicKey;
+      owner: web3.PublicKey;
+      collection: web3.PublicKey;
+    }>("receiptBurned");
+
     const gameBeforeSettle =
       await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
 
@@ -2764,6 +2811,14 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
 
     expect(await provider.connection.getAccountInfo(positionAddr)).toBeNull();
     expect(await provider.connection.getAccountInfo(requestInfo.pendingRandomness)).toBeNull();
+    expect(await provider.connection.getAccountInfo(receiptAsset)).toBeNull();
+    expect(await provider.connection.getAccountInfo(receiptFunder)).toBeNull();
+
+    const receiptBurned = await receiptBurnedPromise;
+    expect(receiptBurned.position.toBase58()).toBe(positionAddr.toBase58());
+    expect(receiptBurned.receiptAsset.toBase58()).toBe(receiptAsset.toBase58());
+    expect(receiptBurned.owner.toBase58()).toBe(payer.publicKey.toBase58());
+    expect(receiptBurned.collection.toBase58()).toBe(receiptCollection.toBase58());
 
     expect(preRequestTotalLiability.gte(preRequestClaimable)).toBe(true);
   }, 120_000);
@@ -2864,6 +2919,46 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     // tests that use nextPositionId++.
     nextPositionId = after.nextPositionId.toNumber();
   }, 120_000);
+
+  it("recover_unstake_timeout leaves the receipt and funder untouched", async () => {
+    const positionId = new BN(nextPositionId++);
+    const { position } = await stakeAndCommit(positionId);
+    await settleReveal(positionId);
+
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+
+    await sleep(2_500);
+    await ensureEpochsClosed();
+    const { actionNonce } = await requestUnstake(positionId);
+
+    const receiptBefore = await provider.connection.getAccountInfo(receiptAsset);
+    const funderBefore = await provider.connection.getAccountInfo(receiptFunder);
+    expect(receiptBefore).not.toBeNull();
+    expect(receiptBefore!.owner.toBase58()).toBe(MPL_CORE_PROGRAM_ID.toBase58());
+    expect(funderBefore).not.toBeNull();
+
+    // Wait out the short randomness timeout on the unstake request.
+    await sleep(2_500);
+    await recoverUnstakeTimeout(positionId, actionNonce);
+
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(pos.pendingActionActive).toBe(false);
+    expect(pos.status).toHaveProperty("active");
+
+    const receiptAfter = await provider.connection.getAccountInfo(receiptAsset);
+    const funderAfter = await provider.connection.getAccountInfo(receiptFunder);
+    expect(receiptAfter).not.toBeNull();
+    expect(receiptAfter!.owner.toBase58()).toBe(MPL_CORE_PROGRAM_ID.toBase58());
+    expect(funderAfter).not.toBeNull();
+    expect(funderAfter!.lamports).toBe(funderBefore!.lamports);
+  }, 60_000);
 
 });
 
