@@ -4681,7 +4681,7 @@ mod tests {
     use crate::state;
 
     #[cfg(not(feature = "mock-randomness"))]
-    use switchboard_on_demand::{ON_DEMAND_DEVNET_PID, ON_DEMAND_MAINNET_PID};
+    use switchboard_on_demand::{Discriminator, ON_DEMAND_DEVNET_PID, ON_DEMAND_MAINNET_PID};
 
     fn pubkey_from_u64(n: u64) -> Pubkey {
         let mut bytes = [0u8; 32];
