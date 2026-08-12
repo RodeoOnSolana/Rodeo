@@ -705,6 +705,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           principalVault,
           rewardVault,
           protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
+          receiptCollection,
+          receiptAuthority,
+          mplCoreProgram: MPL_CORE_PROGRAM_ID,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -738,6 +741,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           principalVault,
           rewardVault,
           protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
+          receiptCollection,
+          receiptAuthority,
+          mplCoreProgram: MPL_CORE_PROGRAM_ID,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -929,6 +935,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           principalVault,
           rewardVault,
           protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
+          receiptCollection,
+          receiptAuthority,
+          mplCoreProgram: MPL_CORE_PROGRAM_ID,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -2872,6 +2881,14 @@ describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", (
       [Buffer.from("bull-accumulator"), globalConfig.toBuffer()],
       program.programId,
     );
+    const [receiptCollection] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-collection"), globalConfig.toBuffer()],
+      program.programId,
+    );
+    const [receiptAuthority] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-authority"), globalConfig.toBuffer()],
+      program.programId,
+    );
     return {
       globalConfig,
       principalVault,
@@ -2879,6 +2896,8 @@ describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", (
       rewardState,
       globalGameState,
       bullAccumulator,
+      receiptCollection,
+      receiptAuthority,
     };
   }
 
@@ -2915,6 +2934,9 @@ describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", (
           principalVault: accounts.principalVault,
           rewardVault: accounts.rewardVault,
           protocolConfig: deriveProtocolConfig(program.programId, accounts.globalConfig, new BN(1))[0],
+          receiptCollection: accounts.receiptCollection,
+          receiptAuthority: accounts.receiptAuthority,
+          mplCoreProgram: MPL_CORE_PROGRAM_ID,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
