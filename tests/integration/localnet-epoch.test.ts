@@ -32,6 +32,10 @@ const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
   "BPFLoaderUpgradeab1e11111111111111111111111",
 );
 
+const MPL_CORE_PROGRAM_ID = new web3.PublicKey(
+  "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d",
+);
+
 interface AccountFetcher<T> {
   fetch(address: web3.PublicKey): Promise<T>;
   fetchNullable(address: web3.PublicKey): Promise<T | null>;
@@ -360,6 +364,8 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   let bullAccumulator: web3.PublicKey;
   let principalVault: web3.PublicKey;
   let rewardVault: web3.PublicKey;
+  let receiptCollection: web3.PublicKey;
+  let receiptAuthority: web3.PublicKey;
   let payerRodeoAccount: web3.PublicKey;
   let payerAnsemAccount: web3.PublicKey;
 
@@ -403,6 +409,14 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     );
     [bullAccumulator] = web3.PublicKey.findProgramAddressSync(
       [Buffer.from("bull-accumulator"), globalConfig.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    [receiptCollection] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-collection"), globalConfig.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    [receiptAuthority] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-authority"), globalConfig.toBuffer()],
       rodeoCoreProgram.programId,
     );
 
@@ -461,6 +475,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         principalVault,
         rewardVault,
         protocolConfig,
+        receiptCollection,
+        receiptAuthority,
+        mplCoreProgram: MPL_CORE_PROGRAM_ID,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: web3.SystemProgram.programId,
         rent: web3.SYSVAR_RENT_PUBKEY,
@@ -688,6 +705,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           principalVault,
           rewardVault,
           protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
+          receiptCollection,
+          receiptAuthority,
+          mplCoreProgram: MPL_CORE_PROGRAM_ID,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -721,6 +741,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           principalVault,
           rewardVault,
           protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
+          receiptCollection,
+          receiptAuthority,
+          mplCoreProgram: MPL_CORE_PROGRAM_ID,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -912,6 +935,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           principalVault,
           rewardVault,
           protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
+          receiptCollection,
+          receiptAuthority,
+          mplCoreProgram: MPL_CORE_PROGRAM_ID,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -989,6 +1015,10 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     }
 
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
     const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(globalConfig);
     const [protocolConfig] = deriveProtocolConfig(
       rodeoCoreProgram.programId,
@@ -1009,6 +1039,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           pendingRandomness,
           rewardState,
           globalGameState,
+          receiptFunder,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -1036,6 +1067,14 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       globalConfig,
       pendingRandomnessAccount.configVersionSnapshot,
     );
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), positionAddr.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), positionAddr.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
     await rodeoCoreProgram.methods
       .settleReveal()
       .accounts({
@@ -1048,6 +1087,12 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         pendingRandomness,
         protocolConfig,
         owner: pos.owner,
+        receiptAsset,
+        receiptCollection,
+        receiptAuthority,
+        receiptFunder,
+        mplCoreProgram: MPL_CORE_PROGRAM_ID,
+        systemProgram: web3.SystemProgram.programId,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
       })
       .signers([settler])
@@ -1056,6 +1101,10 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
 
   async function recoverRevealTimeout(positionId: BN, caller = payer) {
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
     await rodeoCoreProgram.methods
       .recoverRevealTimeout()
       .accounts({
@@ -1067,6 +1116,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         ownerRodeoAccount: payerRodeoAccount,
         owner: payer.publicKey,
         globalGameState,
+        receiptFunder,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: web3.SystemProgram.programId,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
@@ -1501,6 +1551,14 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       new BN(999),
     );
     const { position } = await deriveStakeAccounts(positionId);
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
     await expect(
       rodeoCoreProgram.methods
         .settleReveal()
@@ -1513,6 +1571,13 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           position,
           pendingRandomness: wrongRandomness,
           protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
+          owner: payer.publicKey,
+          receiptAsset,
+          receiptCollection,
+          receiptAuthority,
+          receiptFunder,
+          mplCoreProgram: MPL_CORE_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
           clock: web3.SYSVAR_CLOCK_PUBKEY,
         })
         .rpc(),
@@ -1554,12 +1619,33 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     }
   }, 60_000);
 
-  it("does not create a receipt asset or emit ReceiptCreated", async () => {
+  it("creates a receipt asset owned by the position owner on reveal", async () => {
     const positionId = new BN(nextPositionId++);
     const { position } = await stakeAndCommit(positionId);
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const receiptCreatedPromise = collectOneEvent<{
+      position: web3.PublicKey;
+      positionId: BN;
+      receiptAsset: web3.PublicKey;
+      owner: web3.PublicKey;
+      collection: web3.PublicKey;
+    }>("receiptCreated");
     await settleReveal(positionId);
     const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
-    expect(pos.receiptAsset.toBase58()).toBe(web3.PublicKey.default.toBase58());
+    expect(pos.receiptAsset.toBase58()).toBe(receiptAsset.toBase58());
+    const receipt = await provider.connection.getAccountInfo(receiptAsset);
+    expect(receipt).not.toBeNull();
+    expect(receipt!.owner.toBase58()).toBe(MPL_CORE_PROGRAM_ID.toBase58());
+
+    const receiptCreated = await receiptCreatedPromise;
+    expect(receiptCreated.position.toBase58()).toBe(position.toBase58());
+    expect(receiptCreated.positionId.toString()).toBe(positionId.toString());
+    expect(receiptCreated.receiptAsset.toBase58()).toBe(receiptAsset.toBase58());
+    expect(receiptCreated.owner.toBase58()).toBe(payer.publicKey.toBase58());
+    expect(receiptCreated.collection.toBase58()).toBe(receiptCollection.toBase58());
   }, 60_000);
 
   it("does not change position ownership during reveal", async () => {
@@ -1743,6 +1829,14 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       globalConfig,
       pendingRandomnessAccount.configVersionSnapshot,
     );
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
     const builder = rodeoCoreProgram.methods
       .settleUnstake()
       .accounts({
@@ -1760,7 +1854,13 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         rewardVault,
         ownerAnsemAccount: payerAnsemAccount,
         owner: payer.publicKey,
+        receiptAsset,
+        receiptCollection,
+        receiptAuthority,
+        receiptFunder,
+        mplCoreProgram: MPL_CORE_PROGRAM_ID,
         tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: web3.SystemProgram.programId,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
       })
       .signers([settler]);
@@ -1864,6 +1964,16 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   it("recovers a reveal timeout and refunds the full principal", async () => {
     const positionId = new BN(nextPositionId++);
     const { position } = await stakeAndCommit(positionId);
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const funderBefore = await provider.connection.getAccountInfo(receiptFunder);
+    expect(funderBefore).not.toBeNull();
 
     const vaultBefore = await getAccount(provider.connection, principalVault);
     const ownerBefore = await getAccount(provider.connection, payerRodeoAccount);
@@ -1891,6 +2001,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     ).toBe(gameBefore.accountedPrincipalAtomic.toString());
 
     await expect(rodeoAccounts(rodeoCoreProgram).position.fetch(position)).rejects.toThrow();
+    expect(await provider.connection.getAccountInfo(position)).toBeNull();
+    expect(await provider.connection.getAccountInfo(receiptFunder)).toBeNull();
+    expect(await provider.connection.getAccountInfo(receiptAsset)).toBeNull();
   }, 60_000);
 
   it("cannot recover a reveal timeout after settlement", async () => {
@@ -2594,6 +2707,26 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       configVersion: BN;
     }>("positionUnstaked");
 
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), positionAddr.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), positionAddr.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const receiptBeforeSettle = await provider.connection.getAccountInfo(receiptAsset);
+    expect(receiptBeforeSettle).not.toBeNull();
+    expect(receiptBeforeSettle!.owner.toBase58()).toBe(MPL_CORE_PROGRAM_ID.toBase58());
+
+    const receiptBurnedPromise = collectOneEvent<{
+      position: web3.PublicKey;
+      positionId: BN;
+      receiptAsset: web3.PublicKey;
+      owner: web3.PublicKey;
+      collection: web3.PublicKey;
+    }>("receiptBurned");
+
     const gameBeforeSettle =
       await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
 
@@ -2679,6 +2812,19 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     expect(await provider.connection.getAccountInfo(positionAddr)).toBeNull();
     expect(await provider.connection.getAccountInfo(requestInfo.pendingRandomness)).toBeNull();
 
+    const burnedReceipt = await provider.connection.getAccountInfo(receiptAsset);
+    expect(burnedReceipt).not.toBeNull();
+    expect(burnedReceipt!.owner.toBase58()).toBe(MPL_CORE_PROGRAM_ID.toBase58());
+    expect(burnedReceipt!.data.length).toBe(1);
+    expect(burnedReceipt!.data[0]).toBe(0);
+    expect(await provider.connection.getAccountInfo(receiptFunder)).toBeNull();
+
+    const receiptBurned = await receiptBurnedPromise;
+    expect(receiptBurned.position.toBase58()).toBe(positionAddr.toBase58());
+    expect(receiptBurned.receiptAsset.toBase58()).toBe(receiptAsset.toBase58());
+    expect(receiptBurned.owner.toBase58()).toBe(payer.publicKey.toBase58());
+    expect(receiptBurned.collection.toBase58()).toBe(receiptCollection.toBase58());
+
     expect(preRequestTotalLiability.gte(preRequestClaimable)).toBe(true);
   }, 120_000);
 
@@ -2697,6 +2843,10 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         position,
         0,
         new BN(0),
+      );
+      const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+        [Buffer.from("receipt-funder"), position.toBuffer()],
+        rodeoCoreProgram.programId,
       );
       const globalConfigAccount = await rodeoAccounts(rodeoCoreProgram).globalConfig.fetch(
         globalConfig,
@@ -2718,6 +2868,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           pendingRandomness,
           rewardState,
           globalGameState,
+          receiptFunder,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -2774,6 +2925,54 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     nextPositionId = after.nextPositionId.toNumber();
   }, 120_000);
 
+  it("recover_unstake_timeout leaves the receipt and funder untouched", async () => {
+    const positionId = new BN(nextPositionId++);
+    const { position } = await stakeAndCommit(positionId);
+    await settleReveal(positionId);
+
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+
+    await fixturePreparePosition(positionId, {
+      roleCode: 1,
+      cowboyKindCode: 5,
+      accrualWeight: 10000,
+      buckPower: 0,
+      claimable: new BN(0),
+      positionClaimableLiabilityDelta: new BN(0),
+    });
+
+    await ensureEpochsClosed();
+    const { actionNonce } = await requestUnstake(positionId);
+
+    const receiptBefore = await provider.connection.getAccountInfo(receiptAsset);
+    const funderBefore = await provider.connection.getAccountInfo(receiptFunder);
+    expect(receiptBefore).not.toBeNull();
+    expect(receiptBefore!.owner.toBase58()).toBe(MPL_CORE_PROGRAM_ID.toBase58());
+    expect(funderBefore).not.toBeNull();
+
+    // Wait out the short randomness timeout on the unstake request.
+    await sleep(2_500);
+    await recoverUnstakeTimeout(positionId, actionNonce);
+
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(pos.pendingActionActive).toBe(false);
+    expect(pos.status).toHaveProperty("active");
+
+    const receiptAfter = await provider.connection.getAccountInfo(receiptAsset);
+    const funderAfter = await provider.connection.getAccountInfo(receiptFunder);
+    expect(receiptAfter).not.toBeNull();
+    expect(receiptAfter!.owner.toBase58()).toBe(MPL_CORE_PROGRAM_ID.toBase58());
+    expect(funderAfter).not.toBeNull();
+    expect(funderAfter!.lamports).toBe(funderBefore!.lamports);
+  }, 60_000);
+
 });
 
 describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", () => {
@@ -2817,6 +3016,14 @@ describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", (
       [Buffer.from("bull-accumulator"), globalConfig.toBuffer()],
       program.programId,
     );
+    const [receiptCollection] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-collection"), globalConfig.toBuffer()],
+      program.programId,
+    );
+    const [receiptAuthority] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-authority"), globalConfig.toBuffer()],
+      program.programId,
+    );
     return {
       globalConfig,
       principalVault,
@@ -2824,6 +3031,8 @@ describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", (
       rewardState,
       globalGameState,
       bullAccumulator,
+      receiptCollection,
+      receiptAuthority,
     };
   }
 
@@ -2860,6 +3069,9 @@ describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", (
           principalVault: accounts.principalVault,
           rewardVault: accounts.rewardVault,
           protocolConfig: deriveProtocolConfig(program.programId, accounts.globalConfig, new BN(1))[0],
+          receiptCollection: accounts.receiptCollection,
+          receiptAuthority: accounts.receiptAuthority,
+          mplCoreProgram: MPL_CORE_PROGRAM_ID,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,

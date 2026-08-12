@@ -183,6 +183,57 @@ pub mod rodeo_core {
         probability::validate_protocol_config(&v1_config)?;
         protocol_config.set_inner(v1_config);
 
+        // Create the official Rodeo PositionReceipt Collection. This is a
+        // one-time action paid for by the initializer and uses the stateless
+        // ReceiptAuthority PDA as the update authority.
+        let global_config_key = global_config.key();
+        let (receipt_authority, receipt_authority_bump) = receipt_authority_pda(&global_config_key);
+        let (collection, _collection_bump) = receipt_collection_pda(&global_config_key);
+
+        require_keys_eq!(
+            ctx.accounts.receipt_authority.key(),
+            receipt_authority,
+            RodeoError::InvalidCoreAssetOwner
+        );
+        require_keys_eq!(
+            ctx.accounts.receipt_collection.key(),
+            collection,
+            RodeoError::InvalidCoreAssetOwner
+        );
+
+        let collection_ix = CreateCollectionV2Builder::new()
+            .collection(collection)
+            .update_authority(Some(receipt_authority))
+            .payer(ctx.accounts.payer.key())
+            .system_program(solana_program::system_program::ID)
+            .name(RECEIPT_COLLECTION_NAME.to_string())
+            .uri(RECEIPT_COLLECTION_URI.to_string())
+            .instruction();
+
+        let account_infos = [
+            ctx.accounts.receipt_collection.to_account_info(),
+            ctx.accounts.receipt_authority.to_account_info(),
+            ctx.accounts.payer.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ];
+        let authority_seeds = [
+            SEED_RECEIPT_AUTHORITY,
+            global_config_key.as_ref(),
+            &[receipt_authority_bump],
+        ];
+        let collection_seeds = [
+            SEED_RECEIPT_COLLECTION,
+            global_config_key.as_ref(),
+            &[ctx.bumps.receipt_collection],
+        ];
+
+        solana_program::program::invoke_signed(
+            &collection_ix,
+            &account_infos,
+            &[&collection_seeds, &authority_seeds],
+        )
+        .map_err(|e: ProgramError| Into::<Error>::into(e))?;
+
         emit!(ProtocolInitialized {
             global_config: global_config.key(),
             reward_state: reward_state.key(),
@@ -294,6 +345,41 @@ pub mod rodeo_core {
         position.next_action_nonce = math::checked_add_u64(action_nonce, 1)?;
         position.bump = ctx.bumps.position;
 
+        // Create and prefund the System-Program-owned ReceiptFunder PDA.
+        // The player supplies the SOL; Rodeo signs for the PDA address.
+        let position_key = position.key();
+        let (receipt_funder, receipt_funder_bump) = receipt_funder_pda(&position_key);
+        require_keys_eq!(
+            ctx.accounts.receipt_funder.key(),
+            receipt_funder,
+            RodeoError::InvalidCoreAssetOwner
+        );
+
+        let funder_create_ix = solana_program::system_instruction::create_account(
+            ctx.accounts.owner.key,
+            &receipt_funder,
+            RECEIPT_RESERVE_LAMPORTS,
+            0,
+            &solana_program::system_program::ID,
+        );
+        let funder_account_infos = [
+            ctx.accounts.owner.to_account_info(),
+            ctx.accounts.receipt_funder.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ];
+        let funder_seeds = [
+            SEED_RECEIPT_FUNDER,
+            position_key.as_ref(),
+            &[receipt_funder_bump],
+        ];
+
+        solana_program::program::invoke_signed(
+            &funder_create_ix,
+            &funder_account_infos,
+            &[&funder_seeds],
+        )
+        .map_err(|e: ProgramError| Into::<Error>::into(e))?;
+
         // Initialize the reveal PendingRandomness account.
         let pending_randomness = &mut ctx.accounts.pending_randomness;
         pending_randomness.version = ACCOUNT_VERSION_PENDING_RANDOMNESS;
@@ -380,7 +466,19 @@ pub mod rodeo_core {
         );
 
         #[cfg(feature = "mock-randomness")]
-        return settle_reveal_mock(&mut ctx);
+        {
+            // Deterministic mock randomness: the production settlement path is
+            // the same; only the source of `random_output` changes once a real
+            // provider is wired. Compute the mock result here and delegate to
+            // the provider-independent common reveal settlement.
+            let position_key = position.key();
+            let action_type = pending_randomness.action_type;
+            let action_nonce = pending_randomness.action_nonce;
+            let protocol_epoch = pending_randomness.committed_protocol_epoch;
+            let random_output =
+                derive_commitment(position_key, action_type, action_nonce, protocol_epoch);
+            return settle_reveal_common(&mut ctx, random_output);
+        }
 
         #[cfg(not(feature = "mock-randomness"))]
         {
@@ -451,6 +549,46 @@ pub mod rodeo_core {
         game_state.live_position_count = math::checked_sub_u64(game_state.live_position_count, 1)?;
         game_state.accounted_principal_atomic =
             math::checked_sub_u64(game_state.accounted_principal_atomic, principal_amount)?;
+
+        // If no receipt was created (reveal never completed), refund the
+        // unused ReceiptFunder reserve to the Position owner.
+        require!(
+            position.receipt_asset == Pubkey::default(),
+            RodeoError::InvalidCoreAssetOwner
+        );
+
+        let position_key = position.key();
+        let (funder, funder_bump) = receipt_funder_pda(&position_key);
+        require_keys_eq!(
+            ctx.accounts.receipt_funder.key(),
+            funder,
+            RodeoError::InvalidCoreAssetOwner
+        );
+
+        let funder_lamports = ctx.accounts.receipt_funder.to_account_info().lamports();
+        if funder_lamports > 0 {
+            require_keys_eq!(
+                ctx.accounts.owner.key(),
+                position.owner,
+                RodeoError::InvalidOwner
+            );
+            let funder_close_ix = solana_program::system_instruction::transfer(
+                &funder,
+                ctx.accounts.owner.key,
+                funder_lamports,
+            );
+            let funder_close_account_infos = [
+                ctx.accounts.receipt_funder.to_account_info(),
+                ctx.accounts.owner.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ];
+            let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
+            solana_program::program::invoke_signed(
+                &funder_close_ix,
+                &funder_close_account_infos,
+                &[&funder_seeds],
+            )?;
+        }
 
         emit!(RandomnessTimeoutRecovered {
             position: position.key(),
@@ -2372,6 +2510,27 @@ pub struct InitializeProtocol<'info> {
     )]
     pub reward_vault: Account<'info, TokenAccount>,
 
+    /// CHECK: The official Rodeo PositionReceipt Collection PDA. Created by
+    /// `initialize_protocol` via the MPL Core `CreateCollectionV2` CPI.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA used as the collection update
+    /// authority and as the signer for all receipt lifecycle actions.
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    /// CHECK: MPL Core program.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
@@ -2452,6 +2611,16 @@ pub struct StakeAndCommit<'info> {
     )]
     pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
+    /// CHECK: The System-Program-owned ReceiptFunder PDA for this Position.
+    /// Created and prefunded by the player during stake_and_commit; it is
+    /// later used as the MPL Core payer for receipt create/burn.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_funder: UncheckedAccount<'info>,
+
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
@@ -2527,9 +2696,47 @@ pub struct SettleReveal<'info> {
     pub protocol_config: Box<Account<'info, ProtocolConfig>>,
 
     /// CHECK: Account receives reclaimed rent and is validated against the position owner.
+    /// Also used as the embedded Core asset owner for the PositionReceipt.
     #[account(mut, constraint = owner.key() == position.owner @ RodeoError::InvalidOwner)]
     pub owner: AccountInfo<'info>,
 
+    /// CHECK: The new Core Asset account at the PositionReceipt PDA.
+    #[account(
+        mut,
+        seeds = [SEED_POSITION_RECEIPT, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_asset: UncheckedAccount<'info>,
+
+    /// CHECK: The official Rodeo receipt Collection this asset is created into.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA used as the Core plugin authority
+    /// and asset-creation authority.
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    /// CHECK: The ReceiptFunder PDA paying MPL Core `CreateV2` rent.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_funder: UncheckedAccount<'info>,
+
+    /// CHECK: MPL Core program.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
     pub clock: Sysvar<'info, Clock>,
 }
 
@@ -2587,6 +2794,7 @@ pub struct RecoverRevealTimeout<'info> {
     pub owner_rodeo_account: Account<'info, TokenAccount>,
 
     /// CHECK: Account receives reclaimed rent and is validated against the position owner.
+    /// Also receives the unused ReceiptFunder reserve when the reveal times out.
     #[account(mut)]
     pub owner: AccountInfo<'info>,
 
@@ -2596,6 +2804,15 @@ pub struct RecoverRevealTimeout<'info> {
         bump = global_game_state.bump,
     )]
     pub global_game_state: Box<Account<'info, GlobalGameState>>,
+
+    /// CHECK: The prefunded ReceiptFunder PDA, closed and refunded to `owner`
+    /// because the reveal was never completed and no receipt was created.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_funder: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -2911,10 +3128,48 @@ pub struct SettleUnstake<'info> {
     pub owner_ansem_account: Box<Account<'info, TokenAccount>>,
 
     /// CHECK: Account receives reclaimed rent and is validated against the position owner.
+    /// Also receives the residual ReceiptFunder SOL after receipt burn.
     #[account(mut, constraint = owner.key() == position.owner @ RodeoError::InvalidOwner)]
     pub owner: AccountInfo<'info>,
 
+    /// CHECK: The PositionReceipt Core Asset to be burned.
+    #[account(
+        mut,
+        seeds = [SEED_POSITION_RECEIPT, position.key().as_ref()],
+        bump,
+        constraint = receipt_asset.key() == position.receipt_asset @ RodeoError::InvalidCoreAssetOwner,
+    )]
+    pub receipt_asset: UncheckedAccount<'info>,
+
+    /// CHECK: The official Rodeo receipt Collection this asset belongs to.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA used to sign the `BurnV1` CPI.
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    /// CHECK: The ReceiptFunder PDA that paid the create rent and receives the burn refund.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_funder: UncheckedAccount<'info>,
+
+    /// CHECK: MPL Core program.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
     pub clock: Sysvar<'info, Clock>,
 }
 
@@ -3040,6 +3295,24 @@ pub struct PositionRevealed {
     pub unstake_eligible_at: i64,
     pub settlement_nonce: u64,
     pub config_version: u64,
+}
+
+#[event]
+pub struct ReceiptCreated {
+    pub position: Pubkey,
+    pub position_id: u64,
+    pub receipt_asset: Pubkey,
+    pub owner: Pubkey,
+    pub collection: Pubkey,
+}
+
+#[event]
+pub struct ReceiptBurned {
+    pub position: Pubkey,
+    pub position_id: u64,
+    pub receipt_asset: Pubkey,
+    pub owner: Pubkey,
+    pub collection: Pubkey,
 }
 
 #[event]
@@ -3608,8 +3881,7 @@ fn convert_orphaned_remainders(
     Ok(())
 }
 
-#[cfg(feature = "mock-randomness")]
-fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
+fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]) -> Result<()> {
     use crate::probability;
 
     let config: &ProtocolConfig = &**ctx.accounts.protocol_config;
@@ -3618,10 +3890,6 @@ fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
     let action_type = ctx.accounts.pending_randomness.action_type;
     let action_nonce = ctx.accounts.pending_randomness.action_nonce;
     let protocol_epoch = ctx.accounts.pending_randomness.committed_protocol_epoch;
-
-    // Deterministic random bytes that are domain-separated and bound to the
-    // position, action type, action nonce, and protocol epoch.
-    let random_output = derive_commitment(position_key, action_type, action_nonce, protocol_epoch);
 
     let role = probability::map_role(
         probability::RandomnessSampleContext {
@@ -3709,22 +3977,6 @@ fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
                 math::checked_add_u64(game_state.active_cowboy_count, 1)?;
             game_state.total_active_cowboy_weight =
                 math::checked_add_u128(game_state.total_active_cowboy_weight, weight as u128)?;
-
-            emit!(PositionRevealed {
-                position: position_key,
-                role: Role::Cowboy,
-                cowboy_kind: kind,
-                bull_tier: 0,
-                suit,
-                final_owner,
-                previous_owner: None,
-                stolen: false,
-                receipt_asset: Pubkey::default(),
-                active_since,
-                unstake_eligible_at,
-                settlement_nonce,
-                config_version,
-            });
         }
         Role::Bull => {
             let tier = probability::map_bull_tier(
@@ -3778,27 +4030,145 @@ fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
                         .bull_pool_unallocated_liability_atomic = 0;
                 }
             }
-
-            emit!(PositionRevealed {
-                position: position_key,
-                role: Role::Bull,
-                cowboy_kind: CowboyKind::Unassigned,
-                bull_tier: tier,
-                suit,
-                final_owner,
-                previous_owner: None,
-                stolen: false,
-                receipt_asset: Pubkey::default(),
-                active_since,
-                unstake_eligible_at,
-                settlement_nonce,
-                config_version,
-            });
         }
         Role::Unassigned => {
             return Err(error!(RodeoError::InvalidProbabilityOutcome));
         }
     }
+
+    // Create the collection-member PositionReceipt for the now-finalized
+    // Position. The funder (prefunded by the owner at stake) pays Core rent.
+    let (receipt_authority, receipt_authority_bump) =
+        receipt_authority_pda(&ctx.accounts.global_config.key());
+    let (receipt_asset, receipt_asset_bump) = position_receipt_pda(&position_key);
+    let (collection, _collection_bump) = receipt_collection_pda(&ctx.accounts.global_config.key());
+    let (funder, funder_bump) = receipt_funder_pda(&position_key);
+
+    require_keys_eq!(
+        ctx.accounts.receipt_authority.key(),
+        receipt_authority,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_asset.key(),
+        receipt_asset,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_collection.key(),
+        collection,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_funder.key(),
+        funder,
+        RodeoError::InvalidCoreAssetOwner
+    );
+
+    let name = format!("{}{}", RECEIPT_NAME_PREFIX, position.position_id);
+    let uri = format!(
+        "{}{}{}",
+        RECEIPT_METADATA_BASE_URI, position.position_id, RECEIPT_METADATA_URI_SUFFIX
+    );
+
+    let plugins = vec![
+        PluginAuthorityPair {
+            plugin: Plugin::PermanentTransferDelegate(
+                mpl_core::types::PermanentTransferDelegate {},
+            ),
+            authority: Some(PluginAuthority::Address {
+                address: receipt_authority,
+            }),
+        },
+        PluginAuthorityPair {
+            plugin: Plugin::PermanentBurnDelegate(mpl_core::types::PermanentBurnDelegate {}),
+            authority: Some(PluginAuthority::Address {
+                address: receipt_authority,
+            }),
+        },
+        PluginAuthorityPair {
+            plugin: Plugin::PermanentFreezeDelegate(mpl_core::types::PermanentFreezeDelegate {
+                frozen: true,
+            }),
+            authority: Some(PluginAuthority::Address {
+                address: receipt_authority,
+            }),
+        },
+    ];
+
+    let create_ix = CreateV2Builder::new()
+        .asset(receipt_asset)
+        .collection(Some(collection))
+        .authority(Some(receipt_authority))
+        .payer(funder)
+        .owner(Some(ctx.accounts.owner.key()))
+        .system_program(solana_program::system_program::ID)
+        .data_state(DataState::AccountState)
+        .name(name)
+        .uri(uri)
+        .plugins(plugins)
+        .instruction();
+
+    let account_infos = [
+        ctx.accounts.receipt_asset.to_account_info(),
+        ctx.accounts.receipt_collection.to_account_info(),
+        ctx.accounts.receipt_authority.to_account_info(),
+        ctx.accounts.receipt_funder.to_account_info(),
+        ctx.accounts.owner.to_account_info(),
+        ctx.accounts.mpl_core_program.to_account_info(),
+        ctx.accounts.system_program.to_account_info(),
+        ctx.accounts.mpl_core_program.to_account_info(),
+    ];
+
+    let global_config_key = ctx.accounts.global_config.key();
+    let receipt_authority_seeds = [
+        SEED_RECEIPT_AUTHORITY,
+        global_config_key.as_ref(),
+        &[receipt_authority_bump],
+    ];
+    let receipt_asset_seeds = [
+        SEED_POSITION_RECEIPT,
+        position_key.as_ref(),
+        &[receipt_asset_bump],
+    ];
+    let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
+
+    solana_program::program::invoke_signed(
+        &create_ix,
+        &account_infos,
+        &[
+            &receipt_authority_seeds,
+            &receipt_asset_seeds,
+            &funder_seeds,
+        ],
+    )
+    .map_err(|e: ProgramError| Into::<Error>::into(e))?;
+
+    position.receipt_asset = receipt_asset;
+
+    emit!(PositionRevealed {
+        position: position_key,
+        role: position.role,
+        cowboy_kind: position.cowboy_kind,
+        bull_tier: position.bull_tier,
+        suit: position.suit,
+        final_owner: position.owner,
+        previous_owner: None,
+        stolen: false,
+        receipt_asset,
+        active_since,
+        unstake_eligible_at,
+        settlement_nonce,
+        config_version,
+    });
+
+    emit!(ReceiptCreated {
+        position: position_key,
+        position_id: position.position_id,
+        receipt_asset,
+        owner: position.owner,
+        collection,
+    });
 
     emit!(RandomnessSettled {
         position: position_key,
@@ -4096,6 +4466,94 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
 
     position.claimable_ansem_atomic = 0;
     pending_randomness.settled = true;
+
+    // Burn the PositionReceipt and close the ReceiptFunder, returning the
+    // remaining SOL reserve to the current owner. The receipt must already
+    // exist (reveal was successful) because `position.receipt_asset` is set.
+    let global_config_key = ctx.accounts.global_config.key();
+    let (receipt_authority, receipt_authority_bump) = receipt_authority_pda(&global_config_key);
+    let (collection, _collection_bump) = receipt_collection_pda(&global_config_key);
+    let (funder, funder_bump) = receipt_funder_pda(&position_key);
+
+    require_keys_eq!(
+        ctx.accounts.receipt_authority.key(),
+        receipt_authority,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_collection.key(),
+        collection,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_funder.key(),
+        funder,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_asset.key(),
+        position.receipt_asset,
+        RodeoError::InvalidCoreAssetOwner
+    );
+
+    let burn_ix = BurnV1Builder::new()
+        .asset(position.receipt_asset)
+        .collection(Some(collection))
+        .authority(Some(receipt_authority))
+        .payer(funder)
+        .system_program(Some(solana_program::system_program::ID))
+        .instruction();
+
+    let burn_account_infos = [
+        ctx.accounts.receipt_asset.to_account_info(),
+        ctx.accounts.receipt_collection.to_account_info(),
+        ctx.accounts.receipt_funder.to_account_info(),
+        ctx.accounts.receipt_authority.to_account_info(),
+        ctx.accounts.system_program.to_account_info(),
+        ctx.accounts.mpl_core_program.to_account_info(),
+    ];
+    let receipt_authority_seeds = [
+        SEED_RECEIPT_AUTHORITY,
+        global_config_key.as_ref(),
+        &[receipt_authority_bump],
+    ];
+    let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
+
+    solana_program::program::invoke_signed(
+        &burn_ix,
+        &burn_account_infos,
+        &[&receipt_authority_seeds, &funder_seeds],
+    )
+    .map_err(|e: ProgramError| Into::<Error>::into(e))?;
+
+    let funder_lamports = ctx.accounts.receipt_funder.to_account_info().lamports();
+    if funder_lamports > 0 {
+        let funder_close_ix = solana_program::system_instruction::transfer(
+            &funder,
+            ctx.accounts.owner.key,
+            funder_lamports,
+        );
+        let funder_close_account_infos = [
+            ctx.accounts.receipt_funder.to_account_info(),
+            ctx.accounts.owner.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ];
+        solana_program::program::invoke_signed(
+            &funder_close_ix,
+            &funder_close_account_infos,
+            &[&funder_seeds],
+        )?;
+    }
+
+    emit!(ReceiptBurned {
+        position: position_key,
+        position_id: position.position_id,
+        receipt_asset: position.receipt_asset,
+        owner,
+        collection,
+    });
+
+    position.receipt_asset = Pubkey::default();
 
     emit!(PositionUnstaked {
         position: position_key,
