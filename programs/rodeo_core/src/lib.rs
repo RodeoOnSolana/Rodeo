@@ -1277,6 +1277,129 @@ pub mod rodeo_core {
         Ok(())
     }
 
+    pub fn initialize_bull_proof(
+        ctx: Context<InitializeBullProof>,
+        expected_payload_length: u32,
+        nonce: u64,
+    ) -> Result<()> {
+        require_gt!(
+            expected_payload_length,
+            0,
+            RodeoError::BullProofBufferEmptyPayload
+        );
+        require_gte!(
+            BULL_PROOF_BUFFER_MAX_PAYLOAD as u32,
+            expected_payload_length,
+            RodeoError::BullProofBufferOversized
+        );
+
+        let pending_randomness = &ctx.accounts.pending_randomness;
+        require!(
+            pending_randomness.action_type == ActionType::Reveal,
+            RodeoError::InvalidPendingRandomness
+        );
+        require!(
+            !pending_randomness.settled,
+            RodeoError::RandomnessAlreadyAvailable
+        );
+
+        let position = &ctx.accounts.position;
+        require_keys_eq!(
+            pending_randomness.position,
+            position.key(),
+            RodeoError::InvalidPendingRandomness
+        );
+        require_keys_eq!(
+            pending_randomness.position,
+            ctx.accounts.bull_proof_buffer.position,
+            RodeoError::BullProofBufferWrongPosition
+        );
+
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        buffer.version = ACCOUNT_VERSION_BULL_PROOF_BUFFER;
+        buffer.schema_version = BULL_PROOF_BUFFER_SCHEMA_VERSION;
+        buffer.pending_randomness = pending_randomness.key();
+        buffer.position = position.key();
+        buffer.snapshot_root = pending_randomness.registry_root_snapshot;
+        buffer.snapshot_version = pending_randomness.registry_version_snapshot;
+        buffer.snapshot_total_count = pending_randomness.registry_total_count_snapshot;
+        buffer.snapshot_total_power = pending_randomness.registry_total_power_snapshot;
+        buffer.refund_recipient = ctx.accounts.prover.key();
+        buffer.expiry_timestamp = pending_randomness.timeout_timestamp;
+        buffer.expected_payload_length = expected_payload_length;
+        buffer.finalized = false;
+        buffer.consumed = false;
+        buffer.bump = ctx.bumps.bull_proof_buffer;
+        buffer.payload = Vec::new();
+
+        Ok(())
+    }
+
+    pub fn append_bull_proof(
+        ctx: Context<AppendBullProof>,
+        nonce: u64,
+        offset: u32,
+        chunk: Vec<u8>,
+    ) -> Result<()> {
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        require!(!buffer.finalized, RodeoError::BullProofBufferFinalized);
+        require_keys_eq!(
+            buffer.refund_recipient,
+            ctx.accounts.prover.key(),
+            RodeoError::BullProofBufferWrongProver
+        );
+        require_eq!(
+            offset,
+            buffer.payload.len() as u32,
+            RodeoError::BullProofBufferOffsetGap
+        );
+
+        let new_len = (offset as usize)
+            .checked_add(chunk.len())
+            .ok_or(RodeoError::ArithmeticOverflow)?;
+        require_gte!(
+            buffer.expected_payload_length as usize,
+            new_len,
+            RodeoError::BullProofBufferOversized
+        );
+        require_gte!(
+            BULL_PROOF_BUFFER_MAX_PAYLOAD,
+            new_len,
+            RodeoError::BullProofBufferOversized
+        );
+
+        buffer.payload.extend_from_slice(&chunk);
+        Ok(())
+    }
+
+    pub fn finalize_bull_proof(ctx: Context<FinalizeBullProof>, nonce: u64) -> Result<()> {
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        require!(!buffer.finalized, RodeoError::BullProofBufferFinalized);
+        require_keys_eq!(
+            buffer.refund_recipient,
+            ctx.accounts.prover.key(),
+            RodeoError::BullProofBufferWrongProver
+        );
+        require_eq!(
+            buffer.payload.len() as u32,
+            buffer.expected_payload_length,
+            RodeoError::BullProofBufferIncomplete
+        );
+
+        buffer.finalized = true;
+        Ok(())
+    }
+
+    pub fn close_bull_proof(ctx: Context<CloseBullProof>, nonce: u64) -> Result<()> {
+        let buffer = &ctx.accounts.bull_proof_buffer;
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            buffer.consumed || now >= buffer.expiry_timestamp,
+            RodeoError::BullProofBufferNotAbandoned
+        );
+        Ok(())
+    }
+
     /// Test-only fixture to set pause flags for localnet/CI coverage. It is
     /// compiled only when the `test-fixtures` feature is enabled and is never
     /// part of the production ABI.
@@ -3331,6 +3454,129 @@ pub struct RecoverUnstakeTimeout<'info> {
     pub clock: Sysvar<'info, Clock>,
 }
 
+#[derive(Accounts)]
+#[instruction(expected_payload_length: u32, nonce: u64)]
+pub struct InitializeBullProof<'info> {
+    #[account(mut)]
+    pub prover: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        seeds = [
+            SEED_POSITION,
+            global_config.key().as_ref(),
+            &position.position_id.to_le_bytes(),
+        ],
+        bump = position.bump,
+        constraint = position.pending_action_active @ RodeoError::PendingActionConflict,
+        constraint = position.pending_action_type == ActionType::Reveal @ RodeoError::WrongActionType,
+    )]
+    pub position: Box<Account<'info, Position>>,
+
+    #[account(
+        seeds = [
+            SEED_RANDOMNESS,
+            position.key().as_ref(),
+            &[ActionType::Reveal as u8],
+            &position.pending_action_nonce.to_le_bytes(),
+        ],
+        bump = pending_randomness.bump,
+        constraint = pending_randomness.position == position.key() @ RodeoError::InvalidPendingRandomness,
+        constraint = pending_randomness.action_type == ActionType::Reveal @ RodeoError::WrongActionType,
+        constraint = pending_randomness.action_nonce == position.pending_action_nonce @ RodeoError::InvalidPendingRandomness,
+    )]
+    pub pending_randomness: Box<Account<'info, PendingRandomness>>,
+
+    #[account(
+        init,
+        payer = prover,
+        space = 8 + BullProofBuffer::INIT_SPACE,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            pending_randomness.key().as_ref(),
+            prover.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+#[instruction(nonce: u64, offset: u32, chunk: Vec<u8>)]
+pub struct AppendBullProof<'info> {
+    #[account(mut)]
+    pub prover: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            bull_proof_buffer.pending_randomness.as_ref(),
+            prover.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+        constraint = !bull_proof_buffer.finalized @ RodeoError::BullProofBufferFinalized,
+        constraint = bull_proof_buffer.refund_recipient == prover.key() @ RodeoError::BullProofBufferWrongProver,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+}
+
+#[derive(Accounts)]
+#[instruction(nonce: u64)]
+pub struct FinalizeBullProof<'info> {
+    #[account(mut)]
+    pub prover: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            bull_proof_buffer.pending_randomness.as_ref(),
+            prover.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+        constraint = bull_proof_buffer.refund_recipient == prover.key() @ RodeoError::BullProofBufferWrongProver,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+}
+
+#[derive(Accounts)]
+#[instruction(nonce: u64)]
+pub struct CloseBullProof<'info> {
+    /// CHECK: The original prover is used to re-derive the buffer PDA.
+    pub prover: AccountInfo<'info>,
+
+    #[account(
+        mut,
+        close = refund_recipient,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            bull_proof_buffer.pending_randomness.as_ref(),
+            prover.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+
+    /// CHECK: Receives the refunded lamports recorded in the buffer.
+    #[account(mut, address = bull_proof_buffer.refund_recipient)]
+    pub refund_recipient: AccountInfo<'info>,
+
+    pub clock: Sysvar<'info, Clock>,
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -3749,6 +3995,22 @@ pub enum RodeoError {
     BullProofBufferAlreadyConsumed,
     #[msg("BullRegistry proof buffer is bound to a different account")]
     BullProofBufferBindingMismatch,
+    #[msg("BullProofBuffer payload length must be greater than zero")]
+    BullProofBufferEmptyPayload,
+    #[msg("BullProofBuffer payload exceeds the schema maximum")]
+    BullProofBufferOversized,
+    #[msg("BullProofBuffer append offset is not sequential")]
+    BullProofBufferOffsetGap,
+    #[msg("BullProofBuffer is bound to a different Position")]
+    BullProofBufferWrongPosition,
+    #[msg("BullProofBuffer can only be written by the original prover")]
+    BullProofBufferWrongProver,
+    #[msg("BullProofBuffer has already been finalized")]
+    BullProofBufferFinalized,
+    #[msg("BullProofBuffer payload is incomplete or wrong length")]
+    BullProofBufferIncomplete,
+    #[msg("BullProofBuffer cannot be closed before expiry or consumption")]
+    BullProofBufferNotAbandoned,
     #[msg("No eligible external Bull exists for this theft")]
     NoEligibleExternalBull,
     #[msg("The provided randomness account is not a valid Switchboard randomness account")]

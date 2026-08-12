@@ -137,6 +137,10 @@ pub struct BullProofBuffer {
     pub snapshot_total_count: u64,
     /// The party that funded the buffer and receives its rent on close.
     pub refund_recipient: Pubkey,
+    /// Timestamp after which the buffer is abandonable even if unconsumed.
+    pub expiry_timestamp: i64,
+    /// Expected total payload length in bytes. Finalize enforces exact match.
+    pub expected_payload_length: u32,
     /// True once the prover has finalized the payload; settlement may then consume it.
     pub finalized: bool,
     /// True once the buffer has been consumed by settlement.
