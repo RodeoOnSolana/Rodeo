@@ -131,6 +131,9 @@ jobs:
       - name: Rust unit tests
         run: cargo test -p rodeo_core --locked
 
+      - name: Rust unit tests (test-fixtures)
+        run: cargo test -p rodeo_core --locked --features test-fixtures
+
       - name: MPL Core semantic parity unit tests
         run: |
           git clone -b mpl-core-0.11.2-patched --depth 1 https://github.com/RodeoOnSolana/mpl-core /tmp/mpl-core

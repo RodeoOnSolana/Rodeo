@@ -15,21 +15,15 @@ import {
 import { beforeAll, describe, expect, it } from "vitest";
 
 // Phase 2D3A2 scope: prove, against the real deterministic MPL Core
-// localnet program, that:
-//   - the stateless ReceiptAuthority PDA can sign an MPL Core `CreateV2`
-//     CPI without being an initialized Rodeo-owned account;
-//   - the resulting PositionReceipt asset is created at the Rodeo-derived
-//     receipt PDA;
-//   - the Solana account program owner is MPL Core, while the embedded
-//     Core asset owner is the Position's owning wallet;
-//   - all three permanent plugins (transfer/burn/freeze delegate) are
-//     actually present in the on-chain account data, with the
-//     ReceiptAuthority PDA as their authority;
-//   - the freeze delegate starts frozen.
+// localnet program, the full receipt lifecycle:
+//   create -> Wallet A owns frozen receipt -> Wallet A direct transfer/burn
+//   FAIL -> Rodeo force-transfer A->B SUCCEEDS (still frozen) -> Wallet A no
+//   longer controls it -> Wallet B direct transfer/burn FAIL -> Wallet B
+//   cannot thaw the security plugin -> Rodeo force-burn SUCCEEDS.
 //
-// This suite intentionally stops at create+parse. Force-transfer,
-// force-burn, and the normal-owner negative-case matrix are scoped to a
-// follow-up pass once this smoke proof is confirmed green.
+// It also records exact lamport deltas around create/burn and the
+// same-PDA recreation behavior, as evidence for the (not yet decided)
+// 2D3A4 funding architecture.
 const MPL_CORE_PROGRAM_ID = new web3.PublicKey("CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d");
 const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
   "BPFLoaderUpgradeab1e11111111111111111111111",
@@ -141,6 +135,88 @@ async function revokeMintAuthorities(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Raw, hand-encoded MPL Core instructions (no JS SDK dependency is installed
+// in this workspace). Layouts/discriminators/account orders are taken
+// directly from the generated Rust builders in the pinned fork revision
+// e31f5de77a0bd23793ddf27bc887dc675ecaec75 (transfer_v1.rs, burn_v1.rs,
+// update_plugin_v1.rs, plugin.rs), not guessed. Each is a plain Borsh
+// `discriminator: u8` instruction-data prefix followed by the args struct.
+// ---------------------------------------------------------------------------
+
+// Direct (non-Rodeo) TransferV1: discriminator 14, args `{ compression_proof:
+// Option<CompressionProof> }` (None -> single 0x00 byte for an uncompressed
+// asset).
+function mplCoreTransferV1Instruction(params: {
+  asset: web3.PublicKey;
+  payer: web3.PublicKey;
+  authority: web3.PublicKey;
+  newOwner: web3.PublicKey;
+}): web3.TransactionInstruction {
+  const data = Buffer.from([14, 0]);
+  return new web3.TransactionInstruction({
+    programId: MPL_CORE_PROGRAM_ID,
+    keys: [
+      { pubkey: params.asset, isSigner: false, isWritable: true },
+      { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false }, // collection: None
+      { pubkey: params.payer, isSigner: true, isWritable: true },
+      { pubkey: params.authority, isSigner: true, isWritable: false },
+      { pubkey: params.newOwner, isSigner: false, isWritable: false },
+      { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false }, // log_wrapper: None
+    ],
+    data,
+  });
+}
+
+// Direct (non-Rodeo) BurnV1: discriminator 12, args `{ compression_proof:
+// Option<CompressionProof> }` (None -> single 0x00 byte).
+function mplCoreBurnV1Instruction(params: {
+  asset: web3.PublicKey;
+  payer: web3.PublicKey;
+  authority: web3.PublicKey;
+}): web3.TransactionInstruction {
+  const data = Buffer.from([12, 0]);
+  return new web3.TransactionInstruction({
+    programId: MPL_CORE_PROGRAM_ID,
+    keys: [
+      { pubkey: params.asset, isSigner: false, isWritable: true },
+      { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false }, // collection: None
+      { pubkey: params.payer, isSigner: true, isWritable: true },
+      { pubkey: params.authority, isSigner: true, isWritable: false },
+      { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false }, // log_wrapper: None
+    ],
+    data,
+  });
+}
+
+// Direct (non-Rodeo) UpdatePluginV1 targeting `PermanentFreezeDelegate`:
+// discriminator 6, args `{ plugin: Plugin }`. `Plugin::PermanentFreezeDelegate`
+// is enum variant index 5 (Royalties=0, FreezeDelegate=1, BurnDelegate=2,
+// TransferDelegate=3, UpdateDelegate=4, PermanentFreezeDelegate=5), followed
+// by its single `frozen: bool` field. Used to attempt an unauthorized thaw.
+function mplCoreUpdatePermanentFreezeDelegateInstruction(params: {
+  asset: web3.PublicKey;
+  payer: web3.PublicKey;
+  authority: web3.PublicKey;
+  frozen: boolean;
+}): web3.TransactionInstruction {
+  const data = Buffer.from([6, 5, params.frozen ? 1 : 0]);
+  return new web3.TransactionInstruction({
+    programId: MPL_CORE_PROGRAM_ID,
+    keys: [
+      { pubkey: params.asset, isSigner: false, isWritable: true },
+      { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false }, // collection: None
+      { pubkey: params.payer, isSigner: true, isWritable: true },
+      { pubkey: params.authority, isSigner: true, isWritable: false },
+      { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false }, // log_wrapper: None
+    ],
+    data,
+  });
+}
+
 describe.skipIf(skipReceiptProofSuite)(
   "PositionReceipt PDA / stateless ReceiptAuthority runtime proof (Phase 2D3A2)",
   () => {
@@ -162,15 +238,21 @@ describe.skipIf(skipReceiptProofSuite)(
     const emergencyGuardians = web3.Keypair.generate();
 
     // Wallet A: the owner of the test Position and, per the proof design,
-    // the embedded MPL Core asset owner. Reusing the funded payer keeps
-    // this smoke test's setup minimal; force-transfer to a distinct
-    // Wallet B is exercised in the follow-up pass.
+    // the initial embedded MPL Core asset owner. Reusing the funded payer
+    // keeps setup minimal.
     let walletA: web3.Keypair;
+    // Wallet B: a distinct, freshly funded keypair used as the force-transfer
+    // destination and to prove the *new* owner also cannot bypass Rodeo.
+    const walletB = web3.Keypair.generate();
 
     // `stake_and_commit` requires `position_id` to equal the current
     // `next_position_id`, which starts at 0 on a freshly initialized
     // protocol (this suite initializes its own isolated GlobalConfig).
     const positionId = new BN(0);
+
+    let position: web3.PublicKey;
+    let receiptAuthority: web3.PublicKey;
+    let receiptAsset: web3.PublicKey;
 
     beforeAll(async () => {
       provider = AnchorProvider.env();
@@ -181,6 +263,11 @@ describe.skipIf(skipReceiptProofSuite)(
       rodeoCoreProgram = new Program<Idl>(loadIdl("rodeo_core"), provider);
 
       if (!localnetAvailable) return;
+
+      await provider.connection.confirmTransaction(
+        await provider.connection.requestAirdrop(walletB.publicKey, 2_000_000_000),
+        "confirmed",
+      );
 
       const rodeoMint = await createMint(provider.connection, payer, payer.publicKey, null, 6);
       const ansemMint = await createMint(provider.connection, payer, payer.publicKey, null, 6);
@@ -251,7 +338,7 @@ describe.skipIf(skipReceiptProofSuite)(
         })
         .rpc();
 
-      const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
+      [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
       const [pendingRandomness] = deriveRandomness(
         rodeoCoreProgram.programId,
         position,
@@ -279,6 +366,9 @@ describe.skipIf(skipReceiptProofSuite)(
         })
         .signers([walletA])
         .rpc();
+
+      [receiptAuthority] = deriveReceiptAuthority(rodeoCoreProgram.programId, globalConfig);
+      [receiptAsset] = derivePositionReceipt(rodeoCoreProgram.programId, position);
     }, 60_000);
 
     // The `test_fixture_*` receipt instructions are compiled only for the
@@ -287,14 +377,7 @@ describe.skipIf(skipReceiptProofSuite)(
     // exported in the production IDL loaded above. They are invoked here
     // as raw instructions using their Anchor discriminators
     // (sha256("global:<name>")[0..8]).
-    async function fixtureCreatePositionReceipt(
-      position: web3.PublicKey,
-      receiptAsset: web3.PublicKey,
-      receiptAuthority: web3.PublicKey,
-      assetOwner: web3.PublicKey,
-      name: string,
-      uri: string,
-    ) {
+    async function fixtureCreatePositionReceipt(assetOwner: web3.PublicKey, name: string, uri: string) {
       const data = Buffer.concat([
         anchorDiscriminator("test_fixture_create_position_receipt"),
         borshString(name),
@@ -318,10 +401,61 @@ describe.skipIf(skipReceiptProofSuite)(
       return provider.sendAndConfirm(tx, [payer]);
     }
 
-    async function fixtureParsePositionReceipt(
-      position: web3.PublicKey,
-      receiptAsset: web3.PublicKey,
-    ) {
+    async function fixtureForceTransferPositionReceipt(newOwner: web3.PublicKey) {
+      const data = Buffer.concat([
+        anchorDiscriminator("test_fixture_force_transfer_position_receipt"),
+        newOwner.toBuffer(),
+      ]);
+      const ix = new web3.TransactionInstruction({
+        keys: [
+          { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+          { pubkey: globalConfig, isSigner: false, isWritable: false },
+          { pubkey: position, isSigner: false, isWritable: false },
+          { pubkey: receiptAsset, isSigner: false, isWritable: true },
+          { pubkey: receiptAuthority, isSigner: false, isWritable: false },
+          { pubkey: newOwner, isSigner: false, isWritable: false },
+          { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false },
+          { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        programId: rodeoCoreProgram.programId,
+        data,
+      });
+      const tx = new web3.Transaction().add(ix);
+      return provider.sendAndConfirm(tx, [payer]);
+    }
+
+    async function fixtureForceBurnPositionReceipt() {
+      const data = anchorDiscriminator("test_fixture_force_burn_position_receipt");
+      const ix = new web3.TransactionInstruction({
+        keys: [
+          { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+          { pubkey: globalConfig, isSigner: false, isWritable: false },
+          { pubkey: position, isSigner: false, isWritable: false },
+          { pubkey: receiptAsset, isSigner: false, isWritable: true },
+          { pubkey: receiptAuthority, isSigner: false, isWritable: false },
+          { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false },
+          { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        programId: rodeoCoreProgram.programId,
+        data,
+      });
+      const tx = new web3.Transaction().add(ix);
+      return provider.sendAndConfirm(tx, [payer]);
+    }
+
+    async function getConfirmedLogs(signature: string): Promise<string[]> {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const parsed = await provider.connection.getTransaction(signature, {
+          commitment: "confirmed",
+          maxSupportedTransactionVersion: 0,
+        });
+        if (parsed?.meta?.logMessages) return parsed.meta.logMessages;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      return [];
+    }
+
+    async function fixtureParsePositionReceipt() {
       const data = anchorDiscriminator("test_fixture_parse_position_receipt");
       const ix = new web3.TransactionInstruction({
         keys: [
@@ -338,18 +472,7 @@ describe.skipIf(skipReceiptProofSuite)(
       // `getTransaction` can briefly lag behind `sendAndConfirm` even at
       // "confirmed" commitment on a fresh local validator; retry rather
       // than risk a flaky false negative on log retrieval.
-      let logs: string[] = [];
-      for (let attempt = 0; attempt < 10; attempt += 1) {
-        const parsed = await provider.connection.getTransaction(signature, {
-          commitment: "confirmed",
-          maxSupportedTransactionVersion: 0,
-        });
-        if (parsed?.meta?.logMessages) {
-          logs = parsed.meta.logMessages;
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 250));
-      }
+      const logs = await getConfirmedLogs(signature);
 
       const extract = (key: string): string | undefined => {
         const prefix = `Program log: ${key}:`;
@@ -361,7 +484,7 @@ describe.skipIf(skipReceiptProofSuite)(
           `test_fixture_parse_position_receipt (${signature}) returned no retrievable logs after retries`,
         );
       }
-      return {
+      const result = {
         signature,
         logs,
         owner: extract("receipt_owner"),
@@ -373,6 +496,22 @@ describe.skipIf(skipReceiptProofSuite)(
         permanentBurnAuthority: extract("receipt_permanent_burn_authority"),
         permanentFreezeAuthority: extract("receipt_permanent_freeze_authority"),
       };
+      if (result.owner === undefined) {
+        throw new Error(`could not find receipt_owner log line; full logs:\n${logs.join("\n")}`);
+      }
+      return result;
+    }
+
+    // Attempts `fn` and asserts it fails (either by throwing or by the
+    // resulting transaction simulation/confirmation rejecting). Returns the
+    // stringified error for the caller to record/inspect.
+    async function expectMplCoreRejection(fn: () => Promise<string>): Promise<string> {
+      try {
+        await fn();
+      } catch (err) {
+        return String(err);
+      }
+      throw new Error("expected MPL Core to reject the transaction, but it succeeded");
     }
 
     it("MPL Core program is present at its canonical mainnet program ID", async () => {
@@ -386,10 +525,6 @@ describe.skipIf(skipReceiptProofSuite)(
         "ReceiptAuthority PDA as the sole MPL Core authority, then parses the " +
         "actual on-chain account data",
       async () => {
-        const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
-        const [receiptAuthority] = deriveReceiptAuthority(rodeoCoreProgram.programId, globalConfig);
-        const [receiptAsset] = derivePositionReceipt(rodeoCoreProgram.programId, position);
-
         // Before create: the receipt PDA must not yet hold a live account.
         const beforeCreate = await provider.connection.getAccountInfo(receiptAsset);
         expect(beforeCreate).toBeNull();
@@ -397,9 +532,6 @@ describe.skipIf(skipReceiptProofSuite)(
         const payerLamportsBefore = await provider.connection.getBalance(payer.publicKey);
 
         await fixtureCreatePositionReceipt(
-          position,
-          receiptAsset,
-          receiptAuthority,
           walletA.publicKey,
           "Rodeo Position Receipt (proof)",
           "https://example.invalid/receipt.json",
@@ -420,15 +552,11 @@ describe.skipIf(skipReceiptProofSuite)(
         // decided yet.
         expect(payerLamportsAfterCreate).toBeLessThan(payerLamportsBefore);
         expect(receiptLamportsAfterCreate).toBeGreaterThan(0);
+        console.log("[2D3A2 create] payer lamports before:", payerLamportsBefore);
+        console.log("[2D3A2 create] payer lamports after:", payerLamportsAfterCreate);
+        console.log("[2D3A2 create] receipt lamports after:", receiptLamportsAfterCreate);
 
-        const parsed = await fixtureParsePositionReceipt(position, receiptAsset);
-        if (parsed.owner === undefined) {
-          // Surface the raw transaction logs to make any future log-format
-          // drift immediately diagnosable instead of just "undefined".
-          throw new Error(
-            `could not find receipt_owner log line; full logs:\n${parsed.logs.join("\n")}`,
-          );
-        }
+        const parsed = await fixtureParsePositionReceipt();
 
         // Embedded Core asset owner must be Wallet A (the Position owner),
         // and must be conceptually distinct from the Solana program owner
@@ -452,6 +580,279 @@ describe.skipIf(skipReceiptProofSuite)(
         expect(parsed.permanentTransferAuthority).toBe(expectedAuthority);
         expect(parsed.permanentBurnAuthority).toBe(expectedAuthority);
         expect(parsed.permanentFreezeAuthority).toBe(expectedAuthority);
+      },
+      30_000,
+    );
+
+    it(
+      "rejects a direct MPL Core transfer authorized only by Wallet A (no Rodeo ReceiptAuthority signature)",
+      async () => {
+        const errorText = await expectMplCoreRejection(async () => {
+          const ix = mplCoreTransferV1Instruction({
+            asset: receiptAsset,
+            payer: walletA.publicKey,
+            authority: walletA.publicKey,
+            newOwner: walletB.publicKey,
+          });
+          const tx = new web3.Transaction().add(ix);
+          return provider.sendAndConfirm(tx, [walletA]);
+        });
+        console.log("[2D3A2 negative] Wallet A direct transfer error:", errorText);
+        expect(errorText.length).toBeGreaterThan(0);
+
+        // State must be completely unchanged after the rejected attempt.
+        const parsed = await fixtureParsePositionReceipt();
+        expect(parsed.owner).toBe(walletA.publicKey.toBase58());
+        expect(parsed.frozen).toBe("true");
+        expect(parsed.hasPermanentTransferDelegate).toBe("true");
+        expect(parsed.hasPermanentBurnDelegate).toBe("true");
+        expect(parsed.hasPermanentFreezeDelegate).toBe("true");
+      },
+      30_000,
+    );
+
+    it(
+      "rejects a direct MPL Core burn authorized only by Wallet A (no Rodeo ReceiptAuthority signature)",
+      async () => {
+        const accountBefore = await provider.connection.getAccountInfo(receiptAsset);
+        expect(accountBefore).not.toBeNull();
+
+        const errorText = await expectMplCoreRejection(async () => {
+          const ix = mplCoreBurnV1Instruction({
+            asset: receiptAsset,
+            payer: walletA.publicKey,
+            authority: walletA.publicKey,
+          });
+          const tx = new web3.Transaction().add(ix);
+          return provider.sendAndConfirm(tx, [walletA]);
+        });
+        console.log("[2D3A2 negative] Wallet A direct burn error:", errorText);
+        expect(errorText.length).toBeGreaterThan(0);
+
+        // The receipt must still exist, untouched.
+        const accountAfter = await provider.connection.getAccountInfo(receiptAsset);
+        expect(accountAfter).not.toBeNull();
+        expect(accountAfter!.owner.equals(MPL_CORE_PROGRAM_ID)).toBe(true);
+
+        const parsed = await fixtureParsePositionReceipt();
+        expect(parsed.owner).toBe(walletA.publicKey.toBase58());
+        expect(parsed.frozen).toBe("true");
+        expect(parsed.hasPermanentTransferDelegate).toBe("true");
+        expect(parsed.hasPermanentBurnDelegate).toBe("true");
+        expect(parsed.hasPermanentFreezeDelegate).toBe("true");
+      },
+      30_000,
+    );
+
+    it(
+      "Rodeo force-transfers the still-frozen receipt from Wallet A to Wallet B via the stateless ReceiptAuthority",
+      async () => {
+        await fixtureForceTransferPositionReceipt(walletB.publicKey);
+
+        // Receipt PDA address is unchanged; Solana account owner is still
+        // MPL Core.
+        const accountAfter = await provider.connection.getAccountInfo(receiptAsset);
+        expect(accountAfter).not.toBeNull();
+        expect(accountAfter!.owner.equals(MPL_CORE_PROGRAM_ID)).toBe(true);
+
+        const parsed = await fixtureParsePositionReceipt();
+        expect(parsed.owner).toBe(walletB.publicKey.toBase58());
+        expect(parsed.owner).not.toBe(walletA.publicKey.toBase58());
+
+        // Frozen state persists across a Rodeo-authorized transfer, and all
+        // three permanent plugins with their ReceiptAuthority authority
+        // remain intact.
+        expect(parsed.frozen).toBe("true");
+        expect(parsed.hasPermanentTransferDelegate).toBe("true");
+        expect(parsed.hasPermanentBurnDelegate).toBe("true");
+        expect(parsed.hasPermanentFreezeDelegate).toBe("true");
+        const expectedAuthority = `address:${receiptAuthority.toBase58()}`;
+        expect(parsed.permanentTransferAuthority).toBe(expectedAuthority);
+        expect(parsed.permanentBurnAuthority).toBe(expectedAuthority);
+        expect(parsed.permanentFreezeAuthority).toBe(expectedAuthority);
+      },
+      30_000,
+    );
+
+    it(
+      "rejects Wallet A (old owner) attempting a direct transfer/burn after losing control to Wallet B",
+      async () => {
+        const transferErr = await expectMplCoreRejection(async () => {
+          const ix = mplCoreTransferV1Instruction({
+            asset: receiptAsset,
+            payer: walletA.publicKey,
+            authority: walletA.publicKey,
+            newOwner: walletA.publicKey,
+          });
+          const tx = new web3.Transaction().add(ix);
+          return provider.sendAndConfirm(tx, [walletA]);
+        });
+        console.log("[2D3A2 negative] old owner (A) transfer-after-loss error:", transferErr);
+        expect(transferErr.length).toBeGreaterThan(0);
+
+        const burnErr = await expectMplCoreRejection(async () => {
+          const ix = mplCoreBurnV1Instruction({
+            asset: receiptAsset,
+            payer: walletA.publicKey,
+            authority: walletA.publicKey,
+          });
+          const tx = new web3.Transaction().add(ix);
+          return provider.sendAndConfirm(tx, [walletA]);
+        });
+        console.log("[2D3A2 negative] old owner (A) burn-after-loss error:", burnErr);
+        expect(burnErr.length).toBeGreaterThan(0);
+
+        // Wallet B must still be the embedded owner; nothing changed.
+        const parsed = await fixtureParsePositionReceipt();
+        expect(parsed.owner).toBe(walletB.publicKey.toBase58());
+        expect(parsed.frozen).toBe("true");
+      },
+      30_000,
+    );
+
+    it(
+      "rejects Wallet B (new owner) attempting a direct transfer/burn while the receipt remains frozen and Rodeo-controlled",
+      async () => {
+        const transferErr = await expectMplCoreRejection(async () => {
+          const ix = mplCoreTransferV1Instruction({
+            asset: receiptAsset,
+            payer: walletB.publicKey,
+            authority: walletB.publicKey,
+            newOwner: walletA.publicKey,
+          });
+          const tx = new web3.Transaction().add(ix);
+          return provider.sendAndConfirm(tx, [walletB]);
+        });
+        console.log("[2D3A2 negative] new owner (B) direct transfer error:", transferErr);
+        expect(transferErr.length).toBeGreaterThan(0);
+
+        const burnErr = await expectMplCoreRejection(async () => {
+          const ix = mplCoreBurnV1Instruction({
+            asset: receiptAsset,
+            payer: walletB.publicKey,
+            authority: walletB.publicKey,
+          });
+          const tx = new web3.Transaction().add(ix);
+          return provider.sendAndConfirm(tx, [walletB]);
+        });
+        console.log("[2D3A2 negative] new owner (B) direct burn error:", burnErr);
+        expect(burnErr.length).toBeGreaterThan(0);
+
+        const parsed = await fixtureParsePositionReceipt();
+        expect(parsed.owner).toBe(walletB.publicKey.toBase58());
+        expect(parsed.frozen).toBe("true");
+        expect(parsed.hasPermanentTransferDelegate).toBe("true");
+        expect(parsed.hasPermanentBurnDelegate).toBe("true");
+        expect(parsed.hasPermanentFreezeDelegate).toBe("true");
+      },
+      30_000,
+    );
+
+    it(
+      "rejects Wallet B (owner) attempting to thaw PermanentFreezeDelegate directly, since its authority is the ReceiptAuthority PDA, not the owner",
+      async () => {
+        const errorText = await expectMplCoreRejection(async () => {
+          const ix = mplCoreUpdatePermanentFreezeDelegateInstruction({
+            asset: receiptAsset,
+            payer: walletB.publicKey,
+            authority: walletB.publicKey,
+            frozen: false,
+          });
+          const tx = new web3.Transaction().add(ix);
+          return provider.sendAndConfirm(tx, [walletB]);
+        });
+        console.log("[2D3A2 negative] owner (B) unauthorized thaw attempt error:", errorText);
+        expect(errorText.length).toBeGreaterThan(0);
+
+        const parsed = await fixtureParsePositionReceipt();
+        expect(parsed.frozen).toBe("true");
+        expect(parsed.hasPermanentFreezeDelegate).toBe("true");
+        expect(parsed.permanentFreezeAuthority).toBe(`address:${receiptAuthority.toBase58()}`);
+      },
+      30_000,
+    );
+
+    it(
+      "Rodeo force-burns the receipt via the stateless ReceiptAuthority and records exact lamport/state deltas",
+      async () => {
+        const receiptBefore = await provider.connection.getAccountInfo(receiptAsset);
+        expect(receiptBefore).not.toBeNull();
+        const receiptLamportsBefore = receiptBefore!.lamports;
+        const receiptDataLenBefore = receiptBefore!.data.length;
+        const burnCallerLamportsBefore = await provider.connection.getBalance(payer.publicKey);
+
+        const parsedBefore = await fixtureParsePositionReceipt();
+        expect(parsedBefore.hasPermanentTransferDelegate).toBe("true");
+        expect(parsedBefore.hasPermanentBurnDelegate).toBe("true");
+        expect(parsedBefore.hasPermanentFreezeDelegate).toBe("true");
+        expect(parsedBefore.frozen).toBe("true");
+
+        await fixtureForceBurnPositionReceipt();
+
+        const receiptAfter = await provider.connection.getAccountInfo(receiptAsset);
+        const burnCallerLamportsAfter = await provider.connection.getBalance(payer.publicKey);
+
+        console.log("[2D3A2 burn] receipt lamports before:", receiptLamportsBefore);
+        console.log("[2D3A2 burn] receipt data length before:", receiptDataLenBefore);
+        console.log("[2D3A2 burn] burn caller (payer) lamports before:", burnCallerLamportsBefore);
+        console.log(
+          "[2D3A2 burn] receipt account after burn:",
+          receiptAfter === null
+            ? "null (account closed)"
+            : { lamports: receiptAfter.lamports, dataLength: receiptAfter.data.length, owner: receiptAfter.owner.toBase58() },
+        );
+        console.log("[2D3A2 burn] burn caller (payer) lamports after:", burnCallerLamportsAfter);
+
+        // Record (do not assume) whether the account was fully closed or
+        // merely zeroed/resized by MPL Core's burn instruction.
+        if (receiptAfter === null) {
+          // Fully closed: the payer/burn-caller (the only other lamport
+          // participant in this ix) must have received the freed rent.
+          expect(burnCallerLamportsAfter).toBeGreaterThan(burnCallerLamportsBefore - 5000);
+        } else {
+          expect(receiptAfter.lamports).toBeLessThanOrEqual(receiptLamportsBefore);
+        }
+      },
+      30_000,
+    );
+
+    it(
+      "records same-PDA recreation behavior after burn (diagnostic only, no production reroll implied)",
+      async () => {
+        let recreateSucceeded = false;
+        let recreateError: string | undefined;
+        try {
+          await fixtureCreatePositionReceipt(
+            walletA.publicKey,
+            "Rodeo Position Receipt (recreation probe)",
+            "https://example.invalid/receipt-recreated.json",
+          );
+          recreateSucceeded = true;
+        } catch (err) {
+          recreateError = String(err);
+        }
+
+        console.log("[2D3A2 recreation] succeeded:", recreateSucceeded);
+        if (recreateError) {
+          console.log("[2D3A2 recreation] error:", recreateError);
+        }
+
+        if (recreateSucceeded) {
+          const parsed = await fixtureParsePositionReceipt();
+          console.log("[2D3A2 recreation] new embedded owner:", parsed.owner);
+          console.log("[2D3A2 recreation] frozen:", parsed.frozen);
+        } else {
+          const accountInfo = await provider.connection.getAccountInfo(receiptAsset);
+          console.log(
+            "[2D3A2 recreation] account state after failed recreation:",
+            accountInfo === null ? "null" : { lamports: accountInfo.lamports, dataLength: accountInfo.data.length },
+          );
+        }
+
+        // This test is diagnostic-only: either outcome is recorded above for
+        // 2D3A4 evidence, so there is no pass/fail assertion on the
+        // recreation outcome itself.
+        expect(typeof recreateSucceeded).toBe("boolean");
       },
       30_000,
     );
