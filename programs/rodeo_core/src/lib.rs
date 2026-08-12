@@ -1115,12 +1115,38 @@ pub mod rodeo_core {
         let clock = Clock::get()?;
         let protocol_epoch = ctx.accounts.reward_state.current_epoch;
 
-        let commitment = derive_commitment(
-            position.key(),
-            ActionType::Unstake,
-            action_nonce,
-            protocol_epoch,
-        );
+        #[cfg(feature = "mock-randomness")]
+        let (provider_program, provider_randomness_account, commitment, committed_slot) = {
+            let commitment = derive_commitment(
+                position.key(),
+                ActionType::Unstake,
+                action_nonce,
+                protocol_epoch,
+            );
+            (Pubkey::default(), Pubkey::default(), commitment, clock.slot)
+        };
+
+        #[cfg(not(feature = "mock-randomness"))]
+        let (provider_program, provider_randomness_account, commitment, committed_slot) = {
+            let randomness_account = &ctx.accounts.provider_randomness_account;
+            require!(
+                randomness_account.owner == &switchboard_on_demand::ON_DEMAND_MAINNET_PID
+                    || randomness_account.owner == &switchboard_on_demand::ON_DEMAND_DEVNET_PID,
+                RodeoError::InvalidProviderAccount
+            );
+            let randomness_data = RandomnessAccountData::parse(randomness_account.data.borrow())
+                .map_err(|_| RodeoError::InvalidProviderAccount)?;
+            require!(
+                randomness_data.get_value(clock.slot).is_err(),
+                RodeoError::RandomnessNotResolved
+            );
+            (
+                *randomness_account.owner,
+                randomness_account.key(),
+                randomness_data.seed_slothash,
+                randomness_data.seed_slot,
+            )
+        };
 
         position.pending_action_active = true;
         position.pending_action_type = ActionType::Unstake;
@@ -1132,10 +1158,10 @@ pub mod rodeo_core {
         pending_randomness.position = position.key();
         pending_randomness.action_type = ActionType::Unstake;
         pending_randomness.action_nonce = action_nonce;
-        pending_randomness.provider_program = Pubkey::default();
-        pending_randomness.provider_randomness_account = Pubkey::default();
+        pending_randomness.provider_program = provider_program;
+        pending_randomness.provider_randomness_account = provider_randomness_account;
         pending_randomness.commitment = commitment;
-        pending_randomness.committed_slot = clock.slot;
+        pending_randomness.committed_slot = committed_slot;
         pending_randomness.committed_protocol_epoch = protocol_epoch;
         pending_randomness.timeout_timestamp = now
             .checked_add(RANDOMNESS_TIMEOUT_SECONDS)
@@ -1214,15 +1240,43 @@ pub mod rodeo_core {
             RodeoError::RandomnessAlreadyAvailable
         );
 
+        let position_key = ctx.accounts.position.key();
+        let action_nonce = ctx.accounts.pending_randomness.action_nonce;
+        let protocol_epoch = ctx.accounts.pending_randomness.committed_protocol_epoch;
+
         #[cfg(feature = "mock-randomness")]
-        return settle_unstake_mock(&mut ctx);
+        let random_output = derive_commitment(
+            position_key,
+            ActionType::Unstake,
+            action_nonce,
+            protocol_epoch,
+        );
 
         #[cfg(not(feature = "mock-randomness"))]
-        {
-            // Production builds require a verified randomness proof. The Switchboard
-            // adapter is intentionally not implemented in Phase 2C2B.
-            err!(RodeoError::RandomnessNotReady)
-        }
+        let random_output = {
+            let clock = &ctx.accounts.clock;
+            let randomness_account = &ctx.accounts.provider_randomness_account;
+            require_keys_eq!(
+                randomness_account.key(),
+                ctx.accounts.pending_randomness.provider_randomness_account,
+                RodeoError::InvalidProviderAccount
+            );
+            require!(
+                randomness_account.owner == &ctx.accounts.pending_randomness.provider_program,
+                RodeoError::InvalidProviderAccount
+            );
+            let randomness_data = RandomnessAccountData::parse(randomness_account.data.borrow())
+                .map_err(|_| RodeoError::InvalidProviderAccount)?;
+            require!(
+                randomness_data.seed_slot == ctx.accounts.pending_randomness.committed_slot,
+                RodeoError::InvalidProviderAccount
+            );
+            randomness_data
+                .get_value(clock.slot)
+                .map_err(|_| RodeoError::RandomnessNotReady)?
+        };
+
+        settle_unstake_common(&mut ctx, random_output)
     }
 
     pub fn recover_unstake_timeout(ctx: Context<RecoverUnstakeTimeout>) -> Result<()> {
@@ -3355,6 +3409,12 @@ pub struct RequestUnstake<'info> {
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
     pub clock: Sysvar<'info, Clock>,
+
+    /// CHECK: Switchboard On-Demand randomness account that will later be
+    /// fulfilled and used as the entropy source for unstake settlement.
+    /// Must be owned by the Switchboard On-Demand program and unresolved.
+    #[account(mut)]
+    pub provider_randomness_account: AccountInfo<'info>,
 }
 
 #[derive(Accounts)]
@@ -3522,6 +3582,11 @@ pub struct SettleUnstake<'info> {
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub clock: Sysvar<'info, Clock>,
+
+    /// CHECK: Switchboard On-Demand randomness account that was bound at
+    /// request time and must now be resolved to settle the unstake.
+    #[account(mut)]
+    pub provider_randomness_account: AccountInfo<'info>,
 }
 
 #[derive(Accounts)]
@@ -4989,8 +5054,7 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
     Ok(())
 }
 
-#[cfg(feature = "mock-randomness")]
-fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
+fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 32]) -> Result<()> {
     use crate::probability;
 
     let config: &ProtocolConfig = &**ctx.accounts.protocol_config;
@@ -4999,11 +5063,6 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
     let position_key = ctx.accounts.position.key();
     let action_type = ctx.accounts.pending_randomness.action_type;
     let action_nonce = ctx.accounts.pending_randomness.action_nonce;
-    let protocol_epoch = ctx.accounts.pending_randomness.committed_protocol_epoch;
-
-    // Deterministic random bytes that are domain-separated and bound to the
-    // position, action type, action nonce, and protocol epoch.
-    let random_output = derive_commitment(position_key, action_type, action_nonce, protocol_epoch);
 
     let position = &mut ctx.accounts.position;
     let pending_randomness = &mut ctx.accounts.pending_randomness;
