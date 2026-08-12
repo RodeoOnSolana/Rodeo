@@ -1153,6 +1153,8 @@ describe.skipIf(skipReceiptProofSuite)(
         const beforeCreate = await provider.connection.getAccountInfo(receiptAsset2);
         expect(beforeCreate).toBeNull();
 
+        const payerLamportsBefore = await provider.connection.getBalance(payer.publicKey);
+
         await fixtureCreatePositionReceiptInCollection(
           walletA.publicKey,
           "Rodeo Position #1",
@@ -1162,6 +1164,16 @@ describe.skipIf(skipReceiptProofSuite)(
         const afterCreate = await provider.connection.getAccountInfo(receiptAsset2);
         expect(afterCreate).not.toBeNull();
         expect(afterCreate!.owner.equals(MPL_CORE_PROGRAM_ID)).toBe(true);
+
+        const payerLamportsAfter = await provider.connection.getBalance(payer.publicKey);
+        console.log(
+          "[2D3A3 create-in-collection] receipt data length:",
+          afterCreate!.data.length,
+          "receipt lamports:",
+          afterCreate!.lamports,
+          "payer delta:",
+          payerLamportsAfter - payerLamportsBefore,
+        );
 
         const parsed = await fixtureParsePositionReceipt2();
         expect(parsed.owner).toBe(walletA.publicKey.toBase58());
