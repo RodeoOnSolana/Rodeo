@@ -2926,35 +2926,15 @@ pub struct SettleReveal<'info> {
     )]
     pub pending_randomness: Box<Account<'info, PendingRandomness>>,
 
-    #[account(
-        mut,
-        close = refund_recipient,
-        seeds = [
-            SEED_BULL_PROOF_BUFFER,
-            pending_randomness.key().as_ref(),
-            bull_proof_buffer_prover.as_ref(),
-            &bull_proof_buffer.nonce.to_le_bytes(),
-        ],
-        bump = bull_proof_buffer.bump,
-        constraint = bull_proof_buffer.action_type == ActionType::Reveal @ RodeoError::BullProofBufferIncomplete,
-        constraint = bull_proof_buffer.pending_randomness == pending_randomness.key() @ RodeoError::BullProofBufferBindingMismatch,
-        constraint = bull_proof_buffer.position == position.key() @ RodeoError::BullProofBufferWrongPosition,
-        constraint = bull_proof_buffer.snapshot_root == pending_randomness.registry_root_snapshot @ RodeoError::BullProofBufferBindingMismatch,
-        constraint = bull_proof_buffer.snapshot_version == pending_randomness.registry_version_snapshot @ RodeoError::BullProofBufferBindingMismatch,
-        constraint = bull_proof_buffer.snapshot_total_count == pending_randomness.registry_total_count_snapshot @ RodeoError::BullProofBufferBindingMismatch,
-        constraint = bull_proof_buffer.snapshot_total_power == pending_randomness.registry_total_power_snapshot @ RodeoError::BullProofBufferBindingMismatch,
-        constraint = bull_proof_buffer.finalized @ RodeoError::BullProofBufferNotFinalized,
-        constraint = !bull_proof_buffer.consumed @ RodeoError::BullProofBufferAlreadyConsumed,
-    )]
-    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+    /// Proof buffer is optional.  It is required when mint theft or new-Bull
+    /// current-mutation proof data is needed, and must be omitted when no
+    /// proof is required.
+    #[account(mut)]
+    pub bull_proof_buffer: Option<Box<Account<'info, BullProofBuffer>>>,
 
-    /// CHECK: The original prover that created the proof buffer; used only to
-    /// re-derive the PDA.  The actual refund destination is stored in the buffer.
-    pub bull_proof_buffer_prover: AccountInfo<'info>,
-
-    /// CHECK: Receives the proof-buffer rent refund when the buffer is consumed.
-    #[account(mut, address = bull_proof_buffer.refund_recipient)]
-    pub refund_recipient: AccountInfo<'info>,
+    /// CHECK: Receives the proof-buffer rent refund when a buffer is consumed.
+    #[account(mut)]
+    pub refund_recipient: Option<AccountInfo<'info>>,
 
     #[account(
         seeds = [
