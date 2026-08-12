@@ -33,6 +33,15 @@ pub fn receipt_collection_pda(global_config: &Pubkey) -> (Pubkey, u8) {
     )
 }
 
+/// Derive the ReceiptFunder PDA for a given Position. In the practical v1
+/// funding architecture this PDA is owned by Rodeo and prefunded by the
+/// Position owner; Rodeo signs for it to pay MPL Core `CreateV2`/`BurnV1`
+/// and to refund/close it on reveal timeout or unstake. The seed is
+/// `[b"receipt-funder", position]`.
+pub fn receipt_funder_pda(position: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[SEED_RECEIPT_FUNDER, position.as_ref()], &crate::ID)
+}
+
 /// Manual, non-Anchor parse of the Core asset embedded owner from a Solana
 /// account owned by the MPL Core program. Uses `BaseAssetV1::load` / the
 /// `SolanaAccount` trait so it works without the `mpl-core` `anchor` feature.
@@ -460,6 +469,207 @@ pub struct TestFixtureUpdatePositionReceiptMetadata<'info> {
 
 #[cfg(feature = "test-fixtures")]
 #[derive(Accounts)]
+#[instruction(funding_lamports: u64)]
+pub struct TestFixtureCreateReceiptFunder<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    pub position: Box<Account<'info, Position>>,
+
+    /// CHECK: The new ReceiptFunder PDA owned by the System Program and
+    /// derived by Rodeo. It is prefunded by the Position owner and Rodeo
+    /// signs for it via `invoke_signed`.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
+        bump,
+    )]
+    pub funder: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(name: String, uri: String)]
+pub struct TestFixtureCreatePositionReceiptInCollectionViaFunder<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    pub position: Box<Account<'info, Position>>,
+
+    /// CHECK: This is the new Core Asset account at the PositionReceipt PDA.
+    #[account(
+        mut,
+        seeds = [SEED_POSITION_RECEIPT, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_asset: UncheckedAccount<'info>,
+
+    /// CHECK: The official Rodeo receipt Collection this asset is created into.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
+        bump,
+    )]
+    pub collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA used as the Core plugin
+    /// authority and asset-creation authority.
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    /// CHECK: The wallet that will own the Core asset (embedded owner).
+    pub asset_owner: UncheckedAccount<'info>,
+
+    /// CHECK: The ReceiptFunder PDA paying MPL Core `CreateV2` rent.
+    /// It is owned by the System Program (but derived by Rodeo) and
+    /// prefunded by the asset owner.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
+        bump,
+    )]
+    pub funder: UncheckedAccount<'info>,
+
+    /// CHECK: MPL Core program.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct TestFixtureForceBurnPositionReceiptInCollection<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    pub position: Box<Account<'info, Position>>,
+
+    /// CHECK: The existing Core Asset account at the PositionReceipt PDA.
+    #[account(
+        mut,
+        seeds = [SEED_POSITION_RECEIPT, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_asset: UncheckedAccount<'info>,
+
+    /// CHECK: The official Rodeo receipt Collection this asset belongs to.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
+        bump,
+    )]
+    pub collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA signing the burn.
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    /// CHECK: The System-Program-owned ReceiptFunder PDA paying MPL Core
+    /// `BurnV1` and receiving the refund.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
+        bump,
+    )]
+    pub funder: UncheckedAccount<'info>,
+
+    /// CHECK: MPL Core program.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct TestFixtureCloseReceiptFunder<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    pub position: Box<Account<'info, Position>>,
+
+    /// CHECK: The existing System-Program-owned ReceiptFunder PDA. Its
+    /// remaining lamports are transferred to the `beneficiary`.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
+        bump,
+    )]
+    pub funder: UncheckedAccount<'info>,
+
+    /// CHECK: The wallet that receives the funder's remaining lamports
+    /// (typically the original Position owner).
+    pub beneficiary: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct TestFixtureRelinquishUpdateAuthority<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    pub position: Box<Account<'info, Position>>,
+
+    /// CHECK: The existing Core Asset account at the PositionReceipt PDA.
+    #[account(
+        mut,
+        seeds = [SEED_POSITION_RECEIPT, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_asset: UncheckedAccount<'info>,
+
+    /// CHECK: The official Rodeo receipt Collection this asset belongs to.
+    #[account(
+        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
+        bump,
+    )]
+    pub collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA signing the update to `None`.
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    /// CHECK: MPL Core program.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
 pub struct TestFixtureParsePositionReceipt<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
@@ -554,6 +764,27 @@ mod tests {
 
         let (receipt_authority, _) = receipt_authority_pda(&global_config);
         assert_ne!(collection, receipt_authority);
+    }
+
+    #[test]
+    fn receipt_funder_pda_matches_known_vector() {
+        let sample_position = Pubkey::from_str("11111111111111111111111111111112").unwrap();
+
+        let (funder, bump) = receipt_funder_pda(&sample_position);
+        assert_eq!(
+            funder,
+            Pubkey::from_str("27Vk1mVNSdSuu5C2HcEPizwhFMap2TjxyJBsdsYvibkH").unwrap()
+        );
+        assert_eq!(bump, 255);
+
+        // Re-derivation must be deterministic and distinct from the
+        // PositionReceipt PDA.
+        let (funder_again, bump_again) = receipt_funder_pda(&sample_position);
+        assert_eq!(funder, funder_again);
+        assert_eq!(bump, bump_again);
+
+        let (receipt, _) = position_receipt_pda(&sample_position);
+        assert_ne!(funder, receipt);
     }
 
     #[cfg(feature = "test-fixtures")]

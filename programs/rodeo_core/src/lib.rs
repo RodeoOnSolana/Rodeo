@@ -1685,6 +1685,295 @@ pub mod rodeo_core {
             .map_err(Into::into)
     }
 
+    /// Test-only fixture that creates and prefunds a SYSTEM-OWNED
+    /// ReceiptFunder PDA for a given Position. The PDA address is derived by
+    /// Rodeo, but it is owned by the System Program so that MPL Core can
+    /// debit it as the `payer` in `CreateV2`/`BurnV1` and Rodeo can still
+    /// sign for it via `invoke_signed`.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_create_receipt_funder(
+        ctx: Context<TestFixtureCreateReceiptFunder>,
+        funding_lamports: u64,
+    ) -> Result<()> {
+        let (funder, funder_bump) = receipt_funder_pda(&ctx.accounts.position.key());
+        require_keys_eq!(
+            ctx.accounts.funder.key(),
+            funder,
+            RodeoError::InvalidCoreAssetOwner
+        );
+
+        // Create a System-Program-owned PDA with zero data and the requested
+        // funding. The caller pays the `from` side; Rodeo signs for the `to`
+        // PDA. Ownership by the System Program is the key detail that lets
+        // MPL Core use the PDA as a `payer`.
+        let create_ix = solana_program::system_instruction::create_account(
+            ctx.accounts.authority.key,
+            &funder,
+            funding_lamports,
+            0,
+            &solana_program::system_program::ID,
+        );
+        let account_infos = [
+            ctx.accounts.authority.to_account_info(),
+            ctx.accounts.funder.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ];
+        let position_key = ctx.accounts.position.key();
+        let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
+
+        solana_program::program::invoke_signed(&create_ix, &account_infos, &[&funder_seeds])
+            .map_err(Into::into)
+    }
+
+    /// Test-only fixture that creates a PositionReceipt inside the official
+    /// Rodeo Collection using a prefunded Rodeo-owned ReceiptFunder PDA as
+    /// the MPL Core `CreateV2` payer. Proves that a user-prefunded PDA can
+    /// pay Core rent and that Rodeo can sign for it.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_create_position_receipt_in_collection_via_funder(
+        ctx: Context<TestFixtureCreatePositionReceiptInCollectionViaFunder>,
+        name: String,
+        uri: String,
+    ) -> Result<()> {
+        let (receipt_authority, receipt_authority_bump) =
+            receipt_authority_pda(&ctx.accounts.global_config.key());
+        let (receipt_asset, receipt_asset_bump) =
+            position_receipt_pda(&ctx.accounts.position.key());
+        let (collection, _collection_bump) =
+            receipt_collection_pda(&ctx.accounts.global_config.key());
+        let (funder, funder_bump) = receipt_funder_pda(&ctx.accounts.position.key());
+
+        require_keys_eq!(
+            ctx.accounts.receipt_authority.key(),
+            receipt_authority,
+            RodeoError::InvalidCoreAssetOwner
+        );
+        require_keys_eq!(
+            ctx.accounts.receipt_asset.key(),
+            receipt_asset,
+            RodeoError::InvalidCoreAssetOwner
+        );
+        require_keys_eq!(
+            ctx.accounts.collection.key(),
+            collection,
+            RodeoError::InvalidCoreAssetOwner
+        );
+        require_keys_eq!(
+            ctx.accounts.funder.key(),
+            funder,
+            RodeoError::InvalidCoreAssetOwner
+        );
+
+        let plugins = vec![
+            PluginAuthorityPair {
+                plugin: Plugin::PermanentTransferDelegate(
+                    mpl_core::types::PermanentTransferDelegate {},
+                ),
+                authority: Some(PluginAuthority::Address {
+                    address: receipt_authority,
+                }),
+            },
+            PluginAuthorityPair {
+                plugin: Plugin::PermanentBurnDelegate(mpl_core::types::PermanentBurnDelegate {}),
+                authority: Some(PluginAuthority::Address {
+                    address: receipt_authority,
+                }),
+            },
+            PluginAuthorityPair {
+                plugin: Plugin::PermanentFreezeDelegate(mpl_core::types::PermanentFreezeDelegate {
+                    frozen: true,
+                }),
+                authority: Some(PluginAuthority::Address {
+                    address: receipt_authority,
+                }),
+            },
+        ];
+
+        let instruction = CreateV2Builder::new()
+            .asset(receipt_asset)
+            .collection(Some(collection))
+            .authority(Some(receipt_authority))
+            .payer(funder)
+            .owner(Some(ctx.accounts.asset_owner.key()))
+            .system_program(solana_program::system_program::ID)
+            .data_state(DataState::AccountState)
+            .name(name)
+            .uri(uri)
+            .plugins(plugins)
+            .instruction();
+
+        let account_infos = [
+            ctx.accounts.receipt_asset.to_account_info(),
+            ctx.accounts.collection.to_account_info(),
+            ctx.accounts.receipt_authority.to_account_info(),
+            ctx.accounts.funder.to_account_info(),
+            ctx.accounts.asset_owner.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+        ];
+
+        let global_config_key = ctx.accounts.global_config.key();
+        let position_key = ctx.accounts.position.key();
+        let receipt_authority_seeds = [
+            SEED_RECEIPT_AUTHORITY,
+            global_config_key.as_ref(),
+            &[receipt_authority_bump],
+        ];
+        let receipt_asset_seeds = [
+            SEED_POSITION_RECEIPT,
+            position_key.as_ref(),
+            &[receipt_asset_bump],
+        ];
+        let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
+
+        solana_program::program::invoke_signed(
+            &instruction,
+            &account_infos,
+            &[
+                &receipt_authority_seeds,
+                &receipt_asset_seeds,
+                &funder_seeds,
+            ],
+        )
+        .map_err(Into::into)
+    }
+
+    /// Test-only fixture that force-burns a collection-member PositionReceipt,
+    /// using the System-Program-owned ReceiptFunder PDA as the MPL Core
+    /// `BurnV1` payer. Proves the burn refund lands in the funder PDA.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_force_burn_position_receipt_in_collection(
+        ctx: Context<TestFixtureForceBurnPositionReceiptInCollection>,
+    ) -> Result<()> {
+        let (receipt_authority, receipt_authority_bump) =
+            receipt_authority_pda(&ctx.accounts.global_config.key());
+        let (funder, funder_bump) = receipt_funder_pda(&ctx.accounts.position.key());
+
+        require_keys_eq!(
+            ctx.accounts.receipt_authority.key(),
+            receipt_authority,
+            RodeoError::InvalidCoreAssetOwner
+        );
+        require_keys_eq!(
+            ctx.accounts.funder.key(),
+            funder,
+            RodeoError::InvalidCoreAssetOwner
+        );
+
+        let instruction = BurnV1Builder::new()
+            .asset(*ctx.accounts.receipt_asset.key)
+            .collection(Some(*ctx.accounts.collection.key))
+            .authority(Some(receipt_authority))
+            .payer(funder)
+            .system_program(Some(solana_program::system_program::ID))
+            .instruction();
+
+        let account_infos = [
+            ctx.accounts.receipt_asset.to_account_info(),
+            ctx.accounts.collection.to_account_info(),
+            ctx.accounts.funder.to_account_info(),
+            ctx.accounts.receipt_authority.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+        ];
+
+        let global_config_key = ctx.accounts.global_config.key();
+        let position_key = ctx.accounts.position.key();
+        let receipt_authority_seeds = [
+            SEED_RECEIPT_AUTHORITY,
+            global_config_key.as_ref(),
+            &[receipt_authority_bump],
+        ];
+        let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
+
+        solana_program::program::invoke_signed(
+            &instruction,
+            &account_infos,
+            &[&receipt_authority_seeds, &funder_seeds],
+        )
+        .map_err(Into::into)
+    }
+
+    /// Test-only fixture that closes a Rodeo-owned ReceiptFunder PDA, sending
+    /// its remaining lamports to the `beneficiary` (usually the original
+    /// Position owner). Proves the timeout/no-reveal refund path is
+    /// recoverable.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_close_receipt_funder(
+        ctx: Context<TestFixtureCloseReceiptFunder>,
+    ) -> Result<()> {
+        let (funder, funder_bump) = receipt_funder_pda(&ctx.accounts.position.key());
+        require_keys_eq!(
+            ctx.accounts.funder.key(),
+            funder,
+            RodeoError::InvalidCoreAssetOwner
+        );
+
+        let funder_lamports = ctx.accounts.funder.to_account_info().lamports();
+
+        // Transfer all lamports to the beneficiary. The transaction fee is
+        // paid by `authority` (Rodeo caller), not the funder, so the funder
+        // balance is exhausted. The PDA is System-Program-owned, so a signed
+        // `transfer` CPI from the funder is valid.
+        if funder_lamports > 0 {
+            let transfer_ix = solana_program::system_instruction::transfer(
+                &funder,
+                ctx.accounts.beneficiary.key,
+                funder_lamports,
+            );
+            let account_infos = [
+                ctx.accounts.funder.to_account_info(),
+                ctx.accounts.beneficiary.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ];
+            let position_key = ctx.accounts.position.key();
+            let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
+            solana_program::program::invoke_signed(&transfer_ix, &account_infos, &[&funder_seeds])?;
+        }
+
+        Ok(())
+    }
+
+    /// Test-only fixture that transitions a collection-member PositionReceipt's
+    /// `UpdateAuthority` to `None` using the collection-level ReceiptAuthority
+    /// PDA, then proves the asset can no longer have its metadata updated.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_relinquish_update_authority(
+        ctx: Context<TestFixtureRelinquishUpdateAuthority>,
+    ) -> Result<()> {
+        let (receipt_authority, receipt_authority_bump) =
+            receipt_authority_pda(&ctx.accounts.global_config.key());
+
+        let instruction = UpdateV1Builder::new()
+            .asset(*ctx.accounts.receipt_asset.key)
+            .collection(Some(*ctx.accounts.collection.key))
+            .payer(ctx.accounts.authority.key())
+            .authority(Some(receipt_authority))
+            .system_program(solana_program::system_program::ID)
+            .new_update_authority(mpl_core::types::UpdateAuthority::None)
+            .instruction();
+
+        let account_infos = [
+            ctx.accounts.receipt_asset.to_account_info(),
+            ctx.accounts.collection.to_account_info(),
+            ctx.accounts.authority.to_account_info(),
+            ctx.accounts.receipt_authority.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+        ];
+
+        let global_config_key = ctx.accounts.global_config.key();
+        let seeds = [
+            SEED_RECEIPT_AUTHORITY,
+            global_config_key.as_ref(),
+            &[receipt_authority_bump],
+        ];
+
+        solana_program::program::invoke_signed(&instruction, &account_infos, &[&seeds])
+            .map_err(Into::into)
+    }
+
     /// Test-only fixture that parses a PositionReceipt Core asset and emits a
     /// `PositionReceiptParsed` event. Proves manual, non-Anchor Core parsing.
     #[cfg(feature = "test-fixtures")]
