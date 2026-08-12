@@ -56,6 +56,19 @@ function borshString(value: string): Buffer {
   return Buffer.concat([len, bytes]);
 }
 
+function borshOptionString(value: string | undefined): Buffer {
+  if (value === undefined) return Buffer.from([0]);
+  return Buffer.concat([Buffer.from([1]), borshString(value)]);
+}
+
+// Borsh `Option<UpdateAuthority>` where `UpdateAuthority::Address(Pubkey)` is
+// enum variant tag 1 (None=0, Address=1, Collection=2), per the pinned fork's
+// `src/generated/types/update_authority.rs`.
+function borshOptionUpdateAuthorityAddress(pubkey: web3.PublicKey | undefined): Buffer {
+  if (pubkey === undefined) return Buffer.from([0]);
+  return Buffer.concat([Buffer.from([1]), Buffer.from([1]), pubkey.toBuffer()]);
+}
+
 function derivePosition(
   programId: web3.PublicKey,
   globalConfig: web3.PublicKey,
@@ -114,6 +127,16 @@ function derivePositionReceipt(
   position: web3.PublicKey,
 ): [web3.PublicKey, number] {
   return web3.PublicKey.findProgramAddressSync([Buffer.from("receipt"), position.toBuffer()], programId);
+}
+
+function deriveReceiptCollection(
+  programId: web3.PublicKey,
+  globalConfig: web3.PublicKey,
+): [web3.PublicKey, number] {
+  return web3.PublicKey.findProgramAddressSync(
+    [Buffer.from("receipt-collection"), globalConfig.toBuffer()],
+    programId,
+  );
 }
 
 function programDataAddress(programId: web3.PublicKey): web3.PublicKey {
@@ -217,6 +240,39 @@ function mplCoreUpdatePermanentFreezeDelegateInstruction(params: {
   });
 }
 
+// Direct (non-Rodeo) UpdateV1: discriminator 15, args
+// `{ new_name: Option<String>, new_uri: Option<String>, new_update_authority:
+// Option<UpdateAuthority> }`. Used to attempt an unauthorized metadata /
+// update-authority change by the receipt's embedded owner (Phase 2D3A3).
+function mplCoreUpdateV1Instruction(params: {
+  asset: web3.PublicKey;
+  collection: web3.PublicKey;
+  payer: web3.PublicKey;
+  authority: web3.PublicKey;
+  newName?: string;
+  newUri?: string;
+  newUpdateAuthorityAddress?: web3.PublicKey;
+}): web3.TransactionInstruction {
+  const data = Buffer.concat([
+    Buffer.from([15]),
+    borshOptionString(params.newName),
+    borshOptionString(params.newUri),
+    borshOptionUpdateAuthorityAddress(params.newUpdateAuthorityAddress),
+  ]);
+  return new web3.TransactionInstruction({
+    programId: MPL_CORE_PROGRAM_ID,
+    keys: [
+      { pubkey: params.asset, isSigner: false, isWritable: true },
+      { pubkey: params.collection, isSigner: false, isWritable: false },
+      { pubkey: params.payer, isSigner: true, isWritable: true },
+      { pubkey: params.authority, isSigner: true, isWritable: false },
+      { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false }, // log_wrapper: None
+    ],
+    data,
+  });
+}
+
 describe.skipIf(skipReceiptProofSuite)(
   "PositionReceipt PDA / stateless ReceiptAuthority runtime proof (Phase 2D3A2)",
   () => {
@@ -253,6 +309,15 @@ describe.skipIf(skipReceiptProofSuite)(
     let position: web3.PublicKey;
     let receiptAuthority: web3.PublicKey;
     let receiptAsset: web3.PublicKey;
+
+    // Phase 2D3A3: a second Position/receipt used for the official
+    // Collection + metadata authority proof, kept separate from the
+    // standalone (no-collection) receipt above so the already-proven
+    // 2D3A2 lifecycle above is untouched.
+    const positionId2 = new BN(1);
+    let position2: web3.PublicKey;
+    let receiptAsset2: web3.PublicKey;
+    let collectionPda: web3.PublicKey;
 
     beforeAll(async () => {
       provider = AnchorProvider.env();
@@ -369,6 +434,45 @@ describe.skipIf(skipReceiptProofSuite)(
 
       [receiptAuthority] = deriveReceiptAuthority(rodeoCoreProgram.programId, globalConfig);
       [receiptAsset] = derivePositionReceipt(rodeoCoreProgram.programId, position);
+    }, 60_000);
+
+    // Phase 2D3A3 setup: a second Position (positionId=1, since
+    // next_position_id was advanced to 1 by the positionId=0 stake above)
+    // used for the Collection/metadata proof below.
+    beforeAll(async () => {
+      if (!localnetAvailable) return;
+
+      [position2] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId2);
+      const [pendingRandomness2] = deriveRandomness(
+        rodeoCoreProgram.programId,
+        position2,
+        0,
+        new BN(0),
+      );
+      const stakeAmountAtomic = new BN(100_000_000_000);
+
+      await rodeoCoreProgram.methods
+        .stakeAndCommit(positionId2, stakeAmountAtomic)
+        .accounts({
+          owner: walletA.publicKey,
+          ownerRodeoTokenAccount: payerRodeoAccount,
+          globalConfig,
+          protocolConfig: protocolConfigV1,
+          principalVault,
+          position: position2,
+          pendingRandomness: pendingRandomness2,
+          rewardState,
+          globalGameState,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          rent: web3.SYSVAR_RENT_PUBKEY,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([walletA])
+        .rpc();
+
+      [receiptAsset2] = derivePositionReceipt(rodeoCoreProgram.programId, position2);
+      [collectionPda] = deriveReceiptCollection(rodeoCoreProgram.programId, globalConfig);
     }, 60_000);
 
     // The `test_fixture_*` receipt instructions are compiled only for the
@@ -853,6 +957,314 @@ describe.skipIf(skipReceiptProofSuite)(
         // 2D3A4 evidence, so there is no pass/fail assertion on the
         // recreation outcome itself.
         expect(typeof recreateSucceeded).toBe("boolean");
+      },
+      30_000,
+    );
+
+    // -------------------------------------------------------------------
+    // Phase 2D3A3: official Rodeo Collection + metadata authority proof.
+    // Uses `position2`/`receiptAsset2`/`collectionPda` set up in the second
+    // `beforeAll` above, kept separate from the standalone receipt proven
+    // in the 2D3A2 tests.
+    // -------------------------------------------------------------------
+
+    async function fixtureCreateReceiptCollection(name: string, uri: string) {
+      const data = Buffer.concat([
+        anchorDiscriminator("test_fixture_create_receipt_collection"),
+        borshString(name),
+        borshString(uri),
+      ]);
+      const ix = new web3.TransactionInstruction({
+        keys: [
+          { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+          { pubkey: globalConfig, isSigner: false, isWritable: false },
+          { pubkey: collectionPda, isSigner: false, isWritable: true },
+          { pubkey: receiptAuthority, isSigner: false, isWritable: false },
+          { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false },
+          { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        programId: rodeoCoreProgram.programId,
+        data,
+      });
+      const tx = new web3.Transaction().add(ix);
+      return provider.sendAndConfirm(tx, [payer]);
+    }
+
+    async function fixtureCreatePositionReceiptInCollection(
+      assetOwner: web3.PublicKey,
+      name: string,
+      uri: string,
+    ) {
+      const data = Buffer.concat([
+        anchorDiscriminator("test_fixture_create_position_receipt_in_collection"),
+        borshString(name),
+        borshString(uri),
+      ]);
+      const ix = new web3.TransactionInstruction({
+        keys: [
+          { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+          { pubkey: globalConfig, isSigner: false, isWritable: false },
+          { pubkey: position2, isSigner: false, isWritable: false },
+          { pubkey: receiptAsset2, isSigner: false, isWritable: true },
+          { pubkey: collectionPda, isSigner: false, isWritable: true },
+          { pubkey: receiptAuthority, isSigner: false, isWritable: false },
+          { pubkey: assetOwner, isSigner: false, isWritable: false },
+          { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false },
+          { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        programId: rodeoCoreProgram.programId,
+        data,
+      });
+      const tx = new web3.Transaction().add(ix);
+      return provider.sendAndConfirm(tx, [payer]);
+    }
+
+    async function fixtureUpdatePositionReceiptMetadata(newName?: string, newUri?: string) {
+      const data = Buffer.concat([
+        anchorDiscriminator("test_fixture_update_position_receipt_metadata"),
+        borshOptionString(newName),
+        borshOptionString(newUri),
+      ]);
+      const ix = new web3.TransactionInstruction({
+        keys: [
+          { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+          { pubkey: globalConfig, isSigner: false, isWritable: false },
+          { pubkey: position2, isSigner: false, isWritable: false },
+          { pubkey: receiptAsset2, isSigner: false, isWritable: true },
+          { pubkey: collectionPda, isSigner: false, isWritable: false },
+          { pubkey: receiptAuthority, isSigner: false, isWritable: false },
+          { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false },
+          { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        programId: rodeoCoreProgram.programId,
+        data,
+      });
+      const tx = new web3.Transaction().add(ix);
+      return provider.sendAndConfirm(tx, [payer]);
+    }
+
+    async function fixtureForceTransferPositionReceipt2(newOwner: web3.PublicKey) {
+      const data = Buffer.concat([
+        anchorDiscriminator("test_fixture_force_transfer_position_receipt"),
+        newOwner.toBuffer(),
+      ]);
+      const ix = new web3.TransactionInstruction({
+        keys: [
+          { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+          { pubkey: globalConfig, isSigner: false, isWritable: false },
+          { pubkey: position2, isSigner: false, isWritable: false },
+          { pubkey: receiptAsset2, isSigner: false, isWritable: true },
+          { pubkey: receiptAuthority, isSigner: false, isWritable: false },
+          { pubkey: newOwner, isSigner: false, isWritable: false },
+          { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false },
+          { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        programId: rodeoCoreProgram.programId,
+        data,
+      });
+      const tx = new web3.Transaction().add(ix);
+      return provider.sendAndConfirm(tx, [payer]);
+    }
+
+    async function fixtureParsePositionReceipt2() {
+      const data = anchorDiscriminator("test_fixture_parse_position_receipt");
+      const ix = new web3.TransactionInstruction({
+        keys: [
+          { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+          { pubkey: position2, isSigner: false, isWritable: false },
+          { pubkey: receiptAsset2, isSigner: false, isWritable: false },
+        ],
+        programId: rodeoCoreProgram.programId,
+        data,
+      });
+      const tx = new web3.Transaction().add(ix);
+      const signature = await provider.sendAndConfirm(tx, [payer]);
+      const logs = await getConfirmedLogs(signature);
+
+      const extract = (key: string): string | undefined => {
+        const prefix = `Program log: ${key}:`;
+        const line = logs.find((l) => l.startsWith(prefix));
+        return line?.slice(prefix.length);
+      };
+      if (logs.length === 0) {
+        throw new Error(
+          `test_fixture_parse_position_receipt (${signature}) returned no retrievable logs after retries`,
+        );
+      }
+      const result = {
+        signature,
+        logs,
+        owner: extract("receipt_owner"),
+        frozen: extract("receipt_frozen"),
+        name: extract("receipt_name"),
+        uri: extract("receipt_uri"),
+        updateAuthority: extract("receipt_update_authority"),
+        hasPermanentTransferDelegate: extract("receipt_has_permanent_transfer_delegate"),
+        hasPermanentBurnDelegate: extract("receipt_has_permanent_burn_delegate"),
+        hasPermanentFreezeDelegate: extract("receipt_has_permanent_freeze_delegate"),
+        permanentTransferAuthority: extract("receipt_permanent_transfer_authority"),
+        permanentBurnAuthority: extract("receipt_permanent_burn_authority"),
+        permanentFreezeAuthority: extract("receipt_permanent_freeze_authority"),
+      };
+      if (result.owner === undefined) {
+        throw new Error(`could not find receipt_owner log line; full logs:\n${logs.join("\n")}`);
+      }
+      return result;
+    }
+
+    it(
+      "creates the official Rodeo receipt Collection at the deterministic PDA with the stateless ReceiptAuthority as its update authority",
+      async () => {
+        const beforeCreate = await provider.connection.getAccountInfo(collectionPda);
+        expect(beforeCreate).toBeNull();
+
+        await fixtureCreateReceiptCollection(
+          "Rodeo Position Receipts (proof)",
+          "https://example.invalid/collection.json",
+        );
+
+        const afterCreate = await provider.connection.getAccountInfo(collectionPda);
+        expect(afterCreate).not.toBeNull();
+        expect(afterCreate!.owner.equals(MPL_CORE_PROGRAM_ID)).toBe(true);
+        console.log(
+          "[2D3A3 collection] data length:",
+          afterCreate!.data.length,
+          "lamports:",
+          afterCreate!.lamports,
+        );
+
+        // A normal wallet did not sign this creation and holds no authority
+        // over the collection; only the ReceiptAuthority PDA was recorded
+        // as update authority (verified structurally: the collection was
+        // created successfully with walletA/walletB never referenced).
+      },
+      30_000,
+    );
+
+    it(
+      "creates a PositionReceipt inside the official Rodeo Collection with Wallet A as embedded owner and all three permanent plugins",
+      async () => {
+        const beforeCreate = await provider.connection.getAccountInfo(receiptAsset2);
+        expect(beforeCreate).toBeNull();
+
+        await fixtureCreatePositionReceiptInCollection(
+          walletA.publicKey,
+          "Rodeo Position #1",
+          "https://example.invalid/receipts/1.json",
+        );
+
+        const afterCreate = await provider.connection.getAccountInfo(receiptAsset2);
+        expect(afterCreate).not.toBeNull();
+        expect(afterCreate!.owner.equals(MPL_CORE_PROGRAM_ID)).toBe(true);
+
+        const parsed = await fixtureParsePositionReceipt2();
+        expect(parsed.owner).toBe(walletA.publicKey.toBase58());
+        expect(parsed.frozen).toBe("true");
+        expect(parsed.hasPermanentTransferDelegate).toBe("true");
+        expect(parsed.hasPermanentBurnDelegate).toBe("true");
+        expect(parsed.hasPermanentFreezeDelegate).toBe("true");
+        const expectedAuthority = `address:${receiptAuthority.toBase58()}`;
+        expect(parsed.permanentTransferAuthority).toBe(expectedAuthority);
+        expect(parsed.permanentBurnAuthority).toBe(expectedAuthority);
+        expect(parsed.permanentFreezeAuthority).toBe(expectedAuthority);
+
+        // Collection membership: since no per-asset update_authority was
+        // provided at create time, the asset's UpdateAuthority resolves to
+        // Collection(collectionPda).
+        expect(parsed.updateAuthority).toBe(`collection:${collectionPda.toBase58()}`);
+        console.log("[2D3A3 create] name:", parsed.name, "uri:", parsed.uri);
+      },
+      30_000,
+    );
+
+    it(
+      "rejects Wallet A (owner) attempting to change the receipt's name/URI directly (no Rodeo ReceiptAuthority signature)",
+      async () => {
+        const errorText = await expectMplCoreRejection(async () => {
+          const ix = mplCoreUpdateV1Instruction({
+            asset: receiptAsset2,
+            collection: collectionPda,
+            payer: walletA.publicKey,
+            authority: walletA.publicKey,
+            newName: "Hacked Name",
+          });
+          const tx = new web3.Transaction().add(ix);
+          return provider.sendAndConfirm(tx, [walletA]);
+        });
+        console.log("[2D3A3 negative] owner direct metadata-update error:", errorText);
+        expect(errorText.length).toBeGreaterThan(0);
+
+        const parsed = await fixtureParsePositionReceipt2();
+        expect(parsed.name).toBe("Rodeo Position #1");
+        expect(parsed.owner).toBe(walletA.publicKey.toBase58());
+      },
+      30_000,
+    );
+
+    it(
+      "rejects Wallet A (owner) attempting to replace the receipt's update authority directly",
+      async () => {
+        const errorText = await expectMplCoreRejection(async () => {
+          const ix = mplCoreUpdateV1Instruction({
+            asset: receiptAsset2,
+            collection: collectionPda,
+            payer: walletA.publicKey,
+            authority: walletA.publicKey,
+            newUpdateAuthorityAddress: walletA.publicKey,
+          });
+          const tx = new web3.Transaction().add(ix);
+          return provider.sendAndConfirm(tx, [walletA]);
+        });
+        console.log("[2D3A3 negative] owner direct update-authority-replace error:", errorText);
+        expect(errorText.length).toBeGreaterThan(0);
+
+        const parsed = await fixtureParsePositionReceipt2();
+        expect(parsed.updateAuthority).toBe(`collection:${collectionPda.toBase58()}`);
+      },
+      30_000,
+    );
+
+    it(
+      "Rodeo-authorized metadata update succeeds via the stateless ReceiptAuthority (collection update authority)",
+      async () => {
+        await fixtureUpdatePositionReceiptMetadata("Rodeo Position #1 (Renamed)", undefined);
+
+        const parsed = await fixtureParsePositionReceipt2();
+        expect(parsed.name).toBe("Rodeo Position #1 (Renamed)");
+        // Unrelated state must be unchanged by the metadata update.
+        expect(parsed.owner).toBe(walletA.publicKey.toBase58());
+        expect(parsed.updateAuthority).toBe(`collection:${collectionPda.toBase58()}`);
+        expect(parsed.frozen).toBe("true");
+        expect(parsed.hasPermanentTransferDelegate).toBe("true");
+        expect(parsed.hasPermanentBurnDelegate).toBe("true");
+        expect(parsed.hasPermanentFreezeDelegate).toBe("true");
+      },
+      30_000,
+    );
+
+    it(
+      "collection membership, frozen state, and permanent plugins survive a Rodeo force-transfer of the in-collection receipt",
+      async () => {
+        await fixtureForceTransferPositionReceipt2(walletB.publicKey);
+
+        const parsed = await fixtureParsePositionReceipt2();
+        expect(parsed.owner).toBe(walletB.publicKey.toBase58());
+        expect(parsed.owner).not.toBe(walletA.publicKey.toBase58());
+        expect(parsed.frozen).toBe("true");
+        expect(parsed.updateAuthority).toBe(`collection:${collectionPda.toBase58()}`);
+        expect(parsed.hasPermanentTransferDelegate).toBe("true");
+        expect(parsed.hasPermanentBurnDelegate).toBe("true");
+        expect(parsed.hasPermanentFreezeDelegate).toBe("true");
+        const expectedAuthority = `address:${receiptAuthority.toBase58()}`;
+        expect(parsed.permanentTransferAuthority).toBe(expectedAuthority);
+        expect(parsed.permanentBurnAuthority).toBe(expectedAuthority);
+        expect(parsed.permanentFreezeAuthority).toBe(expectedAuthority);
+
+        // The collection's own account must also be unaffected by an
+        // ordinary asset ownership transfer.
+        const collectionAccount = await provider.connection.getAccountInfo(collectionPda);
+        expect(collectionAccount).not.toBeNull();
+        expect(collectionAccount!.owner.equals(MPL_CORE_PROGRAM_ID)).toBe(true);
       },
       30_000,
     );

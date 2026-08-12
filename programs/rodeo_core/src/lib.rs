@@ -10,7 +10,9 @@ pub mod receipt;
 pub mod state;
 
 use constants::*;
-use mpl_core::instructions::{BurnV1Builder, CreateV2Builder, TransferV1Builder};
+use mpl_core::instructions::{
+    BurnV1Builder, CreateCollectionV2Builder, CreateV2Builder, TransferV1Builder, UpdateV1Builder,
+};
 use mpl_core::types::{DataState, Plugin, PluginAuthority, PluginAuthorityPair, PluginType};
 use receipt::*;
 use state::*;
@@ -1421,6 +1423,226 @@ pub mod rodeo_core {
             .map_err(Into::into)
     }
 
+    /// Test-only fixture that creates the official Rodeo receipt Collection
+    /// at the deterministic receipt-collection PDA, with the stateless
+    /// ReceiptAuthority PDA as its update authority. Proves the collection
+    /// PDA derivation and that `CreateCollectionV2` accepts a Rodeo PDA as
+    /// both the collection address (self-signing via `invoke_signed`) and
+    /// its update authority (recorded, not required to sign at creation).
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_create_receipt_collection(
+        ctx: Context<TestFixtureCreateReceiptCollection>,
+        name: String,
+        uri: String,
+    ) -> Result<()> {
+        let (receipt_authority, receipt_authority_bump) =
+            receipt_authority_pda(&ctx.accounts.global_config.key());
+        let (collection, collection_bump) =
+            receipt_collection_pda(&ctx.accounts.global_config.key());
+
+        require_keys_eq!(
+            ctx.accounts.receipt_authority.key(),
+            receipt_authority,
+            RodeoError::InvalidCoreAssetOwner
+        );
+        require_keys_eq!(
+            ctx.accounts.collection.key(),
+            collection,
+            RodeoError::InvalidCoreAssetOwner
+        );
+
+        let instruction = CreateCollectionV2Builder::new()
+            .collection(collection)
+            .update_authority(Some(receipt_authority))
+            .payer(ctx.accounts.authority.key())
+            .system_program(solana_program::system_program::ID)
+            .name(name)
+            .uri(uri)
+            .instruction();
+
+        let account_infos = [
+            ctx.accounts.collection.to_account_info(),
+            ctx.accounts.receipt_authority.to_account_info(),
+            ctx.accounts.authority.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ];
+
+        let global_config_key = ctx.accounts.global_config.key();
+        let collection_seeds = [
+            SEED_RECEIPT_COLLECTION,
+            global_config_key.as_ref(),
+            &[collection_bump],
+        ];
+        let receipt_authority_seeds = [
+            SEED_RECEIPT_AUTHORITY,
+            global_config_key.as_ref(),
+            &[receipt_authority_bump],
+        ];
+
+        solana_program::program::invoke_signed(
+            &instruction,
+            &account_infos,
+            &[&collection_seeds, &receipt_authority_seeds],
+        )
+        .map_err(Into::into)
+    }
+
+    /// Test-only fixture that creates a Core PositionReceipt inside the
+    /// official Rodeo receipt Collection. Unlike
+    /// `test_fixture_create_position_receipt`, this omits a per-asset
+    /// `update_authority`, so the created asset's `UpdateAuthority` resolves
+    /// to `Collection(receipt_collection)`, meaning only whoever controls
+    /// the collection (the ReceiptAuthority PDA) can update its metadata.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_create_position_receipt_in_collection(
+        ctx: Context<TestFixtureCreatePositionReceiptInCollection>,
+        name: String,
+        uri: String,
+    ) -> Result<()> {
+        let (receipt_authority, receipt_authority_bump) =
+            receipt_authority_pda(&ctx.accounts.global_config.key());
+        let (receipt_asset, receipt_asset_bump) =
+            position_receipt_pda(&ctx.accounts.position.key());
+        let (collection, _collection_bump) =
+            receipt_collection_pda(&ctx.accounts.global_config.key());
+
+        require_keys_eq!(
+            ctx.accounts.receipt_authority.key(),
+            receipt_authority,
+            RodeoError::InvalidCoreAssetOwner
+        );
+        require_keys_eq!(
+            ctx.accounts.receipt_asset.key(),
+            receipt_asset,
+            RodeoError::InvalidCoreAssetOwner
+        );
+        require_keys_eq!(
+            ctx.accounts.collection.key(),
+            collection,
+            RodeoError::InvalidCoreAssetOwner
+        );
+
+        let plugins = vec![
+            PluginAuthorityPair {
+                plugin: Plugin::PermanentTransferDelegate(
+                    mpl_core::types::PermanentTransferDelegate {},
+                ),
+                authority: Some(PluginAuthority::Address {
+                    address: receipt_authority,
+                }),
+            },
+            PluginAuthorityPair {
+                plugin: Plugin::PermanentBurnDelegate(mpl_core::types::PermanentBurnDelegate {}),
+                authority: Some(PluginAuthority::Address {
+                    address: receipt_authority,
+                }),
+            },
+            PluginAuthorityPair {
+                plugin: Plugin::PermanentFreezeDelegate(mpl_core::types::PermanentFreezeDelegate {
+                    frozen: true,
+                }),
+                authority: Some(PluginAuthority::Address {
+                    address: receipt_authority,
+                }),
+            },
+        ];
+
+        let instruction = CreateV2Builder::new()
+            .asset(receipt_asset)
+            .collection(Some(collection))
+            .authority(Some(receipt_authority))
+            .payer(ctx.accounts.authority.key())
+            .owner(Some(ctx.accounts.asset_owner.key()))
+            // No per-asset update_authority: leaving this unset while
+            // `collection` is set makes the asset's `UpdateAuthority`
+            // resolve to `Collection(collection)`.
+            .system_program(solana_program::system_program::ID)
+            .data_state(DataState::AccountState)
+            .name(name)
+            .uri(uri)
+            .plugins(plugins)
+            .instruction();
+
+        let account_infos = [
+            ctx.accounts.receipt_asset.to_account_info(),
+            ctx.accounts.collection.to_account_info(),
+            ctx.accounts.receipt_authority.to_account_info(),
+            ctx.accounts.authority.to_account_info(),
+            ctx.accounts.asset_owner.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+        ];
+
+        let global_config_key = ctx.accounts.global_config.key();
+        let position_key = ctx.accounts.position.key();
+        let receipt_authority_seeds = [
+            SEED_RECEIPT_AUTHORITY,
+            global_config_key.as_ref(),
+            &[receipt_authority_bump],
+        ];
+        let receipt_asset_seeds = [
+            SEED_POSITION_RECEIPT,
+            position_key.as_ref(),
+            &[receipt_asset_bump],
+        ];
+
+        solana_program::program::invoke_signed(
+            &instruction,
+            &account_infos,
+            &[&receipt_authority_seeds, &receipt_asset_seeds],
+        )
+        .map_err(Into::into)
+    }
+
+    /// Test-only fixture that updates a PositionReceipt's name/URI using the
+    /// stateless ReceiptAuthority PDA, authorized because it controls the
+    /// asset's collection (and the asset itself carries no per-asset update
+    /// authority override).
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_update_position_receipt_metadata(
+        ctx: Context<TestFixtureUpdatePositionReceiptMetadata>,
+        new_name: Option<String>,
+        new_uri: Option<String>,
+    ) -> Result<()> {
+        let (receipt_authority, receipt_authority_bump) =
+            receipt_authority_pda(&ctx.accounts.global_config.key());
+
+        let mut builder = UpdateV1Builder::new();
+        builder
+            .asset(*ctx.accounts.receipt_asset.key)
+            .collection(Some(*ctx.accounts.collection.key))
+            .payer(ctx.accounts.authority.key())
+            .authority(Some(receipt_authority))
+            .system_program(solana_program::system_program::ID);
+        if let Some(new_name) = new_name {
+            builder.new_name(new_name);
+        }
+        if let Some(new_uri) = new_uri {
+            builder.new_uri(new_uri);
+        }
+        let instruction = builder.instruction();
+
+        let account_infos = [
+            ctx.accounts.receipt_asset.to_account_info(),
+            ctx.accounts.collection.to_account_info(),
+            ctx.accounts.authority.to_account_info(),
+            ctx.accounts.receipt_authority.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+        ];
+
+        let global_config_key = ctx.accounts.global_config.key();
+        let seeds = [
+            SEED_RECEIPT_AUTHORITY,
+            global_config_key.as_ref(),
+            &[receipt_authority_bump],
+        ];
+
+        solana_program::program::invoke_signed(&instruction, &account_infos, &[&seeds])
+            .map_err(Into::into)
+    }
+
     /// Test-only fixture that parses a PositionReceipt Core asset and emits a
     /// `PositionReceiptParsed` event. Proves manual, non-Anchor Core parsing.
     #[cfg(feature = "test-fixtures")]
@@ -1451,6 +1673,12 @@ pub mod rodeo_core {
         // They report exactly the same values the event above carries.
         msg!("receipt_owner:{}", owner);
         msg!("receipt_frozen:{}", frozen);
+        msg!("receipt_name:{}", asset.name);
+        msg!("receipt_uri:{}", asset.uri);
+        msg!(
+            "receipt_update_authority:{}",
+            format_update_authority(&asset.update_authority)
+        );
         msg!(
             "receipt_has_permanent_transfer_delegate:{}",
             permanent_transfer.is_some()
