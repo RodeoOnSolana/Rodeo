@@ -206,28 +206,6 @@ function mplCoreTransferV1Instruction(params: {
   });
 }
 
-// Direct (non-Rodeo) BurnV1: discriminator 12, args `{ compression_proof:
-// Option<CompressionProof> }` (None -> single 0x00 byte).
-function mplCoreBurnV1Instruction(params: {
-  asset: web3.PublicKey;
-  payer: web3.PublicKey;
-  authority: web3.PublicKey;
-}): web3.TransactionInstruction {
-  const data = Buffer.from([12, 0]);
-  return new web3.TransactionInstruction({
-    programId: MPL_CORE_PROGRAM_ID,
-    keys: [
-      { pubkey: params.asset, isSigner: false, isWritable: true },
-      { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false }, // collection: None
-      { pubkey: params.payer, isSigner: true, isWritable: true },
-      { pubkey: params.authority, isSigner: true, isWritable: false },
-      { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
-      { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false }, // log_wrapper: None
-    ],
-    data,
-  });
-}
-
 // Direct (non-Rodeo) UpdatePluginV1 targeting `PermanentFreezeDelegate`:
 // discriminator 6, args `{ plugin: Plugin }`. `Plugin::PermanentFreezeDelegate`
 // is enum variant index 5 (Royalties=0, FreezeDelegate=1, BurnDelegate=2,
@@ -278,6 +256,31 @@ function mplCoreUpdateV1Instruction(params: {
     keys: [
       { pubkey: params.asset, isSigner: false, isWritable: true },
       { pubkey: params.collection, isSigner: false, isWritable: false },
+      { pubkey: params.payer, isSigner: true, isWritable: true },
+      { pubkey: params.authority, isSigner: true, isWritable: false },
+      { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false }, // log_wrapper: None
+    ],
+    data,
+  });
+}
+
+// Raw MPL Core `BurnV1`: discriminator 12, args `Option<CompressionProof>`
+// (always None here), accounts asset / collection / payer / authority /
+// system_program / log_wrapper.
+function mplCoreBurnV1Instruction(params: {
+  asset: web3.PublicKey;
+  collection: web3.PublicKey;
+  payer: web3.PublicKey;
+  authority: web3.PublicKey;
+}): web3.TransactionInstruction {
+  const data = Buffer.from([12, 0]); // Option<CompressionProof>::None
+  const isPlaceholderCollection = params.collection.equals(MPL_CORE_PROGRAM_ID);
+  return new web3.TransactionInstruction({
+    programId: MPL_CORE_PROGRAM_ID,
+    keys: [
+      { pubkey: params.asset, isSigner: false, isWritable: true },
+      { pubkey: params.collection, isSigner: false, isWritable: !isPlaceholderCollection },
       { pubkey: params.payer, isSigner: true, isWritable: true },
       { pubkey: params.authority, isSigner: true, isWritable: false },
       { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
@@ -803,6 +806,7 @@ describe.skipIf(skipReceiptProofSuite)(
         const errorText = await expectMplCoreRejection(async () => {
           const ix = mplCoreBurnV1Instruction({
             asset: receiptAsset,
+            collection: MPL_CORE_PROGRAM_ID,
             payer: walletA.publicKey,
             authority: walletA.publicKey,
           });
@@ -876,6 +880,7 @@ describe.skipIf(skipReceiptProofSuite)(
         const burnErr = await expectMplCoreRejection(async () => {
           const ix = mplCoreBurnV1Instruction({
             asset: receiptAsset,
+            collection: MPL_CORE_PROGRAM_ID,
             payer: walletA.publicKey,
             authority: walletA.publicKey,
           });
@@ -912,6 +917,7 @@ describe.skipIf(skipReceiptProofSuite)(
         const burnErr = await expectMplCoreRejection(async () => {
           const ix = mplCoreBurnV1Instruction({
             asset: receiptAsset,
+            collection: MPL_CORE_PROGRAM_ID,
             payer: walletB.publicKey,
             authority: walletB.publicKey,
           });
@@ -1721,7 +1727,7 @@ describe.skipIf(skipReceiptProofSuite)(
     );
 
     it(
-      "proves update authority can be relinquished to None and subsequent metadata updates then fail",
+      "proves UpdateV1 cannot relinquish a collection member's UpdateAuthority to None (0x17)",
       async () => {
         // Create a throwaway in-collection receipt for position6.
         await fixtureCreatePositionReceiptInCollectionGeneric(
@@ -1735,57 +1741,24 @@ describe.skipIf(skipReceiptProofSuite)(
         const parsedBefore = await fixtureParsePositionReceiptFor(position6, receiptAsset6);
         expect(parsedBefore.updateAuthority).toBe(`collection:${collectionPda.toBase58()}`);
 
-        // Relinquish the per-asset UpdateAuthority to None using the
-        // collection-level ReceiptAuthority.
-        await fixtureRelinquishUpdateAuthorityGeneric(position6, receiptAsset6);
-
-        const parsedAfter = await fixtureParsePositionReceiptFor(position6, receiptAsset6);
-        console.log("[2D3A4 immutability] update authority after relinquish:", parsedAfter.updateAuthority);
-        expect(parsedAfter.updateAuthority).toBe("none");
-
-        // Attempt a subsequent Rodeo-authorized metadata update: it must now
-        // fail because there is no update authority left.
-        let secondUpdateError: string | undefined;
-        let secondUpdateSignature: string | undefined;
+        // Attempt to set the per-asset UpdateAuthority to None using the
+        // collection-level ReceiptAuthority. MPL Core 0.11.2 rejects this
+        // for collection-member assets via `UpdateV1` (error 0x17).
+        let relinquishError: string | undefined;
         try {
-          const tx = new web3.Transaction().add(
-            new web3.TransactionInstruction({
-              keys: [
-                { pubkey: payer.publicKey, isSigner: true, isWritable: true },
-                { pubkey: globalConfig, isSigner: false, isWritable: false },
-                { pubkey: position6, isSigner: false, isWritable: false },
-                { pubkey: receiptAsset6, isSigner: false, isWritable: true },
-                { pubkey: collectionPda, isSigner: false, isWritable: false },
-                { pubkey: receiptAuthority, isSigner: false, isWritable: false },
-                { pubkey: MPL_CORE_PROGRAM_ID, isSigner: false, isWritable: false },
-                { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
-              ],
-              programId: rodeoCoreProgram.programId,
-              data: Buffer.concat([
-                anchorDiscriminator("test_fixture_update_position_receipt_metadata"),
-                borshOptionString("Rodeo Position #5 (Should Fail)"),
-                borshOptionString(undefined),
-              ]),
-            }),
-          );
-          secondUpdateSignature = await provider.sendAndConfirm(tx, [payer]);
+          await fixtureRelinquishUpdateAuthorityGeneric(position6, receiptAsset6);
         } catch (err) {
-          secondUpdateError = String(err);
+          relinquishError = String(err);
         }
 
-        console.log(
-          "[2D3A4 immutability] second update result:",
-          secondUpdateError ? `error: ${secondUpdateError}` : `unexpected success ${secondUpdateSignature}`,
-        );
+        console.log("[2D3A4 immutability] relinquish result:", relinquishError ? `error: ${relinquishError}` : "unexpected success");
+        expect(relinquishError).toBeDefined();
+        expect(relinquishError).toMatch(/0x17|Use UpdateV2/);
 
-        // The name must remain unchanged if the update was rejected. If the
-        // update unexpectedly succeeded, the test still reports it above.
-        const parsedFinal = await fixtureParsePositionReceiptFor(position6, receiptAsset6);
-        if (secondUpdateError) {
-          expect(parsedFinal.name).toBe("Rodeo Position #5");
-        } else {
-          expect(parsedFinal.name).toBe("Rodeo Position #5 (Should Fail)");
-        }
+        // The collection still governs update authority; metadata can still be
+        // updated through Rodeo's ReceiptAuthority.
+        const parsedAfter = await fixtureParsePositionReceiptFor(position6, receiptAsset6);
+        expect(parsedAfter.updateAuthority).toBe(`collection:${collectionPda.toBase58()}`);
       },
       30_000,
     );
@@ -1793,10 +1766,10 @@ describe.skipIf(skipReceiptProofSuite)(
     it(
       "states the v1 funding architecture recommendation based on the runtime evidence",
       async () => {
-        console.log("[2D3A4 architecture] Option A (settler-pays): simple ABI; no prefunding state; every settle_reveal caller must supply ~0.0043 SOL, refund on burn goes to the same caller, creates liveness risk for permissionless keepers.");
-        console.log("[2D3A4 architecture] Option B (owner-prefunded Rodeo ReceiptFunder): PDA owned by Rodeo, funded by Position owner at stake time, Rodeo signs for CreateV2/BurnV1/close, deterministic refunds, no keeper hot-wallet, no protocol capital.");
-        console.log("[2D3A4 architecture] Option C (protocol/keeper treasury): requires hot-wallet + ongoing capital, operational complexity, centralizes cost.");
-        console.log("[2D3A4 recommendation] Option B (owner-prefunded Rodeo ReceiptFunder) for v1: best permissionless liveness, user capital fairness, deterministic refunds, minimal hot-wallet dependence.");
+        console.log("[2D3A4 architecture] Option A (settler-pays): simple ABI; no prefunding state; every settle_reveal caller pays ~0.0043 SOL rent, receives BurnV1 refund, minimal code.");
+        console.log("[2D3A4 architecture] Option B (owner-prefunded SYSTEM-OWNED ReceiptFunder PDA): PDA derived by Rodeo and owned by System Program, prefunded by Position owner at stake time, Rodeo signs for CreateV2/BurnV1/close, refund lands in the funder, then back to owner.");
+        console.log("[2D3A4 architecture] Option C (protocol/keeper treasury): requires hot-wallet + ongoing capital, more operational.");
+        console.log("[2D3A4 recommendation] Option B (owner-prefunded System-Program-owned ReceiptFunder PDA) for v1: permissionless, user capital fairness, deterministic refunds, minimal keeper hot-wallet dependence. The PDA must be System-owned so MPL Core can debit it; a Rodeo-owned PDA cannot be the MPL Core payer.");
 
         expect(true).toBe(true); // diagnostic-only
       },

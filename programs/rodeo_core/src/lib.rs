@@ -1685,10 +1685,11 @@ pub mod rodeo_core {
             .map_err(Into::into)
     }
 
-    /// Test-only fixture that creates and prefunds a Rodeo-owned
-    /// ReceiptFunder PDA for a given Position. The PDA is owned by Rodeo so
-    /// it can sign `CreateV2`/`BurnV1` CPIs. The caller supplies the
-    /// `funding_lamports` and pays for the PDA's creation.
+    /// Test-only fixture that creates and prefunds a SYSTEM-OWNED
+    /// ReceiptFunder PDA for a given Position. The PDA address is derived by
+    /// Rodeo, but it is owned by the System Program so that MPL Core can
+    /// debit it as the `payer` in `CreateV2`/`BurnV1` and Rodeo can still
+    /// sign for it via `invoke_signed`.
     #[cfg(feature = "test-fixtures")]
     pub fn test_fixture_create_receipt_funder(
         ctx: Context<TestFixtureCreateReceiptFunder>,
@@ -1701,15 +1702,16 @@ pub mod rodeo_core {
             RodeoError::InvalidCoreAssetOwner
         );
 
-        // Create a program-owned PDA with zero data and the requested
+        // Create a System-Program-owned PDA with zero data and the requested
         // funding. The caller pays the `from` side; Rodeo signs for the `to`
-        // PDA.
+        // PDA. Ownership by the System Program is the key detail that lets
+        // MPL Core use the PDA as a `payer`.
         let create_ix = solana_program::system_instruction::create_account(
             ctx.accounts.authority.key,
             &funder,
             funding_lamports,
             0,
-            &crate::ID,
+            &solana_program::system_program::ID,
         );
         let account_infos = [
             ctx.accounts.authority.to_account_info(),
@@ -1838,9 +1840,8 @@ pub mod rodeo_core {
     }
 
     /// Test-only fixture that force-burns a collection-member PositionReceipt,
-    /// using a Rodeo-owned ReceiptFunder PDA as the MPL Core `BurnV1` payer.
-    /// Proves the burn refund lands in the funder PDA, making the lifecycle
-    /// deterministic.
+    /// using the System-Program-owned ReceiptFunder PDA as the MPL Core
+    /// `BurnV1` payer. Proves the burn refund lands in the funder PDA.
     #[cfg(feature = "test-fixtures")]
     pub fn test_fixture_force_burn_position_receipt_in_collection(
         ctx: Context<TestFixtureForceBurnPositionReceiptInCollection>,
@@ -1871,8 +1872,8 @@ pub mod rodeo_core {
         let account_infos = [
             ctx.accounts.receipt_asset.to_account_info(),
             ctx.accounts.collection.to_account_info(),
-            ctx.accounts.receipt_authority.to_account_info(),
             ctx.accounts.funder.to_account_info(),
+            ctx.accounts.receipt_authority.to_account_info(),
             ctx.accounts.system_program.to_account_info(),
             ctx.accounts.mpl_core_program.to_account_info(),
         ];
@@ -1909,11 +1910,12 @@ pub mod rodeo_core {
             RodeoError::InvalidCoreAssetOwner
         );
 
-        let funder_lamports = ctx.accounts.funder.lamports();
+        let funder_lamports = ctx.accounts.funder.to_account_info().lamports();
 
         // Transfer all lamports to the beneficiary. The transaction fee is
         // paid by `authority` (Rodeo caller), not the funder, so the funder
-        // balance is exhausted.
+        // balance is exhausted. The PDA is System-Program-owned, so a signed
+        // `transfer` CPI from the funder is valid.
         if funder_lamports > 0 {
             let transfer_ix = solana_program::system_instruction::transfer(
                 &funder,
@@ -1930,22 +1932,7 @@ pub mod rodeo_core {
             solana_program::program::invoke_signed(&transfer_ix, &account_infos, &[&funder_seeds])?;
         }
 
-        // Reassign the PDA to the System Program so the address is released
-        // and can no longer be controlled by Rodeo.
-        let assign_ix = solana_program::system_instruction::assign(
-            &funder,
-            &solana_program::system_program::ID,
-        );
-        let account_infos = [
-            ctx.accounts.funder.to_account_info(),
-            ctx.accounts.system_program.to_account_info(),
-        ];
-        let position_key = ctx.accounts.position.key();
-        let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
-        solana_program::program::invoke_signed(&assign_ix, &account_infos, &[&funder_seeds])
-            .map_err(|e: solana_program::program_error::ProgramError| {
-                anchor_lang::error::Error::from(e)
-            })
+        Ok(())
     }
 
     /// Test-only fixture that transitions a collection-member PositionReceipt's

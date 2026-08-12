@@ -476,8 +476,9 @@ pub struct TestFixtureCreateReceiptFunder<'info> {
 
     pub position: Box<Account<'info, Position>>,
 
-    /// CHECK: The new ReceiptFunder PDA owned by Rodeo and prefunded by the
-    /// Position owner. Rodeo signs for it via `invoke_signed`.
+    /// CHECK: The new ReceiptFunder PDA owned by the System Program and
+    /// derived by Rodeo. It is prefunded by the Position owner and Rodeo
+    /// signs for it via `invoke_signed`.
     #[account(
         mut,
         seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
@@ -531,7 +532,8 @@ pub struct TestFixtureCreatePositionReceiptInCollectionViaFunder<'info> {
     pub asset_owner: UncheckedAccount<'info>,
 
     /// CHECK: The ReceiptFunder PDA paying MPL Core `CreateV2` rent.
-    /// It is owned by Rodeo and prefunded by the asset owner.
+    /// It is owned by the System Program (but derived by Rodeo) and
+    /// prefunded by the asset owner.
     #[account(
         mut,
         seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
@@ -583,7 +585,8 @@ pub struct TestFixtureForceBurnPositionReceiptInCollection<'info> {
     )]
     pub receipt_authority: UncheckedAccount<'info>,
 
-    /// CHECK: The ReceiptFunder PDA paying MPL Core `BurnV1` refund path.
+    /// CHECK: The System-Program-owned ReceiptFunder PDA paying MPL Core
+    /// `BurnV1` and receiving the refund.
     #[account(
         mut,
         seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
@@ -606,9 +609,8 @@ pub struct TestFixtureCloseReceiptFunder<'info> {
 
     pub position: Box<Account<'info, Position>>,
 
-    /// CHECK: The existing Rodeo-owned ReceiptFunder PDA. Its remaining
-    /// lamports are transferred to the `beneficiary` and it is reassigned to
-    /// the System Program so the address is released.
+    /// CHECK: The existing System-Program-owned ReceiptFunder PDA. Its
+    /// remaining lamports are transferred to the `beneficiary`.
     #[account(
         mut,
         seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
