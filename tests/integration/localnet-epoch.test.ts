@@ -2811,7 +2811,12 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
 
     expect(await provider.connection.getAccountInfo(positionAddr)).toBeNull();
     expect(await provider.connection.getAccountInfo(requestInfo.pendingRandomness)).toBeNull();
-    expect(await provider.connection.getAccountInfo(receiptAsset)).toBeNull();
+
+    const burnedReceipt = await provider.connection.getAccountInfo(receiptAsset);
+    expect(burnedReceipt).not.toBeNull();
+    expect(burnedReceipt!.owner.toBase58()).toBe(MPL_CORE_PROGRAM_ID.toBase58());
+    expect(burnedReceipt!.data.length).toBe(1);
+    expect(burnedReceipt!.data[0]).toBe(0);
     expect(await provider.connection.getAccountInfo(receiptFunder)).toBeNull();
 
     const receiptBurned = await receiptBurnedPromise;
@@ -2934,7 +2939,15 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       rodeoCoreProgram.programId,
     );
 
-    await sleep(2_500);
+    await fixturePreparePosition(positionId, {
+      roleCode: 1,
+      cowboyKindCode: 5,
+      accrualWeight: 10000,
+      buckPower: 0,
+      claimable: new BN(0),
+      positionClaimableLiabilityDelta: new BN(0),
+    });
+
     await ensureEpochsClosed();
     const { actionNonce } = await requestUnstake(positionId);
 
