@@ -1407,6 +1407,7 @@ pub mod rodeo_core {
     /// production verification and add/remove paths and then restores the
     /// registry so the benchmark is non-destructive.  Compute units are read
     /// from the Solana runtime after the transaction.
+    #[cfg(feature = "test-fixtures")]
     pub fn benchmark_sparse_tree(
         ctx: Context<BenchmarkSparseTree>,
         victim: Option<Pubkey>,
@@ -3390,6 +3391,21 @@ pub struct SettleUnstake<'info> {
 
     #[account(
         mut,
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump = bull_registry.bump,
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
+
+    /// Proof buffer is only required for Bull removal.
+    #[account(mut)]
+    pub bull_proof_buffer: Option<Box<Account<'info, BullProofBuffer>>>,
+
+    /// CHECK: Receives the proof-buffer rent refund when a buffer is consumed.
+    #[account(mut)]
+    pub refund_recipient: Option<AccountInfo<'info>>,
+
+    #[account(
+        mut,
         close = owner,
         seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
         bump = position.bump,
@@ -3675,6 +3691,7 @@ pub struct CloseBullProof<'info> {
     pub clock: Sysvar<'info, Clock>,
 }
 
+#[cfg(feature = "test-fixtures")]
 #[derive(Accounts)]
 pub struct BenchmarkSparseTree<'info> {
     #[account(mut)]
@@ -3694,6 +3711,7 @@ pub struct BenchmarkSparseTree<'info> {
     pub bull_registry: Box<Account<'info, BullRegistry>>,
 }
 
+#[cfg(feature = "test-fixtures")]
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug)]
 struct SparseTreeBenchmarkSnapshot {
     pub owner_tree_root: [u8; 32],
@@ -3706,6 +3724,7 @@ struct SparseTreeBenchmarkSnapshot {
 // Events
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "test-fixtures")]
 #[event]
 pub struct SparseTreeBenchmarked {
     pub owner_tree_root: [u8; 32],
@@ -4989,6 +5008,29 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
     let position = &mut ctx.accounts.position;
     let pending_randomness = &mut ctx.accounts.pending_randomness;
 
+    let payload = if let Some(buffer) = ctx.accounts.bull_proof_buffer.as_ref() {
+        require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
+        require!(!buffer.consumed, RodeoError::BullProofBufferAlreadyConsumed);
+        require!(
+            buffer.action_type == ActionType::Unstake,
+            RodeoError::BullProofBufferIncomplete
+        );
+        require!(
+            buffer.position == position_key,
+            RodeoError::BullProofBufferWrongPosition
+        );
+        if let Some(ref refund) = ctx.accounts.refund_recipient {
+            require_keys_eq!(
+                buffer.refund_recipient,
+                refund.key(),
+                RodeoError::BullProofBufferWrongProver
+            );
+        }
+        Some(bull_registry::verify_bull_proof_payload(&buffer.payload)?)
+    } else {
+        None
+    };
+
     // Final reward synchronization before disposition.
     sync_cowboy_rewards(position, &mut ctx.accounts.reward_state)?;
     sync_bull_rewards(
@@ -5201,6 +5243,59 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
                 position.buck_power as u64,
             )?;
 
+            // Remove the Bull from the current BullRegistry.
+            let p = payload
+                .as_ref()
+                .ok_or(RodeoError::BullProofBufferIncomplete)?;
+            let current_owner = p
+                .current_owner
+                .as_ref()
+                .ok_or(RodeoError::BullProofBufferIncomplete)?;
+            let remove_bull = p
+                .remove_bull
+                .as_ref()
+                .ok_or(RodeoError::BullProofBufferIncomplete)?;
+            bull_registry::verify_owner(
+                &ctx.accounts.bull_registry.owner_tree_root,
+                &position.owner,
+                current_owner,
+            )?;
+            bull_registry::verify_bull(
+                &current_owner.leaf.bull_tree_root,
+                &position_key,
+                remove_bull,
+            )?;
+            let canonical_bull_leaf = BullLeaf {
+                position: position_key,
+                position_id: position.position_id,
+                owner: position.owner,
+                buck_power: position.buck_power,
+                reveal_config_version: position.reveal_config_version,
+            };
+            require!(
+                remove_bull.leaf == canonical_bull_leaf,
+                RodeoError::BullProofBufferIncomplete
+            );
+            let old_root = ctx.accounts.bull_registry.owner_tree_root;
+            let old_version = ctx.accounts.bull_registry.registry_version;
+            bull_registry::remove_bull_from_registry(
+                &mut ctx.accounts.bull_registry,
+                &canonical_bull_leaf,
+                current_owner,
+                remove_bull,
+            )?;
+            emit!(BullRegistryTransition {
+                old_root,
+                new_root: ctx.accounts.bull_registry.owner_tree_root,
+                old_version,
+                new_version: ctx.accounts.bull_registry.registry_version,
+                operation: BullRegistryOperation::Remove,
+                bull_position: position_key,
+                position_id: position.position_id,
+                owner: position.owner,
+                buck_power: position.buck_power,
+            });
+
             AnsemUnstakeFate::ToOwner
         }
         Role::Unassigned => {
@@ -5372,6 +5467,13 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
         settled_at: now,
         config_version_snapshot: pending_randomness.config_version_snapshot,
     });
+
+    if let Some(buffer) = ctx.accounts.bull_proof_buffer.as_deref_mut() {
+        buffer.consumed = true;
+        if let Some(refund) = ctx.accounts.refund_recipient.as_ref() {
+            buffer.close(refund.to_account_info())?;
+        }
+    }
 
     Ok(())
 }
