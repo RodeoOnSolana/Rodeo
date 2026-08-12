@@ -128,7 +128,7 @@ pub const BULL_REGISTRY_BULL_TREE_DEPTH: u32 = 20;
 // each path up to 20 siblings, plus leaf structs.  16 KiB is comfortably
 // above the v1 benchmarked worst case and still well within Solana's
 // 10 MiB per-account data limit.
-pub const BULL_PROOF_BUFFER_SCHEMA_VERSION: u8 = 1;
+pub const BULL_PROOF_BUFFER_SCHEMA_VERSION: u8 = 2;
 pub const BULL_PROOF_BUFFER_MAX_PAYLOAD: usize = 16_384;
 
 // Compile-time guards for the production-safe default configuration. These are

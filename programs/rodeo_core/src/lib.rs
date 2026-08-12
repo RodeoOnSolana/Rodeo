@@ -8,6 +8,7 @@ pub mod constants;
 pub mod math;
 pub mod probability;
 pub mod receipt;
+pub mod sparse_tree;
 pub mod state;
 
 use bull_registry::*;

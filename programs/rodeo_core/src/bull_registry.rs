@@ -3,19 +3,40 @@ use anchor_lang::solana_program::hash::hashv;
 
 use crate::constants::*;
 use crate::math;
+use crate::sparse_tree::{
+    hash_node, recompute_root_after_replace, verify_with_prefix, CompressedSparseProof,
+    SparseMerkleNode, SPARSE_TREE_DEPTH,
+};
 use crate::RodeoError;
+
+// ---------------------------------------------------------------------------
+// Deterministic full-key sparse Merkle-sum tree invariants (BullRegistry v2).
+//
+// Owner tree:
+//   - Sparse 256-level binary tree keyed by the full 32-byte owner Pubkey.
+//   - Bit i of the owner Pubkey selects left (0) or right (1) at level i.
+//   - An owner can only be stored at its canonical key path; there is exactly
+//     one legal location for any wallet.
+//   - An empty leaf is the canonical default OwnerLeaf.  Non-default siblings
+//     in a proof are compressed into a bitmap + sibling list.
+//   - Non-membership for an owner is a proof that the canonical path is empty.
+//   - The tree root is a Merkle-sum root: each internal node commits to the
+//     total Bull count and total buck power of its subtree.
+//
+// Bull tree (per owner):
+//   - Sparse 256-level binary tree keyed by the full Position Pubkey.
+//   - Same compression and default-node semantics as the owner tree.
+//   - Each Bull leaf commits to canonical reveal state.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Domain-separated hash prefixes for the two-level Merkle-sum tree.
 // ---------------------------------------------------------------------------
 
-const PREFIX_BULL_OWNER_LEAF: &[u8] = b"rodeo_v1_bull_owner_leaf";
-const PREFIX_BULL_LEAF: &[u8] = b"rodeo_v1_bull_leaf";
-const PREFIX_BULL_OWNER_NODE: &[u8] = b"rodeo_v1_bull_owner_node";
-const PREFIX_BULL_NODE: &[u8] = b"rodeo_v1_bull_node";
-
-const EMPTY_LEAF_HASH_OWNER: &[u8] = b"rodeo_v1_owner_empty";
-const EMPTY_LEAF_HASH_BULL: &[u8] = b"rodeo_v1_bull_empty";
+const PREFIX_BULL_OWNER_LEAF: &[u8] = b"rodeo_v2_bull_owner_leaf";
+const PREFIX_BULL_LEAF: &[u8] = b"rodeo_v2_bull_leaf";
+const PREFIX_BULL_OWNER_NODE: &[u8] = b"rodeo_v2_bull_owner_node";
+const PREFIX_BULL_NODE: &[u8] = b"rodeo_v2_bull_node";
 
 // ---------------------------------------------------------------------------
 // Canonical leaf representations.  Serialization is what the Merkle hashes bind.
@@ -62,6 +83,18 @@ impl OwnerLeaf {
     pub fn is_empty(&self) -> bool {
         self.owner == Pubkey::default()
     }
+
+    pub fn to_node(&self) -> SparseMerkleNode {
+        SparseMerkleNode {
+            hash: if self.is_empty() {
+                default_owner_leaf_hash()
+            } else {
+                self.hash()
+            },
+            count: self.active_bull_count,
+            power: self.total_buck_power,
+        }
+    }
 }
 
 impl BullLeaf {
@@ -90,10 +123,22 @@ impl BullLeaf {
     pub fn is_empty(&self) -> bool {
         self.position == Pubkey::default()
     }
+
+    pub fn to_node(&self) -> SparseMerkleNode {
+        SparseMerkleNode {
+            hash: if self.is_empty() {
+                default_bull_leaf_hash()
+            } else {
+                self.hash()
+            },
+            count: if self.is_empty() { 0 } else { 1 },
+            power: self.buck_power as u64,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Default empty leaves.  These are the canonical default values for a zero slot.
+// Default empty leaves / roots.
 // ---------------------------------------------------------------------------
 
 pub fn default_bull_leaf_hash() -> [u8; 32] {
@@ -104,362 +149,116 @@ pub fn default_owner_leaf_hash() -> [u8; 32] {
     OwnerLeaf::empty().hash()
 }
 
-fn empty_tree_root(depth: u32, leaf_hash: [u8; 32], prefix: &[u8]) -> Result<[u8; 32]> {
-    let mut current_hash = leaf_hash;
-    let mut current_power = 0u64;
-    for _ in 0..depth {
-        let (parent_hash, _) = node_hash(
-            prefix,
-            &current_hash,
-            current_power,
-            &current_hash,
-            current_power,
-        )?;
-        current_hash = parent_hash;
-    }
-    Ok(current_hash)
+fn default_bull_leaf_node() -> SparseMerkleNode {
+    BullLeaf::empty().to_node()
+}
+
+fn default_owner_leaf_node() -> SparseMerkleNode {
+    OwnerLeaf::empty().to_node()
 }
 
 pub fn empty_bull_tree_root() -> [u8; 32] {
-    empty_tree_root(
-        BULL_REGISTRY_BULL_TREE_DEPTH,
-        default_bull_leaf_hash(),
-        PREFIX_BULL_NODE,
-    )
-    .expect("empty bull tree root is well-formed")
+    crate::sparse_tree::compute_default_empty_nodes(&default_bull_leaf_node(), PREFIX_BULL_NODE)
+        .unwrap()
+        .last()
+        .unwrap()
+        .hash
 }
 
 pub fn empty_owner_tree_root() -> [u8; 32] {
-    empty_tree_root(
-        BULL_REGISTRY_OWNER_TREE_DEPTH,
-        default_owner_leaf_hash(),
+    crate::sparse_tree::compute_default_empty_nodes(
+        &default_owner_leaf_node(),
         PREFIX_BULL_OWNER_NODE,
     )
-    .expect("empty owner tree root is well-formed")
+    .unwrap()
+    .last()
+    .unwrap()
+    .hash
 }
 
 // ---------------------------------------------------------------------------
-// Internal node hash for the Merkle-sum tree.
-// The hash binds the child hashes and their total powers.
+// Compressed proof types for the BullProofBuffer.
 // ---------------------------------------------------------------------------
-
-fn node_hash(
-    prefix: &[u8],
-    left_hash: &[u8; 32],
-    left_power: u64,
-    right_hash: &[u8; 32],
-    right_power: u64,
-) -> Result<([u8; 32], u64)> {
-    let total_power = math::checked_add_u64(left_power, right_power)?;
-    let hash = hashv(&[
-        prefix,
-        left_hash,
-        &left_power.to_le_bytes(),
-        right_hash,
-        &right_power.to_le_bytes(),
-    ])
-    .to_bytes();
-    Ok((hash, total_power))
-}
-
-fn owner_node_hash(
-    left_hash: &[u8; 32],
-    left_power: u64,
-    right_hash: &[u8; 32],
-    right_power: u64,
-) -> Result<([u8; 32], u64)> {
-    node_hash(
-        PREFIX_BULL_OWNER_NODE,
-        left_hash,
-        left_power,
-        right_hash,
-        right_power,
-    )
-}
-
-fn bull_node_hash(
-    left_hash: &[u8; 32],
-    left_power: u64,
-    right_hash: &[u8; 32],
-    right_power: u64,
-) -> Result<([u8; 32], u64)> {
-    node_hash(
-        PREFIX_BULL_NODE,
-        left_hash,
-        left_power,
-        right_hash,
-        right_power,
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Sibling entry in a Merkle path.
-// `is_right` means the sibling is the RIGHT child, so the current path is the LEFT child.
-// ---------------------------------------------------------------------------
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MerkleSibling {
-    pub hash: [u8; 32],
-    pub power: u64,
-    pub is_right: bool, // true if sibling is the right child
-}
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
-pub struct OwnerTreeProof {
-    pub leaf_index: u32,
+pub struct CompressedOwnerProof {
     pub leaf: OwnerLeaf,
-    pub siblings: Vec<MerkleSibling>,
+    pub proof: CompressedSparseProof,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
-pub struct BullTreeProof {
-    pub leaf_index: u32,
+pub struct CompressedBullProof {
     pub leaf: BullLeaf,
-    pub siblings: Vec<MerkleSibling>,
+    pub proof: CompressedSparseProof,
 }
 
-/// Ordered-tree non-membership proof for an owner pubkey.
-/// The `empty_proof` is an OwnerTreeProof for the empty leaf at the
-/// insertion point.  `left_proof` and `right_proof` are the occupied
-/// leaves immediately before and after that empty slot, when they exist,
-/// and their owner pubkeys bracket the claimed non-member.
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
-pub struct OwnerNonMembershipProof {
-    pub empty_proof: OwnerTreeProof,
-    pub left_proof: Option<OwnerTreeProof>,
-    pub right_proof: Option<OwnerTreeProof>,
-}
+// ---------------------------------------------------------------------------
+// Section bitmap flags for the V2 BullProofBuffer payload.
+// ---------------------------------------------------------------------------
 
-/// Bit flags for the optional sections in a V1 BullProofBuffer payload.
-/// Historical sections bind to PendingRandomness snapshot root/version.
-/// Current sections bind to the live BullRegistry current root/version.
-pub const SECTION_VICTIM_MEMBER: u8 = 0b0000_0001;
-pub const SECTION_VICTIM_NON_MEMBER: u8 = 0b0000_0010;
-pub const SECTION_SELECTED_OWNER: u8 = 0b0000_0100;
-pub const SECTION_SELECTED_BULL: u8 = 0b0000_1000;
-pub const SECTION_CURRENT_OWNER: u8 = 0b0001_0000;
-pub const SECTION_CURRENT_BULL_EMPTY: u8 = 0b0010_0000;
+pub const BULL_PROOF_PAYLOAD_SCHEMA_VERSION: u8 = 2;
 
-/// Canonical V1 payload.  Each section is optional and must match the
-/// declared `section_bitmap`.  Unknown `schema_version` values are rejected.
+pub const SECTION_VICTIM_OWNER: u8 = 0b0000_0001;
+pub const SECTION_SELECTED_OWNER: u8 = 0b0000_0010;
+pub const SECTION_SELECTED_BULL: u8 = 0b0000_0100;
+pub const SECTION_CURRENT_OWNER: u8 = 0b0000_1000;
+pub const SECTION_CURRENT_BULL: u8 = 0b0001_0000;
+pub const SECTION_REMOVE_BULL: u8 = 0b0010_0000;
+
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub struct BullProofPayloadV1 {
     pub schema_version: u8,
     pub section_bitmap: u8,
-    pub victim_member: Option<OwnerTreeProof>,
-    pub victim_non_member: Option<OwnerNonMembershipProof>,
-    pub selected_owner: Option<OwnerTreeProof>,
-    pub selected_bull: Option<BullTreeProof>,
-    pub current_owner: Option<OwnerTreeProof>,
-    pub current_bull_empty: Option<BullTreeProof>,
+    pub victim_owner: Option<CompressedOwnerProof>,
+    pub selected_owner: Option<CompressedOwnerProof>,
+    pub selected_bull: Option<CompressedBullProof>,
+    pub current_owner: Option<CompressedOwnerProof>,
+    pub current_bull: Option<CompressedBullProof>,
+    pub remove_bull: Option<CompressedBullProof>,
 }
 
-// ---------------------------------------------------------------------------
-// Proof verification.  Returns the leaf's in-order prefix (cumulative power before it).
-// ---------------------------------------------------------------------------
-
-pub fn verify_owner_tree_proof(expected_root: &[u8; 32], proof: &OwnerTreeProof) -> Result<u64> {
-    require_eq!(
-        proof.siblings.len(),
-        BULL_REGISTRY_OWNER_TREE_DEPTH as usize,
-        RodeoError::BullRegistryMalformedProof
-    );
-    require!(
-        proof.leaf_index < (1u32 << BULL_REGISTRY_OWNER_TREE_DEPTH),
-        RodeoError::BullRegistryMalformedProof
-    );
-
-    let mut current_hash = if proof.leaf.is_empty() {
-        default_owner_leaf_hash()
-    } else {
-        proof.leaf.hash()
-    };
-    let mut current_power = if proof.leaf.is_empty() {
-        0u64
-    } else {
-        proof.leaf.total_buck_power
-    };
-    let mut prefix = 0u64;
-
-    for (level, sibling) in proof.siblings.iter().enumerate() {
-        let (parent_hash, parent_power) = if sibling.is_right {
-            // current is left child
-            owner_node_hash(&current_hash, current_power, &sibling.hash, sibling.power)?
-        } else {
-            // current is right child: all leaves in the left sibling come before us
-            prefix = math::checked_add_u64(prefix, sibling.power)?;
-            owner_node_hash(&sibling.hash, sibling.power, &current_hash, current_power)?
-        };
-        current_hash = parent_hash;
-        current_power = parent_power;
-
-        let max_index = 1u32 << (level + 1);
-        if proof.leaf_index >= max_index {
-            return Err(error!(RodeoError::BullRegistryMalformedProof));
-        }
-    }
-
-    if current_hash != *expected_root {
-        return Err(error!(RodeoError::BullRegistryInvalidRoot));
-    }
-    Ok(prefix)
-}
-
-pub fn verify_bull_tree_proof(expected_root: &[u8; 32], proof: &BullTreeProof) -> Result<u64> {
-    require_eq!(
-        proof.siblings.len(),
-        BULL_REGISTRY_BULL_TREE_DEPTH as usize,
-        RodeoError::BullRegistryMalformedProof
-    );
-    require!(
-        proof.leaf_index < (1u32 << BULL_REGISTRY_BULL_TREE_DEPTH),
-        RodeoError::BullRegistryMalformedProof
-    );
-
-    let mut current_hash = if proof.leaf.is_empty() {
-        default_bull_leaf_hash()
-    } else {
-        proof.leaf.hash()
-    };
-    let mut current_power = if proof.leaf.is_empty() {
-        0u64
-    } else {
-        proof.leaf.buck_power as u64
-    };
-    let mut prefix = 0u64;
-
-    for sibling in proof.siblings.iter() {
-        let (parent_hash, parent_power) = if sibling.is_right {
-            bull_node_hash(&current_hash, current_power, &sibling.hash, sibling.power)?
-        } else {
-            prefix = math::checked_add_u64(prefix, sibling.power)?;
-            bull_node_hash(&sibling.hash, sibling.power, &current_hash, current_power)?
-        };
-        current_hash = parent_hash;
-        current_power = parent_power;
-    }
-
-    if current_hash != *expected_root {
-        return Err(error!(RodeoError::BullRegistryInvalidRoot));
-    }
-    Ok(prefix)
-}
-
-/// Verifies that `owner` is not a member of the owner tree rooted at
-/// `expected_root`.  The empty leaf at the claimed insertion point must be
-/// bracketed by the given left/right occupied neighbors, and their owner
-/// pubkeys must be lexicographically smaller/larger than `owner`.
-pub fn verify_owner_non_membership(
-    expected_root: &[u8; 32],
-    owner: &Pubkey,
-    proof: &OwnerNonMembershipProof,
-) -> Result<()> {
-    require!(
-        proof.empty_proof.leaf.is_empty(),
-        RodeoError::BullRegistrySlotOccupied
-    );
-    let _prefix = verify_owner_tree_proof(expected_root, &proof.empty_proof)?;
-
-    if let Some(left) = proof.left_proof.as_ref() {
-        require!(
-            left.leaf_index.wrapping_add(1) == proof.empty_proof.leaf_index,
-            RodeoError::BullRegistryMalformedProof
-        );
-        require!(!left.leaf.is_empty(), RodeoError::BullRegistrySlotEmpty);
-        let _ = verify_owner_tree_proof(expected_root, left)?;
-        require!(
-            left.leaf.owner.as_ref() < owner.as_ref(),
-            RodeoError::BullRegistryMalformedProof
-        );
-    } else {
-        require_eq!(
-            proof.empty_proof.leaf_index,
-            0,
-            RodeoError::BullRegistryMalformedProof
-        );
-    }
-
-    if let Some(right) = proof.right_proof.as_ref() {
-        require!(
-            right.leaf_index == proof.empty_proof.leaf_index.wrapping_add(1),
-            RodeoError::BullRegistryMalformedProof
-        );
-        require!(!right.leaf.is_empty(), RodeoError::BullRegistrySlotEmpty);
-        let _ = verify_owner_tree_proof(expected_root, right)?;
-        require!(
-            owner.as_ref() < right.leaf.owner.as_ref(),
-            RodeoError::BullRegistryMalformedProof
-        );
-    } else {
-        require!(
-            proof.empty_proof.leaf_index == ((1u32 << BULL_REGISTRY_OWNER_TREE_DEPTH) - 1),
-            RodeoError::BullRegistryMalformedProof
-        );
-    }
-
-    Ok(())
-}
-
-/// Deserialize and structurally validate a BullProofBuffer payload.
-/// Does NOT verify cryptographic Merkle bindings; the caller must still
-/// check each section against the appropriate historical/current roots.
 pub fn verify_bull_proof_payload(bytes: &[u8]) -> Result<BullProofPayloadV1> {
     let payload = BullProofPayloadV1::try_from_slice(bytes)
         .map_err(|_| RodeoError::BullProofBufferIncomplete)?;
 
     require_eq!(
         payload.schema_version,
-        BULL_PROOF_BUFFER_SCHEMA_VERSION,
+        BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
         RodeoError::BullProofBufferIncomplete
     );
-
     require!(
         payload.section_bitmap & !0b0011_1111 == 0,
         RodeoError::BullProofBufferIncomplete
     );
 
-    let victim_member_set = payload.section_bitmap & SECTION_VICTIM_MEMBER != 0;
-    let victim_non_member_set = payload.section_bitmap & SECTION_VICTIM_NON_MEMBER != 0;
-    require!(
-        !(victim_member_set && victim_non_member_set),
-        RodeoError::BullProofBufferIncomplete
-    );
     require_eq!(
-        payload.victim_member.is_some(),
-        victim_member_set,
+        payload.victim_owner.is_some(),
+        payload.section_bitmap & SECTION_VICTIM_OWNER != 0,
         RodeoError::BullProofBufferIncomplete
     );
-    require_eq!(
-        payload.victim_non_member.is_some(),
-        victim_non_member_set,
-        RodeoError::BullProofBufferIncomplete
-    );
-
-    let selected_owner_set = payload.section_bitmap & SECTION_SELECTED_OWNER != 0;
     require_eq!(
         payload.selected_owner.is_some(),
-        selected_owner_set,
+        payload.section_bitmap & SECTION_SELECTED_OWNER != 0,
         RodeoError::BullProofBufferIncomplete
     );
-
-    let selected_bull_set = payload.section_bitmap & SECTION_SELECTED_BULL != 0;
     require_eq!(
         payload.selected_bull.is_some(),
-        selected_bull_set,
+        payload.section_bitmap & SECTION_SELECTED_BULL != 0,
         RodeoError::BullProofBufferIncomplete
     );
-
-    let current_owner_set = payload.section_bitmap & SECTION_CURRENT_OWNER != 0;
     require_eq!(
         payload.current_owner.is_some(),
-        current_owner_set,
+        payload.section_bitmap & SECTION_CURRENT_OWNER != 0,
         RodeoError::BullProofBufferIncomplete
     );
-
-    let current_bull_empty_set = payload.section_bitmap & SECTION_CURRENT_BULL_EMPTY != 0;
     require_eq!(
-        payload.current_bull_empty.is_some(),
-        current_bull_empty_set,
+        payload.current_bull.is_some(),
+        payload.section_bitmap & SECTION_CURRENT_BULL != 0,
+        RodeoError::BullProofBufferIncomplete
+    );
+    require_eq!(
+        payload.remove_bull.is_some(),
+        payload.section_bitmap & SECTION_REMOVE_BULL != 0,
         RodeoError::BullProofBufferIncomplete
     );
 
@@ -467,94 +266,68 @@ pub fn verify_bull_proof_payload(bytes: &[u8]) -> Result<BullProofPayloadV1> {
 }
 
 // ---------------------------------------------------------------------------
-// Root recomputation after a leaf replacement.
-// `new_leaf` may be the empty/default leaf (for removals).
-// Returns the new root and the new tree total power.
+// Owner/Bull verification helpers.
 // ---------------------------------------------------------------------------
 
-fn recompute_root_with_replaced_leaf(
-    siblings: &[MerkleSibling],
-    leaf_index: u32,
-    new_leaf_hash: &[u8; 32],
-    new_leaf_power: u64,
-    is_owner: bool,
-) -> Result<([u8; 32], u64)> {
-    require!(
-        leaf_index < (1u32 << siblings.len()),
-        RodeoError::BullRegistryMalformedProof
-    );
-
-    let mut current_hash = *new_leaf_hash;
-    let mut current_power = new_leaf_power;
-
-    for sibling in siblings.iter() {
-        let (parent_hash, parent_power) = if sibling.is_right {
-            if is_owner {
-                owner_node_hash(&current_hash, current_power, &sibling.hash, sibling.power)?
-            } else {
-                bull_node_hash(&current_hash, current_power, &sibling.hash, sibling.power)?
-            }
-        } else if is_owner {
-            owner_node_hash(&sibling.hash, sibling.power, &current_hash, current_power)?
-        } else {
-            bull_node_hash(&sibling.hash, sibling.power, &current_hash, current_power)?
-        };
-        current_hash = parent_hash;
-        current_power = parent_power;
+pub fn verify_owner(
+    expected_root: &[u8; 32],
+    owner: &Pubkey,
+    proof: &CompressedOwnerProof,
+) -> Result<(u64, u64, u64)> {
+    let leaf = proof.leaf.to_node();
+    if !proof.leaf.is_empty() {
+        require_keys_eq!(
+            proof.leaf.owner,
+            *owner,
+            RodeoError::BullRegistryOwnerMismatch
+        );
     }
-
-    Ok((current_hash, current_power))
+    let (root, prefix) = verify_with_prefix(
+        expected_root,
+        &owner.to_bytes(),
+        &proof.proof,
+        &leaf,
+        PREFIX_BULL_OWNER_NODE,
+        &default_owner_leaf_node(),
+    )?;
+    Ok((root.count, root.power, prefix))
 }
 
-pub fn recompute_owner_root_after_replace(
-    proof: &OwnerTreeProof,
-    new_leaf: &OwnerLeaf,
-) -> Result<([u8; 32], u64)> {
-    let new_hash = new_leaf.hash();
-    let new_power = if new_leaf.is_empty() {
-        0u64
-    } else {
-        new_leaf.total_buck_power
-    };
-    recompute_root_with_replaced_leaf(
-        &proof.siblings,
-        proof.leaf_index,
-        &new_hash,
-        new_power,
-        true,
-    )
-}
-
-pub fn recompute_bull_root_after_replace(
-    proof: &BullTreeProof,
-    new_leaf: &BullLeaf,
-) -> Result<([u8; 32], u64)> {
-    let new_hash = new_leaf.hash();
-    let new_power = if new_leaf.is_empty() {
-        0u64
-    } else {
-        new_leaf.buck_power as u64
-    };
-    recompute_root_with_replaced_leaf(
-        &proof.siblings,
-        proof.leaf_index,
-        &new_hash,
-        new_power,
-        false,
-    )
+pub fn verify_bull(
+    expected_bull_root: &[u8; 32],
+    position: &Pubkey,
+    proof: &CompressedBullProof,
+) -> Result<(u64, u64, u64)> {
+    let leaf = proof.leaf.to_node();
+    if !proof.leaf.is_empty() {
+        require_keys_eq!(
+            proof.leaf.position,
+            *position,
+            RodeoError::BullRegistryMalformedProof
+        );
+    }
+    let (root, prefix) = verify_with_prefix(
+        expected_bull_root,
+        &position.to_bytes(),
+        &proof.proof,
+        &leaf,
+        PREFIX_BULL_NODE,
+        &default_bull_leaf_node(),
+    )?;
+    Ok((root.count, root.power, prefix))
 }
 
 // ---------------------------------------------------------------------------
-// Convenience helpers for add/remove.
+// Owner and Bull leaf mutations.
 // ---------------------------------------------------------------------------
 
 pub fn add_bull_to_owner_leaf(
     current_owner_leaf: &OwnerLeaf,
     bull_leaf: &BullLeaf,
-    empty_leaf_proof: &BullTreeProof,
+    empty_bull_proof: &CompressedBullProof,
 ) -> Result<OwnerLeaf> {
     require!(
-        empty_leaf_proof.leaf.is_empty(),
+        empty_bull_proof.leaf.is_empty(),
         RodeoError::BullRegistrySlotOccupied
     );
     require!(
@@ -562,15 +335,21 @@ pub fn add_bull_to_owner_leaf(
         RodeoError::BullRegistryOwnerMismatch
     );
 
-    verify_bull_tree_proof(&current_owner_leaf.bull_tree_root, empty_leaf_proof)?;
-    let (new_bull_root, _) = recompute_bull_root_after_replace(empty_leaf_proof, bull_leaf)?;
+    let empty_leaf_node = empty_bull_proof.leaf.to_node();
+    let (new_bull_root, _) = recompute_root_after_replace(
+        &bull_leaf.position.to_bytes(),
+        &empty_bull_proof.proof,
+        &bull_leaf.to_node(),
+        PREFIX_BULL_NODE,
+        &default_bull_leaf_node(),
+    )?;
 
     if current_owner_leaf.is_empty() {
         Ok(OwnerLeaf {
             owner: bull_leaf.owner,
             active_bull_count: 1,
             total_buck_power: bull_leaf.buck_power as u64,
-            bull_tree_root: new_bull_root,
+            bull_tree_root: new_bull_root.hash,
         })
     } else {
         Ok(OwnerLeaf {
@@ -580,14 +359,14 @@ pub fn add_bull_to_owner_leaf(
                 current_owner_leaf.total_buck_power,
                 bull_leaf.buck_power as u64,
             )?,
-            bull_tree_root: new_bull_root,
+            bull_tree_root: new_bull_root.hash,
         })
     }
 }
 
 pub fn remove_bull_from_owner_leaf(
     current_owner_leaf: &OwnerLeaf,
-    bull_proof: &BullTreeProof,
+    bull_proof: &CompressedBullProof,
 ) -> Result<OwnerLeaf> {
     require!(
         !bull_proof.leaf.is_empty(),
@@ -598,8 +377,13 @@ pub fn remove_bull_from_owner_leaf(
         RodeoError::BullRegistryOwnerMismatch
     );
 
-    verify_bull_tree_proof(&current_owner_leaf.bull_tree_root, bull_proof)?;
-    let (new_bull_root, _) = recompute_bull_root_after_replace(bull_proof, &BullLeaf::empty())?;
+    let (new_bull_root, _) = recompute_root_after_replace(
+        &bull_proof.leaf.position.to_bytes(),
+        &bull_proof.proof,
+        &BullLeaf::empty().to_node(),
+        PREFIX_BULL_NODE,
+        &default_bull_leaf_node(),
+    )?;
 
     let new_count = math::checked_sub_u64(current_owner_leaf.active_bull_count, 1)?;
     let new_power = math::checked_sub_u64(
@@ -614,29 +398,102 @@ pub fn remove_bull_from_owner_leaf(
             owner: current_owner_leaf.owner,
             active_bull_count: new_count,
             total_buck_power: new_power,
-            bull_tree_root: new_bull_root,
+            bull_tree_root: new_bull_root.hash,
         })
     }
 }
 
 // ---------------------------------------------------------------------------
-// Selection helpers: derive the weighted target and check a leaf contains it.
+// Global BullRegistry mutations.
 // ---------------------------------------------------------------------------
 
-pub fn skip_victim_interval(
-    safe_draw: u64,
-    victim_total_power: u64,
-    victim_prefix: u64,
-) -> Result<u64> {
-    if safe_draw < victim_prefix {
-        Ok(safe_draw)
+pub fn apply_owner_leaf_update(
+    current_root: &[u8; 32],
+    owner: &Pubkey,
+    owner_proof: &CompressedOwnerProof,
+    new_owner_leaf: &OwnerLeaf,
+) -> Result<[u8; 32]> {
+    let new_node = new_owner_leaf.to_node();
+    let current = owner_proof.leaf.to_node();
+
+    // For an add of a previously absent owner the current leaf must be empty;
+    // for an update the current leaf must match the supplied owner.
+    if owner_proof.leaf.is_empty() {
+        require_eq!(
+            new_owner_leaf.owner,
+            *owner,
+            RodeoError::BullRegistryOwnerMismatch
+        );
     } else {
-        math::checked_add_u64(safe_draw, victim_total_power)
+        require_keys_eq!(
+            owner_proof.leaf.owner,
+            *owner,
+            RodeoError::BullRegistryOwnerMismatch
+        );
     }
+
+    let (recomputed, _) = recompute_root_after_replace(
+        &owner.to_bytes(),
+        &owner_proof.proof,
+        &new_node,
+        PREFIX_BULL_OWNER_NODE,
+        &default_owner_leaf_node(),
+    )?;
+
+    if current_root != &[0u8; 32] {
+        // The supplied proof must reconstruct the current canonical root.
+        let (check_root, _) = recompute_root_after_replace(
+            &owner.to_bytes(),
+            &owner_proof.proof,
+            &current,
+            PREFIX_BULL_OWNER_NODE,
+            &default_owner_leaf_node(),
+        )?;
+        require!(
+            check_root.hash == *current_root,
+            RodeoError::BullRegistryInvalidRoot
+        );
+    }
+
+    Ok(recomputed.hash)
 }
 
-pub fn leaf_contains_target(prefix: u64, leaf_power: u64, target: u64) -> bool {
-    let start = prefix;
-    let end = prefix.saturating_add(leaf_power);
-    start <= target && target < end
+pub fn add_bull_to_registry(
+    registry: &mut crate::state::BullRegistry,
+    bull_leaf: &BullLeaf,
+    owner_proof: &CompressedOwnerProof,
+    bull_proof: &CompressedBullProof,
+) -> Result<()> {
+    let new_owner_leaf = add_bull_to_owner_leaf(&owner_proof.leaf, bull_leaf, bull_proof)?;
+    registry.owner_tree_root = apply_owner_leaf_update(
+        &registry.owner_tree_root,
+        &bull_leaf.owner,
+        owner_proof,
+        &new_owner_leaf,
+    )?;
+    registry.total_bull_count = math::checked_add_u64(registry.total_bull_count, 1)?;
+    registry.total_buck_power =
+        math::checked_add_u64(registry.total_buck_power, bull_leaf.buck_power as u64)?;
+    registry.registry_version = math::checked_add_u64(registry.registry_version, 1)?;
+    Ok(())
+}
+
+pub fn remove_bull_from_registry(
+    registry: &mut crate::state::BullRegistry,
+    bull_leaf: &BullLeaf,
+    owner_proof: &CompressedOwnerProof,
+    bull_proof: &CompressedBullProof,
+) -> Result<()> {
+    let new_owner_leaf = remove_bull_from_owner_leaf(&owner_proof.leaf, bull_proof)?;
+    registry.owner_tree_root = apply_owner_leaf_update(
+        &registry.owner_tree_root,
+        &bull_leaf.owner,
+        owner_proof,
+        &new_owner_leaf,
+    )?;
+    registry.total_bull_count = math::checked_sub_u64(registry.total_bull_count, 1)?;
+    registry.total_buck_power =
+        math::checked_sub_u64(registry.total_buck_power, bull_leaf.buck_power as u64)?;
+    registry.registry_version = math::checked_add_u64(registry.registry_version, 1)?;
+    Ok(())
 }
