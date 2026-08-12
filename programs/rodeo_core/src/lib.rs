@@ -232,7 +232,7 @@ pub mod rodeo_core {
             &account_infos,
             &[&collection_seeds, &authority_seeds],
         )
-        .map_err(Into::into)?;
+        .map_err(|e: ProgramError| Into::<Error>::into(e))?;
 
         emit!(ProtocolInitialized {
             global_config: global_config.key(),
@@ -378,7 +378,7 @@ pub mod rodeo_core {
             &funder_account_infos,
             &[&funder_seeds],
         )
-        .map_err(Into::into)?;
+        .map_err(|e: ProgramError| Into::<Error>::into(e))?;
 
         // Initialize the reveal PendingRandomness account.
         let pending_randomness = &mut ctx.accounts.pending_randomness;
@@ -2736,6 +2736,7 @@ pub struct SettleReveal<'info> {
     #[account(address = mpl_core::ID)]
     pub mpl_core_program: UncheckedAccount<'info>,
 
+    pub system_program: Program<'info, System>,
     pub clock: Sysvar<'info, Clock>,
 }
 
@@ -4141,7 +4142,7 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
             &funder_seeds,
         ],
     )
-    .map_err(Into::into)?;
+    .map_err(|e: ProgramError| Into::<Error>::into(e))?;
 
     position.receipt_asset = receipt_asset;
 
@@ -4523,7 +4524,7 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
         &burn_account_infos,
         &[&receipt_authority_seeds, &funder_seeds],
     )
-    .map_err(Into::into)?;
+    .map_err(|e: ProgramError| Into::<Error>::into(e))?;
 
     let funder_lamports = ctx.accounts.receipt_funder.to_account_info().lamports();
     if funder_lamports > 0 {
