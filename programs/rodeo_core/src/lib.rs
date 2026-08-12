@@ -2644,8 +2644,45 @@ pub struct SettleReveal<'info> {
     pub protocol_config: Box<Account<'info, ProtocolConfig>>,
 
     /// CHECK: Account receives reclaimed rent and is validated against the position owner.
+    /// Also used as the embedded Core asset owner for the PositionReceipt.
     #[account(mut, constraint = owner.key() == position.owner @ RodeoError::InvalidOwner)]
     pub owner: AccountInfo<'info>,
+
+    /// CHECK: The new Core Asset account at the PositionReceipt PDA.
+    #[account(
+        mut,
+        seeds = [SEED_POSITION_RECEIPT, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_asset: UncheckedAccount<'info>,
+
+    /// CHECK: The official Rodeo receipt Collection this asset is created into.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA used as the Core plugin authority
+    /// and asset-creation authority.
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    /// CHECK: The ReceiptFunder PDA paying MPL Core `CreateV2` rent.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_funder: UncheckedAccount<'info>,
+
+    /// CHECK: MPL Core program.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
 
     pub clock: Sysvar<'info, Clock>,
 }
@@ -3157,6 +3194,24 @@ pub struct PositionRevealed {
     pub unstake_eligible_at: i64,
     pub settlement_nonce: u64,
     pub config_version: u64,
+}
+
+#[event]
+pub struct ReceiptCreated {
+    pub position: Pubkey,
+    pub position_id: u64,
+    pub receipt_asset: Pubkey,
+    pub owner: Pubkey,
+    pub collection: Pubkey,
+}
+
+#[event]
+pub struct ReceiptBurned {
+    pub position: Pubkey,
+    pub position_id: u64,
+    pub receipt_asset: Pubkey,
+    pub owner: Pubkey,
+    pub collection: Pubkey,
 }
 
 #[event]
@@ -3826,22 +3881,6 @@ fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
                 math::checked_add_u64(game_state.active_cowboy_count, 1)?;
             game_state.total_active_cowboy_weight =
                 math::checked_add_u128(game_state.total_active_cowboy_weight, weight as u128)?;
-
-            emit!(PositionRevealed {
-                position: position_key,
-                role: Role::Cowboy,
-                cowboy_kind: kind,
-                bull_tier: 0,
-                suit,
-                final_owner,
-                previous_owner: None,
-                stolen: false,
-                receipt_asset: Pubkey::default(),
-                active_since,
-                unstake_eligible_at,
-                settlement_nonce,
-                config_version,
-            });
         }
         Role::Bull => {
             let tier = probability::map_bull_tier(
@@ -3895,27 +3934,145 @@ fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
                         .bull_pool_unallocated_liability_atomic = 0;
                 }
             }
-
-            emit!(PositionRevealed {
-                position: position_key,
-                role: Role::Bull,
-                cowboy_kind: CowboyKind::Unassigned,
-                bull_tier: tier,
-                suit,
-                final_owner,
-                previous_owner: None,
-                stolen: false,
-                receipt_asset: Pubkey::default(),
-                active_since,
-                unstake_eligible_at,
-                settlement_nonce,
-                config_version,
-            });
         }
         Role::Unassigned => {
             return Err(error!(RodeoError::InvalidProbabilityOutcome));
         }
     }
+
+    // Create the collection-member PositionReceipt for the now-finalized
+    // Position. The funder (prefunded by the owner at stake) pays Core rent.
+    let (receipt_authority, receipt_authority_bump) =
+        receipt_authority_pda(&ctx.accounts.global_config.key());
+    let (receipt_asset, receipt_asset_bump) = position_receipt_pda(&position_key);
+    let (collection, _collection_bump) = receipt_collection_pda(&ctx.accounts.global_config.key());
+    let (funder, funder_bump) = receipt_funder_pda(&position_key);
+
+    require_keys_eq!(
+        ctx.accounts.receipt_authority.key(),
+        receipt_authority,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_asset.key(),
+        receipt_asset,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_collection.key(),
+        collection,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_funder.key(),
+        funder,
+        RodeoError::InvalidCoreAssetOwner
+    );
+
+    let name = format!("{}{}", RECEIPT_NAME_PREFIX, position.position_id);
+    let uri = format!(
+        "{}{}{}",
+        RECEIPT_METADATA_BASE_URI, position.position_id, RECEIPT_METADATA_URI_SUFFIX
+    );
+
+    let plugins = vec![
+        PluginAuthorityPair {
+            plugin: Plugin::PermanentTransferDelegate(
+                mpl_core::types::PermanentTransferDelegate {},
+            ),
+            authority: Some(PluginAuthority::Address {
+                address: receipt_authority,
+            }),
+        },
+        PluginAuthorityPair {
+            plugin: Plugin::PermanentBurnDelegate(mpl_core::types::PermanentBurnDelegate {}),
+            authority: Some(PluginAuthority::Address {
+                address: receipt_authority,
+            }),
+        },
+        PluginAuthorityPair {
+            plugin: Plugin::PermanentFreezeDelegate(mpl_core::types::PermanentFreezeDelegate {
+                frozen: true,
+            }),
+            authority: Some(PluginAuthority::Address {
+                address: receipt_authority,
+            }),
+        },
+    ];
+
+    let create_ix = CreateV2Builder::new()
+        .asset(receipt_asset)
+        .collection(Some(collection))
+        .authority(Some(receipt_authority))
+        .payer(funder)
+        .owner(Some(ctx.accounts.owner.key()))
+        .system_program(solana_program::system_program::ID)
+        .data_state(DataState::AccountState)
+        .name(name)
+        .uri(uri)
+        .plugins(plugins)
+        .instruction();
+
+    let account_infos = [
+        ctx.accounts.receipt_asset.to_account_info(),
+        ctx.accounts.receipt_collection.to_account_info(),
+        ctx.accounts.receipt_authority.to_account_info(),
+        ctx.accounts.receipt_funder.to_account_info(),
+        ctx.accounts.owner.to_account_info(),
+        ctx.accounts.mpl_core_program.to_account_info(),
+        ctx.accounts.system_program.to_account_info(),
+        ctx.accounts.mpl_core_program.to_account_info(),
+    ];
+
+    let global_config_key = ctx.accounts.global_config.key();
+    let receipt_authority_seeds = [
+        SEED_RECEIPT_AUTHORITY,
+        global_config_key.as_ref(),
+        &[receipt_authority_bump],
+    ];
+    let receipt_asset_seeds = [
+        SEED_POSITION_RECEIPT,
+        position_key.as_ref(),
+        &[receipt_asset_bump],
+    ];
+    let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
+
+    solana_program::program::invoke_signed(
+        &create_ix,
+        &account_infos,
+        &[
+            &receipt_authority_seeds,
+            &receipt_asset_seeds,
+            &funder_seeds,
+        ],
+    )
+    .map_err(Into::into)?;
+
+    position.receipt_asset = receipt_asset;
+
+    emit!(PositionRevealed {
+        position: position_key,
+        role: position.role,
+        cowboy_kind: position.cowboy_kind,
+        bull_tier: position.bull_tier,
+        suit: position.suit,
+        final_owner: position.owner,
+        previous_owner: None,
+        stolen: false,
+        receipt_asset,
+        active_since,
+        unstake_eligible_at,
+        settlement_nonce,
+        config_version,
+    });
+
+    emit!(ReceiptCreated {
+        position: position_key,
+        position_id: position.position_id,
+        receipt_asset,
+        owner: position.owner,
+        collection,
+    });
 
     emit!(RandomnessSettled {
         position: position_key,
