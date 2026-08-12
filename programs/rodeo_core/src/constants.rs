@@ -93,7 +93,7 @@ pub const SEED_RECEIPT_FUNDER: &[u8] = b"receipt-funder";
 // buffer to keep the zero-data ReceiptFunder PDA rent-exempt. The net SOL
 // cost to a player is only the unrecoverable tombstone rent; the rest is
 // refunded when the Position exits successfully.
-pub const RECEIPT_RESERVE_LAMPORTS: u64 = 5_000_000;
+pub const RECEIPT_RESERVE_LAMPORTS: u64 = 5_500_000;
 
 // v1 metadata is code-pinned; callers cannot supply arbitrary URIs.
 pub const RECEIPT_NAME_PREFIX: &str = "Rodeo Position #";
