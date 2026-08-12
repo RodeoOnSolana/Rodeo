@@ -98,6 +98,8 @@ pub enum RandomnessDomain {
     CowboyKind = 5,
     BullTier = 6,
     Suit = 7,
+    OwnerSelection = 8,
+    BullSelection = 9,
 }
 
 #[derive(Clone, Copy)]

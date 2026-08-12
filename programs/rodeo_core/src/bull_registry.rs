@@ -218,6 +218,42 @@ pub struct BullTreeProof {
     pub siblings: Vec<MerkleSibling>,
 }
 
+/// Ordered-tree non-membership proof for an owner pubkey.
+/// The `empty_proof` is an OwnerTreeProof for the empty leaf at the
+/// insertion point.  `left_proof` and `right_proof` are the occupied
+/// leaves immediately before and after that empty slot, when they exist,
+/// and their owner pubkeys bracket the claimed non-member.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+pub struct OwnerNonMembershipProof {
+    pub empty_proof: OwnerTreeProof,
+    pub left_proof: Option<OwnerTreeProof>,
+    pub right_proof: Option<OwnerTreeProof>,
+}
+
+/// Bit flags for the optional sections in a V1 BullProofBuffer payload.
+/// Historical sections bind to PendingRandomness snapshot root/version.
+/// Current sections bind to the live BullRegistry current root/version.
+pub const SECTION_VICTIM_MEMBER: u8 = 0b0000_0001;
+pub const SECTION_VICTIM_NON_MEMBER: u8 = 0b0000_0010;
+pub const SECTION_SELECTED_OWNER: u8 = 0b0000_0100;
+pub const SECTION_SELECTED_BULL: u8 = 0b0000_1000;
+pub const SECTION_CURRENT_OWNER: u8 = 0b0001_0000;
+pub const SECTION_CURRENT_BULL_EMPTY: u8 = 0b0010_0000;
+
+/// Canonical V1 payload.  Each section is optional and must match the
+/// declared `section_bitmap`.  Unknown `schema_version` values are rejected.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+pub struct BullProofPayloadV1 {
+    pub schema_version: u8,
+    pub section_bitmap: u8,
+    pub victim_member: Option<OwnerTreeProof>,
+    pub victim_non_member: Option<OwnerNonMembershipProof>,
+    pub selected_owner: Option<OwnerTreeProof>,
+    pub selected_bull: Option<BullTreeProof>,
+    pub current_owner: Option<OwnerTreeProof>,
+    pub current_bull_empty: Option<BullTreeProof>,
+}
+
 // ---------------------------------------------------------------------------
 // Proof verification.  Returns the leaf's in-order prefix (cumulative power before it).
 // ---------------------------------------------------------------------------
@@ -307,6 +343,127 @@ pub fn verify_bull_tree_proof(expected_root: &[u8; 32], proof: &BullTreeProof) -
         return Err(error!(RodeoError::BullRegistryInvalidRoot));
     }
     Ok(prefix)
+}
+
+/// Verifies that `owner` is not a member of the owner tree rooted at
+/// `expected_root`.  The empty leaf at the claimed insertion point must be
+/// bracketed by the given left/right occupied neighbors, and their owner
+/// pubkeys must be lexicographically smaller/larger than `owner`.
+pub fn verify_owner_non_membership(
+    expected_root: &[u8; 32],
+    owner: &Pubkey,
+    proof: &OwnerNonMembershipProof,
+) -> Result<()> {
+    require!(
+        proof.empty_proof.leaf.is_empty(),
+        RodeoError::BullRegistrySlotOccupied
+    );
+    let _prefix = verify_owner_tree_proof(expected_root, &proof.empty_proof)?;
+
+    if let Some(left) = proof.left_proof.as_ref() {
+        require!(
+            left.leaf_index.wrapping_add(1) == proof.empty_proof.leaf_index,
+            RodeoError::BullRegistryMalformedProof
+        );
+        require!(!left.leaf.is_empty(), RodeoError::BullRegistrySlotEmpty);
+        let _ = verify_owner_tree_proof(expected_root, left)?;
+        require!(
+            left.leaf.owner.as_ref() < owner.as_ref(),
+            RodeoError::BullRegistryMalformedProof
+        );
+    } else {
+        require_eq!(
+            proof.empty_proof.leaf_index,
+            0,
+            RodeoError::BullRegistryMalformedProof
+        );
+    }
+
+    if let Some(right) = proof.right_proof.as_ref() {
+        require!(
+            right.leaf_index == proof.empty_proof.leaf_index.wrapping_add(1),
+            RodeoError::BullRegistryMalformedProof
+        );
+        require!(!right.leaf.is_empty(), RodeoError::BullRegistrySlotEmpty);
+        let _ = verify_owner_tree_proof(expected_root, right)?;
+        require!(
+            owner.as_ref() < right.leaf.owner.as_ref(),
+            RodeoError::BullRegistryMalformedProof
+        );
+    } else {
+        require!(
+            proof.empty_proof.leaf_index == ((1u32 << BULL_REGISTRY_OWNER_TREE_DEPTH) - 1),
+            RodeoError::BullRegistryMalformedProof
+        );
+    }
+
+    Ok(())
+}
+
+/// Deserialize and structurally validate a BullProofBuffer payload.
+/// Does NOT verify cryptographic Merkle bindings; the caller must still
+/// check each section against the appropriate historical/current roots.
+pub fn verify_bull_proof_payload(bytes: &[u8]) -> Result<BullProofPayloadV1> {
+    let payload = BullProofPayloadV1::try_from_slice(bytes)
+        .map_err(|_| RodeoError::BullProofBufferIncomplete)?;
+
+    require_eq!(
+        payload.schema_version,
+        BULL_PROOF_BUFFER_SCHEMA_VERSION,
+        RodeoError::BullProofBufferIncomplete
+    );
+
+    require!(
+        payload.section_bitmap & !0b0011_1111 == 0,
+        RodeoError::BullProofBufferIncomplete
+    );
+
+    let victim_member_set = payload.section_bitmap & SECTION_VICTIM_MEMBER != 0;
+    let victim_non_member_set = payload.section_bitmap & SECTION_VICTIM_NON_MEMBER != 0;
+    require!(
+        !(victim_member_set && victim_non_member_set),
+        RodeoError::BullProofBufferIncomplete
+    );
+    require_eq!(
+        payload.victim_member.is_some(),
+        victim_member_set,
+        RodeoError::BullProofBufferIncomplete
+    );
+    require_eq!(
+        payload.victim_non_member.is_some(),
+        victim_non_member_set,
+        RodeoError::BullProofBufferIncomplete
+    );
+
+    let selected_owner_set = payload.section_bitmap & SECTION_SELECTED_OWNER != 0;
+    require_eq!(
+        payload.selected_owner.is_some(),
+        selected_owner_set,
+        RodeoError::BullProofBufferIncomplete
+    );
+
+    let selected_bull_set = payload.section_bitmap & SECTION_SELECTED_BULL != 0;
+    require_eq!(
+        payload.selected_bull.is_some(),
+        selected_bull_set,
+        RodeoError::BullProofBufferIncomplete
+    );
+
+    let current_owner_set = payload.section_bitmap & SECTION_CURRENT_OWNER != 0;
+    require_eq!(
+        payload.current_owner.is_some(),
+        current_owner_set,
+        RodeoError::BullProofBufferIncomplete
+    );
+
+    let current_bull_empty_set = payload.section_bitmap & SECTION_CURRENT_BULL_EMPTY != 0;
+    require_eq!(
+        payload.current_bull_empty.is_some(),
+        current_bull_empty_set,
+        RodeoError::BullProofBufferIncomplete
+    );
+
+    Ok(payload)
 }
 
 // ---------------------------------------------------------------------------
