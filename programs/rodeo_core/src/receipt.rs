@@ -3,7 +3,9 @@ use crate::state::*;
 use crate::RodeoError;
 use anchor_lang::prelude::*;
 use mpl_core::accounts::BaseAssetV1;
-use mpl_core::types::{Key as MplCoreKey, PluginAuthority as MplCorePluginAuthority};
+use mpl_core::types::Key as MplCoreKey;
+#[cfg(feature = "test-fixtures")]
+use mpl_core::types::PluginAuthority as MplCorePluginAuthority;
 use mpl_core::{IndexableAsset, SolanaAccount};
 
 /// Derive the stateless ReceiptAuthority PDA used to sign permanent-delegate
@@ -55,7 +57,9 @@ pub fn parse_core_asset(account: &AccountInfo) -> Result<IndexableAsset> {
 /// Anchor-visible struct (`mpl-core` is compiled with `default-features =
 /// false`, so its own Anchor trait impls are not available). This type is
 /// test/proof instrumentation only and is never used in production Rodeo
-/// state.
+/// state. Gated behind `test-fixtures` so it never leaks into the default
+/// production IDL alongside the fixture instructions that use it.
+#[cfg(feature = "test-fixtures")]
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
 pub enum ReceiptPluginAuthority {
     None,
@@ -69,6 +73,7 @@ pub enum ReceiptPluginAuthority {
 /// event and localnet tests cannot decode it client-side. Exhaustive over
 /// the pinned 0.11.2 `PluginAuthority` shape for the same reason as the
 /// `From` conversion below.
+#[cfg(feature = "test-fixtures")]
 pub fn format_plugin_authority(authority: Option<MplCorePluginAuthority>) -> String {
     match authority {
         None => "missing".to_string(),
@@ -83,6 +88,7 @@ pub fn format_plugin_authority(authority: Option<MplCorePluginAuthority>) -> Str
 /// Deliberately has no `_` wildcard arm: if the pinned mpl-core dependency
 /// ever changes `PluginAuthority`'s variants, this must fail to compile
 /// rather than silently drop or misrepresent an authority kind.
+#[cfg(feature = "test-fixtures")]
 impl From<MplCorePluginAuthority> for ReceiptPluginAuthority {
     fn from(authority: MplCorePluginAuthority) -> Self {
         match authority {
@@ -96,6 +102,7 @@ impl From<MplCorePluginAuthority> for ReceiptPluginAuthority {
     }
 }
 
+#[cfg(feature = "test-fixtures")]
 #[event]
 pub struct PositionReceiptParsed {
     pub receipt_asset: Pubkey,
@@ -305,24 +312,28 @@ mod tests {
         assert_ne!(receipt_authority, receipt);
     }
 
+    #[cfg(feature = "test-fixtures")]
     #[test]
     fn receipt_plugin_authority_mirrors_none_variant() {
         let converted: ReceiptPluginAuthority = MplCorePluginAuthority::None.into();
         assert_eq!(converted, ReceiptPluginAuthority::None);
     }
 
+    #[cfg(feature = "test-fixtures")]
     #[test]
     fn receipt_plugin_authority_mirrors_owner_variant() {
         let converted: ReceiptPluginAuthority = MplCorePluginAuthority::Owner.into();
         assert_eq!(converted, ReceiptPluginAuthority::Owner);
     }
 
+    #[cfg(feature = "test-fixtures")]
     #[test]
     fn receipt_plugin_authority_mirrors_update_authority_variant() {
         let converted: ReceiptPluginAuthority = MplCorePluginAuthority::UpdateAuthority.into();
         assert_eq!(converted, ReceiptPluginAuthority::UpdateAuthority);
     }
 
+    #[cfg(feature = "test-fixtures")]
     #[test]
     fn receipt_plugin_authority_mirrors_address_variant() {
         let address = Pubkey::from_str("79PJ9kijazYdkds7dmeJThJifPfuYdnYNbs9WTvVLmN3").unwrap();
