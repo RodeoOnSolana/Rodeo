@@ -2823,6 +2823,7 @@ pub struct RecoverRevealTimeout<'info> {
 
     #[account(
         mut,
+        close = owner,
         seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
         bump = position.bump,
         constraint = position.status == PositionStatus::RevealPending @ RodeoError::InvalidPendingRandomness,

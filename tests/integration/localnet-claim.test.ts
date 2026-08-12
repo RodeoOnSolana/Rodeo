@@ -1291,8 +1291,8 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     await sleep(2_500);
     await recoverRevealTimeout(positionId);
 
-    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
-    expect(pos.pendingActionActive).toBe(false);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(position);
+    expect(pos).toBeNull();
 
     const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetchNullable(pendingRandomness);
     expect(pending).toBeNull();
