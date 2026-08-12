@@ -77,6 +77,9 @@ pub const SEED_GLOBAL_CONFIG: &[u8] = b"global-config";
 pub const SEED_REWARD_STATE: &[u8] = b"reward-state";
 pub const SEED_GLOBAL_GAME_STATE: &[u8] = b"global-game-state";
 pub const SEED_BULL_ACCUMULATOR: &[u8] = b"bull-accumulator";
+pub const SEED_BULL_REGISTRY: &[u8] = b"bull-registry";
+pub const SEED_BULL_REGISTRY_OWNER_BUCKET: &[u8] = b"bull-owner-bucket";
+pub const SEED_BULL_PROOF_BUFFER: &[u8] = b"bull-proof-buffer";
 pub const SEED_PRINCIPAL_VAULT: &[u8] = b"principal-vault";
 pub const SEED_REWARD_VAULT: &[u8] = b"reward-vault";
 pub const SEED_POSITION: &[u8] = b"position";
@@ -111,6 +114,24 @@ pub const ACCOUNT_VERSION_POSITION: u8 = 4;
 pub const ACCOUNT_VERSION_WALLET_CLAIM_COOLDOWN: u8 = 1;
 pub const ACCOUNT_VERSION_PENDING_RANDOMNESS: u8 = 4;
 pub const ACCOUNT_VERSION_PROTOCOL_CONFIG: u8 = 1;
+pub const ACCOUNT_VERSION_BULL_REGISTRY: u8 = 1;
+pub const ACCOUNT_VERSION_BULL_REGISTRY_OWNER_BUCKET: u8 = 1;
+pub const ACCOUNT_VERSION_BULL_PROOF_BUFFER: u8 = 1;
+
+// BullRegistry v1: two-level ordered binary Merkle-sum tree.
+// Owner tree depth 20 -> up to 2^20 owner buckets.
+// Per-owner Bull tree depth 20 -> up to 2^20 Bull leaves per owner.
+// These are compile-time parameters for the v1 proof format.
+pub const BULL_REGISTRY_OWNER_TREE_DEPTH: u32 = 20;
+pub const BULL_REGISTRY_BULL_TREE_DEPTH: u32 = 20;
+
+// Worst-case serialized proof payload for a single reveal:
+// three full proof paths (victim owner, selected owner, selected Bull),
+// each path up to 20 siblings, plus leaf structs.  16 KiB is comfortably
+// above the v1 benchmarked worst case and still well within Solana's
+// 10 MiB per-account data limit.
+pub const BULL_PROOF_BUFFER_SCHEMA_VERSION: u8 = 1;
+pub const BULL_PROOF_BUFFER_MAX_PAYLOAD: usize = 16_384;
 
 // Compile-time guards for the production-safe default configuration. These are
 // always checked when the crate is compiled with the corresponding features.

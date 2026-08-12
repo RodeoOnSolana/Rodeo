@@ -3,12 +3,14 @@ use anchor_spl::token::{Burn, Mint, Token, TokenAccount, Transfer};
 
 declare_id!("EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z");
 
+pub mod bull_registry;
 pub mod constants;
 pub mod math;
 pub mod probability;
 pub mod receipt;
 pub mod state;
 
+use bull_registry::*;
 use constants::*;
 use mpl_core::instructions::{
     BurnV1Builder, CreateCollectionV2Builder, CreateV2Builder, TransferV1Builder, UpdateV1Builder,
@@ -3693,6 +3695,24 @@ pub enum RodeoError {
     CoreAssetNotFrozen,
     #[msg("Core receipt asset is not owned by the expected address")]
     InvalidCoreAssetOwner,
+    #[msg("BullRegistry Merkle proof is malformed or incomplete")]
+    BullRegistryMalformedProof,
+    #[msg("BullRegistry Merkle root does not match the canonical root")]
+    BullRegistryInvalidRoot,
+    #[msg("BullRegistry proof leaf is not the expected empty slot")]
+    BullRegistrySlotOccupied,
+    #[msg("BullRegistry proof leaf is not the expected occupied slot")]
+    BullRegistrySlotEmpty,
+    #[msg("BullRegistry owner bucket does not match the leaf owner")]
+    BullRegistryOwnerMismatch,
+    #[msg("BullRegistry proof buffer is not finalized")]
+    BullProofBufferNotFinalized,
+    #[msg("BullRegistry proof buffer has already been consumed")]
+    BullProofBufferAlreadyConsumed,
+    #[msg("BullRegistry proof buffer is bound to a different account")]
+    BullProofBufferBindingMismatch,
+    #[msg("No eligible external Bull exists for this theft")]
+    NoEligibleExternalBull,
     #[msg("The provided randomness account is not a valid Switchboard randomness account")]
     InvalidProviderAccount,
     #[msg("The Switchboard randomness account has not yet been revealed for this slot")]
