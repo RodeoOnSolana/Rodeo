@@ -325,6 +325,7 @@ describe.skipIf(skipReceiptProofSuite)(
 
     let position: web3.PublicKey;
     let receiptAuthority: web3.PublicKey;
+    let receiptCollection: web3.PublicKey;
     let receiptAsset: web3.PublicKey;
 
     // Phase 2D3A3: a second Position/receipt used for the official
@@ -414,6 +415,8 @@ describe.skipIf(skipReceiptProofSuite)(
 
       const programData = programDataAddress(rodeoCoreProgram.programId);
       [protocolConfigV1] = deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1));
+      [receiptAuthority] = deriveReceiptAuthority(rodeoCoreProgram.programId, globalConfig);
+      [receiptCollection] = deriveReceiptCollection(rodeoCoreProgram.programId, globalConfig);
 
       await rodeoCoreProgram.methods
         .initializeProtocol(
@@ -435,6 +438,9 @@ describe.skipIf(skipReceiptProofSuite)(
           principalVault,
           rewardVault,
           protocolConfig: protocolConfigV1,
+          receiptCollection,
+          receiptAuthority,
+          mplCoreProgram: MPL_CORE_PROGRAM_ID,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -448,6 +454,7 @@ describe.skipIf(skipReceiptProofSuite)(
         0,
         new BN(0),
       );
+      const [receiptFunder] = deriveReceiptFunder(rodeoCoreProgram.programId, position);
       const stakeAmountAtomic = new BN(100_000_000_000);
 
       await rodeoCoreProgram.methods
@@ -462,6 +469,7 @@ describe.skipIf(skipReceiptProofSuite)(
           pendingRandomness,
           rewardState,
           globalGameState,
+          receiptFunder,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -488,6 +496,7 @@ describe.skipIf(skipReceiptProofSuite)(
         new BN(0),
       );
       const stakeAmountAtomic = new BN(100_000_000_000);
+      const [receiptFunder2] = deriveReceiptFunder(rodeoCoreProgram.programId, position2);
 
       await rodeoCoreProgram.methods
         .stakeAndCommit(positionId2, stakeAmountAtomic)
@@ -501,6 +510,7 @@ describe.skipIf(skipReceiptProofSuite)(
           pendingRandomness: pendingRandomness2,
           rewardState,
           globalGameState,
+          receiptFunder: receiptFunder2,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           rent: web3.SYSVAR_RENT_PUBKEY,
@@ -520,6 +530,7 @@ describe.skipIf(skipReceiptProofSuite)(
       const setup = async (positionId: BN) => {
         const [pos] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
         const [pendingRandomness] = deriveRandomness(rodeoCoreProgram.programId, pos, 0, new BN(0));
+        const [receiptFunder] = deriveReceiptFunder(rodeoCoreProgram.programId, pos);
 
         await rodeoCoreProgram.methods
           .stakeAndCommit(positionId, new BN(100_000_000_000))
@@ -533,6 +544,7 @@ describe.skipIf(skipReceiptProofSuite)(
             pendingRandomness,
             rewardState,
             globalGameState,
+            receiptFunder,
             tokenProgram: TOKEN_PROGRAM_ID,
             systemProgram: web3.SystemProgram.programId,
             rent: web3.SYSVAR_RENT_PUBKEY,
