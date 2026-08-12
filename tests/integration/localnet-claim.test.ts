@@ -1286,8 +1286,8 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
     const positionId = game.nextPositionId;
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
-    const before = await getAccount(provider.connection, payerRodeoAccount);
     await stakeAndCommit(positionId);
+    const before = await getAccount(provider.connection, payerRodeoAccount);
     await sleep(2_500);
     await recoverRevealTimeout(positionId);
 
