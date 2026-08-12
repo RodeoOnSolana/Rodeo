@@ -59,3 +59,4 @@ zeroize = "=1.8.2"
 # already resolved to before the mpl-core dependency was added avoids that
 # chain entirely.
 blake3 = "=1.5.5"
+switchboard-on-demand = { version = "0.13.0", default-features = false, features = ["anchor"] }
