@@ -1927,8 +1927,7 @@ pub mod rodeo_core {
             ];
             let position_key = ctx.accounts.position.key();
             let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
-            solana_program::program::invoke_signed(&transfer_ix, &account_infos, &[&funder_seeds])
-                .map_err(Into::into)?;
+            solana_program::program::invoke_signed(&transfer_ix, &account_infos, &[&funder_seeds])?;
         }
 
         // Reassign the PDA to the System Program so the address is released
@@ -1944,7 +1943,9 @@ pub mod rodeo_core {
         let position_key = ctx.accounts.position.key();
         let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
         solana_program::program::invoke_signed(&assign_ix, &account_infos, &[&funder_seeds])
-            .map_err(Into::into)
+            .map_err(|e: solana_program::program_error::ProgramError| {
+                anchor_lang::error::Error::from(e)
+            })
     }
 
     /// Test-only fixture that transitions a collection-member PositionReceipt's
