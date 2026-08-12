@@ -466,7 +466,19 @@ pub mod rodeo_core {
         );
 
         #[cfg(feature = "mock-randomness")]
-        return settle_reveal_mock(&mut ctx);
+        {
+            // Deterministic mock randomness: the production settlement path is
+            // the same; only the source of `random_output` changes once a real
+            // provider is wired. Compute the mock result here and delegate to
+            // the provider-independent common reveal settlement.
+            let position_key = position.key();
+            let action_type = pending_randomness.action_type;
+            let action_nonce = pending_randomness.action_nonce;
+            let protocol_epoch = pending_randomness.committed_protocol_epoch;
+            let random_output =
+                derive_commitment(position_key, action_type, action_nonce, protocol_epoch);
+            return settle_reveal_common(&mut ctx, random_output);
+        }
 
         #[cfg(not(feature = "mock-randomness"))]
         {
@@ -3868,8 +3880,7 @@ fn convert_orphaned_remainders(
     Ok(())
 }
 
-#[cfg(feature = "mock-randomness")]
-fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
+fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]) -> Result<()> {
     use crate::probability;
 
     let config: &ProtocolConfig = &**ctx.accounts.protocol_config;
@@ -3878,10 +3889,6 @@ fn settle_reveal_mock(ctx: &mut Context<SettleReveal>) -> Result<()> {
     let action_type = ctx.accounts.pending_randomness.action_type;
     let action_nonce = ctx.accounts.pending_randomness.action_nonce;
     let protocol_epoch = ctx.accounts.pending_randomness.committed_protocol_epoch;
-
-    // Deterministic random bytes that are domain-separated and bound to the
-    // position, action type, action nonce, and protocol epoch.
-    let random_output = derive_commitment(position_key, action_type, action_nonce, protocol_epoch);
 
     let role = probability::map_role(
         probability::RandomnessSampleContext {
