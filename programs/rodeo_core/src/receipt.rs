@@ -23,6 +23,16 @@ pub fn position_receipt_pda(position: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[SEED_POSITION_RECEIPT, position.as_ref()], &crate::ID)
 }
 
+/// Derive the official Rodeo receipt Collection PDA. The collection address
+/// is the Core Collection address created by MPL Core; the stateless
+/// ReceiptAuthority PDA is its update authority.
+pub fn receipt_collection_pda(global_config: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[SEED_RECEIPT_COLLECTION, global_config.as_ref()],
+        &crate::ID,
+    )
+}
+
 /// Manual, non-Anchor parse of the Core asset embedded owner from a Solana
 /// account owned by the MPL Core program. Uses `BaseAssetV1::load` / the
 /// `SolanaAccount` trait so it works without the `mpl-core` `anchor` feature.
@@ -81,6 +91,22 @@ pub fn format_plugin_authority(authority: Option<MplCorePluginAuthority>) -> Str
         Some(MplCorePluginAuthority::Owner) => "owner".to_string(),
         Some(MplCorePluginAuthority::UpdateAuthority) => "update_authority".to_string(),
         Some(MplCorePluginAuthority::Address { address }) => format!("address:{}", address),
+    }
+}
+
+/// Renders a parsed Core `UpdateAuthority` (base asset/collection update
+/// authority, distinct from plugin authorities) as a compact string for
+/// `msg!` diagnostics, for the same reason as `format_plugin_authority`.
+/// Exhaustive over the pinned 0.11.2 `UpdateAuthority` shape (`None`,
+/// `Address(Pubkey)`, `Collection(Pubkey)`).
+#[cfg(feature = "test-fixtures")]
+pub fn format_update_authority(authority: &mpl_core::types::UpdateAuthority) -> String {
+    match authority {
+        mpl_core::types::UpdateAuthority::None => "none".to_string(),
+        mpl_core::types::UpdateAuthority::Address(address) => format!("address:{}", address),
+        mpl_core::types::UpdateAuthority::Collection(collection) => {
+            format!("collection:{}", collection)
+        }
     }
 }
 
@@ -199,6 +225,62 @@ pub struct TestFixtureForceTransferPositionReceipt<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// Same as `TestFixtureForceTransferPositionReceipt`, but for a receipt that
+/// belongs to the official Rodeo receipt Collection: MPL Core's `TransferV1`
+/// requires the collection account to be supplied when the asset has
+/// `UpdateAuthority::Collection(...)` (otherwise it rejects with
+/// `MissingCollection`), so this variant carries an extra `collection`
+/// account. Kept separate from the standalone-receipt fixture above so the
+/// already-proven 2D3A2 behavior is untouched.
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(new_owner: Pubkey)]
+pub struct TestFixtureForceTransferPositionReceiptInCollection<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    pub position: Box<Account<'info, Position>>,
+
+    /// CHECK: The existing Core Asset account at the PositionReceipt PDA.
+    #[account(
+        mut,
+        seeds = [SEED_POSITION_RECEIPT, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_asset: UncheckedAccount<'info>,
+
+    /// CHECK: The official Rodeo receipt Collection this asset belongs to.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
+        bump,
+    )]
+    pub collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA signing the transfer.
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    /// CHECK: The new embedded owner wallet. Only its public key is used.
+    #[account(address = new_owner)]
+    pub new_owner_account: UncheckedAccount<'info>,
+
+    /// CHECK: MPL Core program.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
 #[cfg(feature = "test-fixtures")]
 #[derive(Accounts)]
 pub struct TestFixtureForceBurnPositionReceipt<'info> {
@@ -222,6 +304,147 @@ pub struct TestFixtureForceBurnPositionReceipt<'info> {
     pub receipt_asset: UncheckedAccount<'info>,
 
     /// CHECK: Stateless ReceiptAuthority PDA signing the burn.
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    /// CHECK: MPL Core program.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(name: String, uri: String)]
+pub struct TestFixtureCreateReceiptCollection<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    /// CHECK: This is the new Core Collection account at the deterministic
+    /// receipt-collection PDA. It does not exist before the CPI; MPL Core
+    /// creates it. `CreateCollectionV2` requires this account to sign, which
+    /// Rodeo provides via `invoke_signed` with this PDA's own seeds.
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
+        bump,
+    )]
+    pub collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA, recorded as the collection's
+    /// update authority. It does not need to be initialized or funded, and
+    /// does not need to sign collection creation (only asset creation and
+    /// updates require its signature).
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    /// CHECK: MPL Core program.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(name: String, uri: String)]
+pub struct TestFixtureCreatePositionReceiptInCollection<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    pub position: Box<Account<'info, Position>>,
+
+    /// CHECK: This is the new Core Asset account at the PositionReceipt PDA.
+    /// It does not exist before the CPI; MPL Core creates it.
+    #[account(
+        mut,
+        seeds = [SEED_POSITION_RECEIPT, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_asset: UncheckedAccount<'info>,
+
+    /// CHECK: The official Rodeo receipt Collection this asset is created
+    /// into. Must already exist (created by
+    /// `test_fixture_create_receipt_collection`).
+    #[account(
+        mut,
+        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
+        bump,
+    )]
+    pub collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA used as the Core plugin
+    /// authority and asset-creation authority (it also controls the
+    /// collection, so it may add assets to it).
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    /// CHECK: The wallet that will own the Core asset (embedded owner).
+    pub asset_owner: UncheckedAccount<'info>,
+
+    /// CHECK: MPL Core program.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(new_name: Option<String>, new_uri: Option<String>)]
+pub struct TestFixtureUpdatePositionReceiptMetadata<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    pub position: Box<Account<'info, Position>>,
+
+    /// CHECK: The existing Core Asset account at the PositionReceipt PDA.
+    #[account(
+        mut,
+        seeds = [SEED_POSITION_RECEIPT, position.key().as_ref()],
+        bump,
+    )]
+    pub receipt_asset: UncheckedAccount<'info>,
+
+    /// CHECK: The official Rodeo receipt Collection this asset belongs to.
+    #[account(
+        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
+        bump,
+    )]
+    pub collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA signing the metadata update. It
+    /// is authorized because it is the collection's update authority, and
+    /// the asset itself was created with no per-asset update authority
+    /// override (so its `UpdateAuthority` resolves to `Collection(...)`).
     #[account(
         seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
         bump,
@@ -310,6 +533,27 @@ mod tests {
         let (receipt, _) = position_receipt_pda(&sample_position);
 
         assert_ne!(receipt_authority, receipt);
+    }
+
+    #[test]
+    fn receipt_collection_pda_matches_known_vector() {
+        let global_config = sample_global_config();
+
+        let (collection, bump) = receipt_collection_pda(&global_config);
+        assert_eq!(
+            collection,
+            Pubkey::from_str("HZ9wKsBj1BcM5NNEzeTx7kwCBTdsgzFBXrCoQQgtTmAg").unwrap()
+        );
+        assert_eq!(bump, 255);
+
+        // Re-derivation must be deterministic, and distinct from the
+        // ReceiptAuthority PDA and any PositionReceipt PDA.
+        let (collection_again, bump_again) = receipt_collection_pda(&global_config);
+        assert_eq!(collection, collection_again);
+        assert_eq!(bump, bump_again);
+
+        let (receipt_authority, _) = receipt_authority_pda(&global_config);
+        assert_ne!(collection, receipt_authority);
     }
 
     #[cfg(feature = "test-fixtures")]
