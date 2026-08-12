@@ -16,9 +16,23 @@ pub struct SparseMerkleNode {
     pub power: u64,
 }
 
-/// Compressed sparse Merkle proof.  The path is implied by the key.  The
-/// bitmap marks which levels contain non-default siblings; omitted levels use
-/// the precomputed default node for that depth.
+/// Canonical compressed sparse Merkle proof.
+///
+/// Path derivation:
+///   - key is a 32-byte Pubkey.
+///   - level i uses bit i of the key, with bit 0 as the LSB of bytes[0].
+///   - bit = 0 -> left child; bit = 1 -> right child.
+///   - The leaf is at level 0 and the root is at level SPARSE_TREE_DEPTH.
+///
+/// Bitmap semantics:
+///   - 32 bytes (256 bits), one bit per tree level.
+///   - bit i set (1) means a non-default sibling for level i is provided.
+///   - bit i clear (0) means the canonical empty node for level i is used.
+///   - The LSB of bitmap[0] is level 0; bitmap[31] is the last byte.
+///
+/// Siblings:
+///   - Provided in strictly ascending level order (0, 1, ..., 255).
+///   - The number of siblings must equal the number of set bits.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub struct CompressedSparseProof {
     /// 256-bit bitmap, one bit per level (0 = default sibling, 1 = provided).
@@ -64,6 +78,26 @@ pub fn hash_node(
     Ok(SparseMerkleNode { hash, count, power })
 }
 
+/// Canonical compressed-proof validation: every set bit must have a sibling,
+/// every provided sibling must correspond to a set bit, and no bits above the
+/// tree depth may be set.  Trailing/leading extra siblings are rejected.
+fn validate_compressed_proof(proof: &CompressedSparseProof) -> Result<()> {
+    let set_bits = proof
+        .bitmap
+        .iter()
+        .map(|b| b.count_ones() as usize)
+        .sum::<usize>();
+    require_eq!(
+        proof.siblings.len(),
+        set_bits,
+        RodeoError::BullRegistryMalformedProof
+    );
+
+    // The last 4 bits of the last byte are unused because SPARSE_TREE_DEPTH = 256
+    // and 256 % 8 == 0, so all 32 bytes are consumed exactly.  No stray bits.
+    Ok(())
+}
+
 /// Compute default nodes for an empty sparse tree.  `nodes[0]` is the empty
 /// leaf and `nodes[SPARSE_TREE_DEPTH]` is the empty root.
 pub fn compute_default_empty_nodes(
@@ -90,6 +124,7 @@ pub fn verify(
     node_prefix: &[u8],
     empty_leaf: &SparseMerkleNode,
 ) -> Result<SparseMerkleNode> {
+    validate_compressed_proof(proof)?;
     let default_nodes = compute_default_empty_nodes(empty_leaf, node_prefix)?;
 
     let mut current = *leaf;
@@ -128,6 +163,7 @@ pub fn recompute_root_after_replace(
     node_prefix: &[u8],
     empty_leaf: &SparseMerkleNode,
 ) -> Result<SparseMerkleNode> {
+    validate_compressed_proof(proof)?;
     let default_nodes = compute_default_empty_nodes(empty_leaf, node_prefix)?;
 
     let mut current = *new_leaf;
@@ -164,6 +200,7 @@ pub fn verify_with_prefix(
     node_prefix: &[u8],
     empty_leaf: &SparseMerkleNode,
 ) -> Result<(SparseMerkleNode, u64)> {
+    validate_compressed_proof(proof)?;
     let default_nodes = compute_default_empty_nodes(empty_leaf, node_prefix)?;
 
     let mut current = *leaf;
