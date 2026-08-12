@@ -4760,7 +4760,7 @@ mod tests {
         assert_eq!(BullAccumulator::INIT_SPACE, 82);
         assert_eq!(Position::INIT_SPACE, 239);
         assert_eq!(WalletClaimCooldown::INIT_SPACE, 74);
-        assert_eq!(PendingRandomness::INIT_SPACE, 212);
+        assert_eq!(PendingRandomness::INIT_SPACE, 228);
         assert_eq!(ProtocolConfig::INIT_SPACE, 350);
     }
 
