@@ -5282,10 +5282,7 @@ fn settle_bull_unstake<'info>(
     Ok(AnsemUnstakeFate::ToOwner)
 }
 
-fn settle_unstake_common<'info>(
-    ctx: &mut Context<'info, SettleUnstake<'info>>,
-    random_output: [u8; 32],
-) -> Result<()> {
+fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 32]) -> Result<()> {
 
     let config: &ProtocolConfig = &**ctx.accounts.protocol_config;
 
@@ -5294,7 +5291,7 @@ fn settle_unstake_common<'info>(
     let action_type = ctx.accounts.pending_randomness.action_type;
     let action_nonce = ctx.accounts.pending_randomness.action_nonce;
 
-    let mut bull_proof_buffer: Option<Box<Account<'info, BullProofBuffer>>> =
+    let mut bull_proof_buffer =
         if let Some(buffer_info) = ctx.accounts.bull_proof_buffer.as_ref() {
             let buffer = Box::new(Account::<BullProofBuffer>::try_from(buffer_info)?);
             require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
