@@ -6732,4 +6732,56 @@ mod tests {
         let payload = vec![99u8, 0, 0, 0, 0];
         assert!(bull_registry::verify_bull_proof_payload(&payload).is_err());
     }
+
+    #[test]
+    fn verify_bull_proof_payload_round_trip_and_section_bitmap() {
+        let payload = BullProofPayloadV1 {
+            schema_version: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+            section_bitmap: SECTION_VICTIM_OWNER | SECTION_SELECTED_OWNER | SECTION_SELECTED_BULL,
+            victim_owner: Some(CompressedOwnerProof {
+                leaf: OwnerLeaf::empty(),
+                proof: CompressedSparseProof {
+                    bitmap: [0u8; 32],
+                    siblings: vec![],
+                    leaf: OwnerLeaf::empty().to_node(),
+                },
+            }),
+            selected_owner: Some(CompressedOwnerProof {
+                leaf: OwnerLeaf::empty(),
+                proof: CompressedSparseProof {
+                    bitmap: [0u8; 32],
+                    siblings: vec![],
+                    leaf: OwnerLeaf::empty().to_node(),
+                },
+            }),
+            selected_bull: Some(CompressedBullProof {
+                leaf: BullLeaf::empty(),
+                proof: CompressedSparseProof {
+                    bitmap: [0u8; 32],
+                    siblings: vec![],
+                    leaf: BullLeaf::empty().to_node(),
+                },
+            }),
+            current_owner: None,
+            current_bull: None,
+            remove_bull: None,
+        };
+        let bytes = payload.try_to_vec().expect("serialize");
+        let parsed = bull_registry::verify_bull_proof_payload(&bytes).expect("parse");
+        assert!(parsed.victim_owner.is_some());
+        assert!(parsed.selected_owner.is_some());
+        assert!(parsed.selected_bull.is_some());
+
+        // Unknown bit in section bitmap must be rejected.
+        let mut invalid = payload.clone();
+        invalid.section_bitmap = 0b0100_0000;
+        let bad = invalid.try_to_vec().expect("serialize");
+        assert!(bull_registry::verify_bull_proof_payload(&bad).is_err());
+
+        // Inconsistent bitmap: claiming remove_bull but not providing it.
+        let mut incomplete = payload.clone();
+        incomplete.section_bitmap |= SECTION_REMOVE_BULL;
+        let bad2 = incomplete.try_to_vec().expect("serialize");
+        assert!(bull_registry::verify_bull_proof_payload(&bad2).is_err());
+    }
 }
