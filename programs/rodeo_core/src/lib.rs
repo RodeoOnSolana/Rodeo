@@ -6891,4 +6891,199 @@ mod tests {
         let bad2 = incomplete.try_to_vec().expect("serialize");
         assert!(bull_registry::verify_bull_proof_payload(&bad2).is_err());
     }
+
+    fn sample_protocol_config(global_config: Pubkey, config_version: u64) -> ProtocolConfig {
+        ProtocolConfig {
+            version: 1,
+            global_config,
+            config_version,
+            role_weights: [1, 1],
+            cowboy_rank_weights: [1; 8],
+            bull_tier_weights: [1; 4],
+            suit_weights: [1; 4],
+            mint_theft_weights: [1, 1],
+            unstake_theft_weights: [1, 1],
+            cowboy_accrual_weights: [1; 8],
+            bull_buck_powers: [1; 4],
+            min_reveals_for_theft: 1,
+            min_bulls_for_theft: 1,
+            unstake_tax_bps: 500,
+            unstake_return_bps: 9500,
+            bump: 0,
+            _reserved: [0; 64],
+        }
+    }
+
+    fn protocol_config_account<'a>(
+        key: &'a Pubkey,
+        lamports: &'a mut u64,
+        data: &'a mut Vec<u8>,
+        config: &ProtocolConfig,
+        owner: &'a Pubkey,
+    ) -> AccountInfo<'a> {
+        data.clear();
+        data.extend_from_slice(&<ProtocolConfig as anchor_lang::Discriminator>::DISCRIMINATOR);
+        data.extend_from_slice(&config.try_to_vec().unwrap());
+        AccountInfo::new(key, false, false, lamports, &mut data[..], owner, false, 0)
+    }
+
+    #[test]
+    fn load_historical_protocol_config_accepts_valid() {
+        let global_config = Pubkey::new_unique();
+        let version = 7u64;
+        let (expected_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                global_config.as_ref(),
+                &version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let config = sample_protocol_config(global_config, version);
+        let mut lamports = 0u64;
+        let mut data = Vec::new();
+        let info =
+            protocol_config_account(&expected_key, &mut lamports, &mut data, &config, &crate::ID);
+        let loaded =
+            super::load_historical_protocol_config(&info, &expected_key, &global_config, version)
+                .unwrap();
+        assert_eq!(loaded.global_config, global_config);
+        assert_eq!(loaded.config_version, version);
+    }
+
+    #[test]
+    fn load_historical_protocol_config_rejects_wrong_pda() {
+        let global_config = Pubkey::new_unique();
+        let version = 7u64;
+        let (expected_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                global_config.as_ref(),
+                &version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let wrong_key = Pubkey::new_unique();
+        let config = sample_protocol_config(global_config, version);
+        let mut lamports = 0u64;
+        let mut data = Vec::new();
+        let info =
+            protocol_config_account(&expected_key, &mut lamports, &mut data, &config, &crate::ID);
+        assert!(matches!(
+            super::load_historical_protocol_config(&info, &wrong_key, &global_config, version),
+            Err(_)
+        ));
+    }
+
+    #[test]
+    fn load_historical_protocol_config_rejects_wrong_owner() {
+        let global_config = Pubkey::new_unique();
+        let version = 7u64;
+        let (expected_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                global_config.as_ref(),
+                &version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let config = sample_protocol_config(global_config, version);
+        let wrong_owner = Pubkey::new_unique();
+        let mut lamports = 0u64;
+        let mut data = Vec::new();
+        let info = protocol_config_account(
+            &expected_key,
+            &mut lamports,
+            &mut data,
+            &config,
+            &wrong_owner,
+        );
+        assert!(matches!(
+            super::load_historical_protocol_config(&info, &expected_key, &global_config, version),
+            Err(_)
+        ));
+    }
+
+    #[test]
+    fn load_historical_protocol_config_rejects_invalid_discriminator() {
+        let global_config = Pubkey::new_unique();
+        let version = 7u64;
+        let (expected_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                global_config.as_ref(),
+                &version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let mut lamports = 0u64;
+        let mut data = vec![0u8; 64];
+        let info = AccountInfo::new(
+            &expected_key,
+            false,
+            false,
+            &mut lamports,
+            &mut data,
+            &crate::ID,
+            false,
+            0,
+        );
+        assert!(matches!(
+            super::load_historical_protocol_config(&info, &expected_key, &global_config, version),
+            Err(_)
+        ));
+    }
+
+    #[test]
+    fn load_historical_protocol_config_rejects_wrong_global_config() {
+        let global_config = Pubkey::new_unique();
+        let other_global = Pubkey::new_unique();
+        let version = 7u64;
+        let (expected_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                other_global.as_ref(),
+                &version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let config = sample_protocol_config(other_global, version);
+        let mut lamports = 0u64;
+        let mut data = Vec::new();
+        let info =
+            protocol_config_account(&expected_key, &mut lamports, &mut data, &config, &crate::ID);
+        assert!(matches!(
+            super::load_historical_protocol_config(&info, &expected_key, &global_config, version),
+            Err(_)
+        ));
+    }
+
+    #[test]
+    fn load_historical_protocol_config_rejects_wrong_version() {
+        let global_config = Pubkey::new_unique();
+        let version = 7u64;
+        let wrong_version = 8u64;
+        let (expected_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                global_config.as_ref(),
+                &version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let config = sample_protocol_config(global_config, version);
+        let mut lamports = 0u64;
+        let mut data = Vec::new();
+        let info =
+            protocol_config_account(&expected_key, &mut lamports, &mut data, &config, &crate::ID);
+        assert!(matches!(
+            super::load_historical_protocol_config(
+                &info,
+                &expected_key,
+                &global_config,
+                wrong_version
+            ),
+            Err(_)
+        ));
+    }
 }
