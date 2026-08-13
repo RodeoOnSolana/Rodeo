@@ -60,3 +60,8 @@ zeroize = "=1.8.2"
 # chain entirely.
 blake3 = "=1.5.5"
 switchboard-on-demand = { version = "0.13.0", default-features = false, features = ["anchor"] }
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
