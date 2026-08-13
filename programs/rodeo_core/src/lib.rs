@@ -5291,11 +5291,17 @@ fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 3
     let action_type = ctx.accounts.pending_randomness.action_type;
     let action_nonce = ctx.accounts.pending_randomness.action_nonce;
 
-    let mut bull_proof_buffer =
+    let payload: Option<Box<BullProofPayloadV1>> =
         if let Some(buffer_info) = ctx.accounts.bull_proof_buffer.as_ref() {
-            let buffer = Box::new(Account::<BullProofBuffer>::try_from(buffer_info)?);
+            require_keys_eq!(
+                buffer_info.owner,
+                &crate::ID,
+                RodeoError::BullProofBufferWrongProver
+            );
+            let data = buffer_info.data.borrow();
+            let mut data_slice: &[u8] = &**data;
+            let buffer = BullProofBuffer::try_deserialize(&mut data_slice)?;
             require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
-            require!(!buffer.consumed, RodeoError::BullProofBufferAlreadyConsumed);
             require!(
                 buffer.action_type == ActionType::Unstake,
                 RodeoError::BullProofBufferIncomplete
@@ -5309,17 +5315,12 @@ fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 3
                 ctx.accounts.owner.key(),
                 RodeoError::BullProofBufferWrongProver
             );
-            Some(buffer)
+            Some(Box::new(bull_registry::verify_bull_proof_payload(
+                &buffer.payload,
+            )?))
         } else {
             None
         };
-
-    let payload: Option<Box<BullProofPayloadV1>> = match bull_proof_buffer.as_deref() {
-        Some(buffer) => Some(Box::new(bull_registry::verify_bull_proof_payload(
-            &buffer.payload,
-        )?)),
-        None => None,
-    };
 
     let position = &mut ctx.accounts.position;
     let pending_randomness = &mut ctx.accounts.pending_randomness;
@@ -5582,9 +5583,21 @@ fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 3
         config_version_snapshot: pending_randomness.config_version_snapshot,
     });
 
-    if let Some(buffer) = bull_proof_buffer.as_deref_mut() {
-        buffer.consumed = true;
-        buffer.close(ctx.accounts.owner.to_account_info())?;
+    if let Some(buffer_info) = ctx.accounts.bull_proof_buffer.as_ref() {
+        let lamports = buffer_info.lamports();
+        if lamports > 0 {
+            let close_ix = solana_program::system_instruction::transfer(
+                buffer_info.key,
+                ctx.accounts.owner.key,
+                lamports,
+            );
+            let close_account_infos = [
+                buffer_info.to_account_info(),
+                ctx.accounts.owner.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ];
+            solana_program::program::invoke(&close_ix, &close_account_infos)?;
+        }
     }
 
     Ok(())
