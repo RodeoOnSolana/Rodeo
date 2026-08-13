@@ -1555,6 +1555,25 @@ pub mod rodeo_core {
         Ok(())
     }
 
+
+    /// Test-only fixture to set the BullRegistry root and counters for
+    /// benchmark initialization.  Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_set_bull_registry(
+        ctx: Context<TestFixtureSetBullRegistry>,
+        owner_tree_root: [u8; 32],
+        total_bull_count: u64,
+        total_buck_power: u64,
+        registry_version: u64,
+    ) -> Result<()> {
+        let registry = &mut ctx.accounts.bull_registry;
+        registry.owner_tree_root = owner_tree_root;
+        registry.total_bull_count = total_bull_count;
+        registry.total_buck_power = total_buck_power;
+        registry.registry_version = registry_version;
+        Ok(())
+    }
+
     /// Test-only fixture to set pause flags for localnet/CI coverage. It is
     /// compiled only when the `test-fixtures` feature is enabled and is never
     /// part of the production ABI.
@@ -2558,6 +2577,26 @@ pub mod rodeo_core {
 
         Ok(())
     }
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct TestFixtureSetBullRegistry<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump = bull_registry.bump,
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
 }
 
 #[cfg(feature = "test-fixtures")]
