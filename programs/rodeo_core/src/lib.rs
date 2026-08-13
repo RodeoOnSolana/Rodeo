@@ -1484,9 +1484,37 @@ pub mod rodeo_core {
         ctx: Context<BenchmarkSparseTree>,
         victim: Option<Pubkey>,
         new_bull: Option<BullLeaf>,
-        payload: Vec<u8>,
     ) -> Result<()> {
-        let payload = bull_registry::verify_bull_proof_payload(&payload)?;
+        let payload = if let Some(buffer_info) = ctx.accounts.bull_proof_buffer.as_ref() {
+            require!(*buffer_info.owner == crate::ID, RodeoError::BullProofBufferWrongProver);
+            let data = buffer_info.data.borrow();
+            let mut data_slice: &[u8] = &**data;
+            let buffer = BullProofBuffer::try_deserialize(&mut data_slice)
+                .map_err(|_| RodeoError::BullProofBufferIncomplete)?;
+            require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
+            require_eq!(
+                buffer.schema_version,
+                BULL_PROOF_BUFFER_SCHEMA_VERSION,
+                RodeoError::BullProofBufferIncomplete
+            );
+            require_eq!(
+                buffer.payload.len() as u32,
+                buffer.expected_payload_length,
+                RodeoError::BullProofBufferIncomplete
+            );
+            bull_registry::verify_bull_proof_payload(&buffer.payload)?
+        } else {
+            BullProofPayloadV1 {
+                schema_version: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+                section_bitmap: 0,
+                victim_owner: None,
+                selected_owner: None,
+                selected_bull: None,
+                current_owner: None,
+                current_bull: None,
+                remove_bull: None,
+            }
+        };
         let registry = &mut ctx.accounts.bull_registry;
 
         let snapshot = SparseTreeBenchmarkSnapshot {
@@ -1571,6 +1599,84 @@ pub mod rodeo_core {
         registry.total_bull_count = total_bull_count;
         registry.total_buck_power = total_buck_power;
         registry.registry_version = registry_version;
+        Ok(())
+    }
+
+
+    /// Test-only fixture to initialize a BullProofBuffer for benchmark
+    /// staging, using dummy position/pending-randomness and authority as
+    /// prover/refund.  Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_initialize_bull_proof_buffer(
+        ctx: Context<TestFixtureInitializeBullProofBuffer>,
+        expected_payload_length: u32,
+        nonce: u64,
+    ) -> Result<()> {
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        buffer.version = ACCOUNT_VERSION_BULL_PROOF_BUFFER;
+        buffer.schema_version = BULL_PROOF_BUFFER_SCHEMA_VERSION;
+        buffer.action_type = ActionType::Unstake;
+        buffer.pending_randomness = ctx.accounts.authority.key();
+        buffer.position = ctx.accounts.authority.key();
+        buffer.snapshot_root = [0u8; 32];
+        buffer.snapshot_version = 0;
+        buffer.snapshot_total_count = 0;
+        buffer.snapshot_total_power = 0;
+        buffer.refund_recipient = ctx.accounts.authority.key();
+        buffer.expiry_timestamp = i64::MAX;
+        buffer.nonce = nonce;
+        buffer.expected_payload_length = expected_payload_length;
+        buffer.finalized = false;
+        buffer.consumed = false;
+        buffer.bump = ctx.bumps.bull_proof_buffer;
+        buffer.payload = Vec::new();
+        Ok(())
+    }
+
+    /// Test-only fixture to append a chunk to the benchmark
+    /// BullProofBuffer.  Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_append_bull_proof_buffer(
+        ctx: Context<TestFixtureAppendBullProofBuffer>,
+        nonce: u64,
+        offset: u32,
+        chunk: Vec<u8>,
+    ) -> Result<()> {
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        require!(!buffer.finalized, RodeoError::BullProofBufferFinalized);
+        require_eq!(
+            offset,
+            buffer.payload.len() as u32,
+            RodeoError::BullProofBufferOffsetGap
+        );
+        let new_len = (offset as usize)
+            .checked_add(chunk.len())
+            .ok_or(RodeoError::ArithmeticOverflow)?;
+        require_gte!(
+            buffer.expected_payload_length as usize,
+            new_len,
+            RodeoError::BullProofBufferOversized
+        );
+        require_gte!(BULL_PROOF_BUFFER_MAX_PAYLOAD, new_len, RodeoError::BullProofBufferOversized);
+        buffer.payload.extend_from_slice(&chunk);
+        Ok(())
+    }
+
+    /// Test-only fixture to finalize the benchmark BullProofBuffer.
+    /// Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_finalize_bull_proof_buffer(
+        ctx: Context<TestFixtureFinalizeBullProofBuffer>,
+        nonce: u64,
+    ) -> Result<()> {
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        require!(!buffer.finalized, RodeoError::BullProofBufferFinalized);
+        require_eq!(
+            buffer.payload.len() as u32,
+            buffer.expected_payload_length,
+            RodeoError::BullProofBufferIncomplete
+        );
+        buffer.finalized = true;
         Ok(())
     }
 
@@ -2597,6 +2703,78 @@ pub struct TestFixtureSetBullRegistry<'info> {
         bump = bull_registry.bump,
     )]
     pub bull_registry: Box<Account<'info, BullRegistry>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(expected_payload_length: u32, nonce: u64)]
+pub struct TestFixtureInitializeBullProofBuffer<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + BullProofBuffer::INIT_SPACE,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            authority.key().as_ref(),
+            authority.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(nonce: u64, offset: u32, chunk: Vec<u8>)]
+pub struct TestFixtureAppendBullProofBuffer<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            authority.key().as_ref(),
+            authority.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+        constraint = !bull_proof_buffer.finalized @ RodeoError::BullProofBufferFinalized,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(nonce: u64)]
+pub struct TestFixtureFinalizeBullProofBuffer<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            authority.key().as_ref(),
+            authority.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -3805,6 +3983,11 @@ pub struct BenchmarkSparseTree<'info> {
         bump = bull_registry.bump,
     )]
     pub bull_registry: Box<Account<'info, BullRegistry>>,
+
+    /// Benchmark reads a finalized BullProofBuffer account to mirror the
+    /// real production proof transport.  None gives an empty/no-proof
+    /// baseline.
+    pub bull_proof_buffer: Option<AccountInfo<'info>>,
 }
 
 #[cfg(feature = "test-fixtures")]
