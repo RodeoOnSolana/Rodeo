@@ -2792,8 +2792,8 @@ pub struct InitializeProtocol<'info> {
     )]
     pub program_data: AccountInfo<'info>,
 
-    pub rodeo_mint: Account<'info, Mint>,
-    pub ansem_mint: Account<'info, Mint>,
+    pub rodeo_mint: Box<Account<'info, Mint>>,
+    pub ansem_mint: Box<Account<'info, Mint>>,
 
     #[account(
         init,
@@ -3457,12 +3457,9 @@ pub struct SettleUnstake<'info> {
     pub bull_registry: Box<Account<'info, BullRegistry>>,
 
     /// Proof buffer is only required for Bull removal.
+    /// Its refund recipient is constrained to match the position owner.
     #[account(mut)]
     pub bull_proof_buffer: Option<Box<Account<'info, BullProofBuffer>>>,
-
-    /// CHECK: Receives the proof-buffer rent refund when a buffer is consumed.
-    #[account(mut)]
-    pub refund_recipient: Option<AccountInfo<'info>>,
 
     #[account(
         mut,
@@ -4563,20 +4560,23 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
     let pending_randomness_ref = &ctx.accounts.pending_randomness;
 
     // Parse the optional finalized proof buffer.
-    let payload = if let Some(buffer) = ctx.accounts.bull_proof_buffer.as_ref() {
-        require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
-        require!(!buffer.consumed, RodeoError::BullProofBufferAlreadyConsumed);
-        if let Some(ref refund) = ctx.accounts.refund_recipient {
-            require_keys_eq!(
-                buffer.refund_recipient,
-                refund.key(),
-                RodeoError::BullProofBufferWrongProver
-            );
-        }
-        Some(bull_registry::verify_bull_proof_payload(&buffer.payload)?)
-    } else {
-        None
-    };
+    let payload: Option<Box<BullProofPayloadV1>> =
+        if let Some(buffer) = ctx.accounts.bull_proof_buffer.as_ref() {
+            require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
+            require!(!buffer.consumed, RodeoError::BullProofBufferAlreadyConsumed);
+            if let Some(ref refund) = ctx.accounts.refund_recipient {
+                require_keys_eq!(
+                    buffer.refund_recipient,
+                    refund.key(),
+                    RodeoError::BullProofBufferWrongProver
+                );
+            }
+            Some(Box::new(bull_registry::verify_bull_proof_payload(
+                &buffer.payload,
+            )?))
+        } else {
+            None
+        };
 
     // Determine final owner and theft.
     let mut final_owner = prospective_owner;
@@ -5046,9 +5046,7 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
 
     if let Some(buffer) = ctx.accounts.bull_proof_buffer.as_deref_mut() {
         buffer.consumed = true;
-        if let Some(refund) = ctx.accounts.refund_recipient.as_ref() {
-            buffer.close(refund.to_account_info())?;
-        }
+        buffer.close(ctx.accounts.owner.to_account_info())?;
     }
 
     Ok(())
@@ -5067,28 +5065,29 @@ fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 3
     let position = &mut ctx.accounts.position;
     let pending_randomness = &mut ctx.accounts.pending_randomness;
 
-    let payload = if let Some(buffer) = ctx.accounts.bull_proof_buffer.as_ref() {
-        require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
-        require!(!buffer.consumed, RodeoError::BullProofBufferAlreadyConsumed);
-        require!(
-            buffer.action_type == ActionType::Unstake,
-            RodeoError::BullProofBufferIncomplete
-        );
-        require!(
-            buffer.position == position_key,
-            RodeoError::BullProofBufferWrongPosition
-        );
-        if let Some(ref refund) = ctx.accounts.refund_recipient {
+    let payload: Option<Box<BullProofPayloadV1>> =
+        if let Some(buffer) = ctx.accounts.bull_proof_buffer.as_ref() {
+            require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
+            require!(!buffer.consumed, RodeoError::BullProofBufferAlreadyConsumed);
+            require!(
+                buffer.action_type == ActionType::Unstake,
+                RodeoError::BullProofBufferIncomplete
+            );
+            require!(
+                buffer.position == position_key,
+                RodeoError::BullProofBufferWrongPosition
+            );
             require_keys_eq!(
                 buffer.refund_recipient,
-                refund.key(),
+                ctx.accounts.owner.key(),
                 RodeoError::BullProofBufferWrongProver
             );
-        }
-        Some(bull_registry::verify_bull_proof_payload(&buffer.payload)?)
-    } else {
-        None
-    };
+            Some(Box::new(bull_registry::verify_bull_proof_payload(
+                &buffer.payload,
+            )?))
+        } else {
+            None
+        };
 
     // Final reward synchronization before disposition.
     sync_cowboy_rewards(position, &mut ctx.accounts.reward_state)?;
