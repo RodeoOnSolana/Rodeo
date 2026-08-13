@@ -1,0 +1,107 @@
+name: Sparse tree SBF benchmark
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - phase-3/bull-registry-mint-theft
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  sbf-benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOLANA_VERSION: v2.2.20
+      ANCHOR_VERSION: 0.31.1
+      RUST_VERSION: 1.85.1
+      SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install/active_release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+          rustup override set "$RUST_VERSION"
+
+      - name: Restore Rust, Anchor, and Solana toolchains
+        id: toolchain-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/anchor
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.local/share/solana/install
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-anchor-${{ env.ANCHOR_VERSION }}-solana-${{ env.SOLANA_VERSION }}
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Install Agave CLI
+        run: |
+          if [ ! -x "$SOLANA_INSTALL_DIR/bin/solana" ]; then
+            sh -c "$(curl -sSfL https://release.anza.xyz/$SOLANA_VERSION/install)"
+          fi
+          echo "$SOLANA_INSTALL_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor CLI
+        run: |
+          if ! command -v anchor >/dev/null || [ "$(anchor --version)" != "anchor-cli $ANCHOR_VERSION" ]; then
+            cargo install anchor-cli --version "$ANCHOR_VERSION" --locked
+          fi
+
+      - name: Save Rust, Anchor, and Solana toolchains
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/bin/anchor
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.local/share/solana/install
+          key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Rodeo SBF with test-fixtures
+        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_core -- --features test-fixtures
+
+      - name: Generate SDK from test-fixtures IDLs
+        run: pnpm sdk:generate
+
+      - name: Build TypeScript SDK
+        run: pnpm build
+
+      - name: TypeScript typecheck
+        run: pnpm typecheck
+
+      - name: Run focused sparse-tree SBF benchmark
+        run: RODEO_TEST_SUITE=benchmark anchor test --skip-build --skip-local-validator
+
+      - name: Upload benchmark log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sparse-benchmark-log
+          path: .anchor/test-ledger/test-ledger-log.txt

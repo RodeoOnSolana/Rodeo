@@ -34,4 +34,4 @@ address = "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
 program = "vendor/mpl-core/mpl_core_program.so"
 
 [scripts]
-test = "pnpm --filter @rodeo/integration test"
+test = "sh -c 'if [ \"$RODEO_TEST_SUITE\" = \"benchmark\" ]; then pnpm --filter @rodeo/integration exec vitest run localnet-sparse-benchmark.test.ts; else pnpm --filter @rodeo/integration test; fi'"
