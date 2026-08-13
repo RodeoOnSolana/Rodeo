@@ -5167,7 +5167,7 @@ fn settle_bull_unstake<'info>(
     position_key: Pubkey,
     owner: Pubkey,
     position_id: u64,
-    buck_power: u32,
+    buck_power: u8,
     reveal_config_version: u64,
     claimable: u64,
     payload: &BullProofPayloadV1,
@@ -5282,8 +5282,10 @@ fn settle_bull_unstake<'info>(
     Ok(AnsemUnstakeFate::ToOwner)
 }
 
-fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 32]) -> Result<()> {
-    use crate::probability;
+fn settle_unstake_common<'info>(
+    ctx: &mut Context<'info, SettleUnstake<'info>>,
+    random_output: [u8; 32],
+) -> Result<()> {
 
     let config: &ProtocolConfig = &**ctx.accounts.protocol_config;
 
@@ -5397,88 +5399,22 @@ fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 3
             action_nonce,
             config,
         )?,
-        Role::Bull => {
-            if claimable > 0 {
-                require_gte!(
-                    reward_state.position_claimable_liability_atomic,
-                    claimable,
-                    RodeoError::LiabilityUnderflow
-                );
-                require_gte!(
-                    reward_state.recognized_reward_balance_atomic,
-                    claimable,
-                    RodeoError::InsufficientRecognizedRewards
-                );
-                require_gte!(
-                    reward_state.total_ansem_liability_atomic,
-                    claimable,
-                    RodeoError::LiabilityUnderflow
-                );
-
-                transfer_ansem_from_vault(
-                    claimable,
-                    &*ctx.accounts.global_config,
-                    ctx.accounts.reward_vault.to_account_info(),
-                    ctx.accounts.owner_ansem_account.to_account_info(),
-                    ctx.accounts.token_program.to_account_info(),
-                )?;
-
-                reward_state.position_claimable_liability_atomic = math::checked_sub_u64(
-                    reward_state.position_claimable_liability_atomic,
-                    claimable,
-                )?;
-                reward_state.total_ansem_liability_atomic =
-                    math::checked_sub_u64(reward_state.total_ansem_liability_atomic, claimable)?;
-                reward_state.recognized_reward_balance_atomic = math::checked_sub_u64(
-                    reward_state.recognized_reward_balance_atomic,
-                    claimable,
-                )?;
-                reward_state.ansem_claimed_atomic =
-                    math::checked_add_u64(reward_state.ansem_claimed_atomic, claimable)?;
-
-                emit!(RewardPaid {
-                    position: position_key,
-                    owner,
-                    amount_atomic: claimable,
-                    recognized_reward_balance_atomic: reward_state.recognized_reward_balance_atomic,
-                    reason: RewardPaidReason::UnstakeSettlement,
-                });
-            }
-
-            require_gte!(
-                game_state.active_bull_count,
-                1,
-                RodeoError::ArithmeticUnderflow
-            );
-            game_state.active_bull_count = math::checked_sub_u64(game_state.active_bull_count, 1)?;
-            require_gte!(
-                game_state.total_active_bull_power,
-                position.buck_power as u64,
-                RodeoError::ArithmeticUnderflow
-            );
-            game_state.total_active_bull_power = math::checked_sub_u64(
-                game_state.total_active_bull_power,
-                position.buck_power as u64,
-            )?;
-
-            // Remove the Bull from the current BullRegistry (handler split).
-            settle_bull_unstake(
-                &mut ctx.accounts.bull_registry,
-                reward_state,
-                game_state,
-                &*ctx.accounts.global_config,
-                &ctx.accounts.reward_vault,
-                &ctx.accounts.owner_ansem_account,
-                &ctx.accounts.token_program,
-                position_key,
-                owner,
-                position.position_id,
-                position.buck_power,
-                position.reveal_config_version,
-                claimable,
-                payload_ref.ok_or(RodeoError::BullProofBufferIncomplete)?,
-            )?
-        }
+        Role::Bull => settle_bull_unstake(
+            &mut ctx.accounts.bull_registry,
+            reward_state,
+            game_state,
+            &*ctx.accounts.global_config,
+            &ctx.accounts.reward_vault,
+            &ctx.accounts.owner_ansem_account,
+            &ctx.accounts.token_program,
+            position_key,
+            owner,
+            position.position_id,
+            position.buck_power,
+            position.reveal_config_version,
+            claimable,
+            payload_ref.ok_or(RodeoError::BullProofBufferIncomplete)?,
+        )?,
         Role::Unassigned => {
             return Err(error!(RodeoError::InvalidRole));
         }
