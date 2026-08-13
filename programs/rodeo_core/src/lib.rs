@@ -5545,6 +5545,7 @@ fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 3
 mod tests {
     use super::*;
     use crate::probability;
+    use crate::sparse_tree::*;
     use crate::state;
 
     #[cfg(not(feature = "mock-randomness"))]
@@ -6539,5 +6540,196 @@ mod tests {
         assert_ne!(ON_DEMAND_MAINNET_PID, Pubkey::default());
         assert_ne!(ON_DEMAND_DEVNET_PID, Pubkey::default());
         assert_ne!(ON_DEMAND_MAINNET_PID, ON_DEMAND_DEVNET_PID);
+    }
+
+    #[test]
+    fn compressed_proof_rejects_missing_and_extra_siblings() {
+        let key = pubkey_from_u64(123);
+        let empty_owner_leaf = OwnerLeaf::empty().to_node();
+
+        // Missing sibling: bitmap claims one, siblings vector is empty.
+        let mut malformed = CompressedSparseProof {
+            bitmap: [0u8; 32],
+            siblings: vec![],
+            leaf: empty_owner_leaf,
+        };
+        malformed.bitmap[0] = 1; // level 0 bit set, but no sibling supplied
+        assert!(bull_registry::verify_owner(
+            &empty_owner_tree_root(),
+            &key,
+            &CompressedOwnerProof {
+                leaf: OwnerLeaf::empty(),
+                proof: malformed,
+            },
+        )
+        .is_err());
+
+        // Extra sibling: bitmap is empty, but a sibling is supplied.
+        let mut extra = CompressedSparseProof {
+            bitmap: [0u8; 32],
+            siblings: vec![BullLeaf::empty().to_node()],
+            leaf: empty_owner_leaf,
+        };
+        assert!(bull_registry::verify_owner(
+            &empty_owner_tree_root(),
+            &key,
+            &CompressedOwnerProof {
+                leaf: OwnerLeaf::empty(),
+                proof: extra,
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn default_non_membership_proof_fails_in_non_empty_tree() {
+        // Build a non-empty owner tree with a single Bull.
+        let owner = pubkey_from_u64(1);
+        let position = pubkey_from_u64(100);
+        let mut registry = BullRegistry {
+            version: 1,
+            global_config: Pubkey::default(),
+            owner_tree_root: empty_owner_tree_root(),
+            total_bull_count: 0,
+            total_buck_power: 0,
+            registry_version: 0,
+            bump: 0,
+        };
+        let bull_leaf = BullLeaf {
+            position,
+            position_id: 1,
+            owner,
+            buck_power: 10,
+            reveal_config_version: 1,
+        };
+        let empty_owner_proof = CompressedOwnerProof {
+            leaf: OwnerLeaf::empty(),
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: OwnerLeaf::empty().to_node(),
+            },
+        };
+        let empty_bull_proof = CompressedBullProof {
+            leaf: BullLeaf::empty(),
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: BullLeaf::empty().to_node(),
+            },
+        };
+        bull_registry::add_bull_to_registry(
+            &mut registry,
+            &bull_leaf,
+            &empty_owner_proof,
+            &empty_bull_proof,
+        )
+        .expect("add should succeed");
+
+        // An attacker attempts the old arbitrary-index exploit: prove absence
+        // for a different owner using the *default* all-empty proof. This must
+        // NOT reconstruct the current non-empty root.
+        let other_owner = pubkey_from_u64(2);
+        let attack = CompressedOwnerProof {
+            leaf: OwnerLeaf::empty(),
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: OwnerLeaf::empty().to_node(),
+            },
+        };
+        assert!(
+            bull_registry::verify_owner(&registry.owner_tree_root, &other_owner, &attack,).is_err()
+        );
+    }
+
+    #[test]
+    fn bull_add_and_remove_round_trip() {
+        let owner = pubkey_from_u64(7);
+        let position = pubkey_from_u64(777);
+        let mut registry = BullRegistry {
+            version: 1,
+            global_config: Pubkey::default(),
+            owner_tree_root: empty_owner_tree_root(),
+            total_bull_count: 0,
+            total_buck_power: 0,
+            registry_version: 0,
+            bump: 0,
+        };
+        let bull_leaf = BullLeaf {
+            position,
+            position_id: 7,
+            owner,
+            buck_power: 6,
+            reveal_config_version: 2,
+        };
+        let empty_owner_proof = CompressedOwnerProof {
+            leaf: OwnerLeaf::empty(),
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: OwnerLeaf::empty().to_node(),
+            },
+        };
+        let empty_bull_proof = CompressedBullProof {
+            leaf: BullLeaf::empty(),
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: BullLeaf::empty().to_node(),
+            },
+        };
+
+        bull_registry::add_bull_to_registry(
+            &mut registry,
+            &bull_leaf,
+            &empty_owner_proof,
+            &empty_bull_proof,
+        )
+        .expect("add");
+        assert_eq!(registry.total_bull_count, 1);
+        assert_eq!(registry.total_buck_power, 6);
+
+        // The owner leaf after add, used as the removal owner proof.
+        let new_owner_leaf = bull_registry::add_bull_to_owner_leaf(
+            &OwnerLeaf::empty(),
+            &bull_leaf,
+            &empty_bull_proof,
+        )
+        .expect("owner leaf");
+        let owner_proof = CompressedOwnerProof {
+            leaf: new_owner_leaf,
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: new_owner_leaf.to_node(),
+            },
+        };
+        let bull_proof = CompressedBullProof {
+            leaf: bull_leaf.clone(),
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: bull_leaf.to_node(),
+            },
+        };
+
+        bull_registry::remove_bull_from_registry(
+            &mut registry,
+            &bull_leaf,
+            &owner_proof,
+            &bull_proof,
+        )
+        .expect("remove");
+        assert_eq!(registry.owner_tree_root, empty_owner_tree_root());
+        assert_eq!(registry.total_bull_count, 0);
+        assert_eq!(registry.total_buck_power, 0);
+        assert_eq!(registry.registry_version, 2);
+    }
+
+    #[test]
+    fn verify_bull_proof_payload_rejects_unknown_schema() {
+        let payload = vec![99u8, 0, 0, 0, 0];
+        assert!(bull_registry::verify_bull_proof_payload(&payload).is_err());
     }
 }
