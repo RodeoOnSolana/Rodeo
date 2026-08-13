@@ -5046,7 +5046,9 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
 
     if let Some(buffer) = ctx.accounts.bull_proof_buffer.as_deref_mut() {
         buffer.consumed = true;
-        buffer.close(ctx.accounts.owner.to_account_info())?;
+        if let Some(refund) = ctx.accounts.refund_recipient.as_ref() {
+            buffer.close(refund.to_account_info())?;
+        }
     }
 
     Ok(())
@@ -5528,9 +5530,7 @@ fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 3
 
     if let Some(buffer) = ctx.accounts.bull_proof_buffer.as_deref_mut() {
         buffer.consumed = true;
-        if let Some(refund) = ctx.accounts.refund_recipient.as_ref() {
-            buffer.close(refund.to_account_info())?;
-        }
+        buffer.close(ctx.accounts.owner.to_account_info())?;
     }
 
     Ok(())
