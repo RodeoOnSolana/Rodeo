@@ -5294,8 +5294,8 @@ fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 3
     let payload: Option<Box<BullProofPayloadV1>> =
         if let Some(buffer_info) = ctx.accounts.bull_proof_buffer.as_ref() {
             require_keys_eq!(
-                buffer_info.owner,
-                &crate::ID,
+                *buffer_info.owner,
+                crate::ID,
                 RodeoError::BullProofBufferWrongProver
             );
             let data = buffer_info.data.borrow();
