@@ -1276,7 +1276,25 @@ pub mod rodeo_core {
                 .map_err(|_| RodeoError::RandomnessNotReady)?
         };
 
-        settle_unstake_common(&mut ctx, random_output)
+        let global_config_key = ctx.accounts.global_config.key().clone();
+        let config_version = ctx.accounts.pending_randomness.config_version_snapshot;
+        let (expected_protocol_config_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                global_config_key.as_ref(),
+                &config_version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let protocol_config_box = load_historical_protocol_config(
+            &*ctx.accounts.protocol_config,
+            &expected_protocol_config_key,
+            &global_config_key,
+            config_version,
+        )?;
+        let config: &ProtocolConfig = &*protocol_config_box;
+
+        settle_unstake_common(&mut ctx, random_output, config)
     }
 
     pub fn recover_unstake_timeout(ctx: Context<RecoverUnstakeTimeout>) -> Result<()> {
@@ -3490,16 +3508,8 @@ pub struct SettleUnstake<'info> {
     )]
     pub pending_randomness: Box<Account<'info, PendingRandomness>>,
 
-    #[account(
-        seeds = [
-            SEED_PROTOCOL_CONFIG,
-            global_config.key().as_ref(),
-            &pending_randomness.config_version_snapshot.to_le_bytes(),
-        ],
-        bump = protocol_config.bump,
-        constraint = protocol_config.config_version == pending_randomness.config_version_snapshot @ RodeoError::InvalidProbabilityTable,
-    )]
-    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
+    /// CHECK: PDA, program ownership, and contents are validated manually in the handler.
+    pub protocol_config: UncheckedAccount<'info>,
 
     #[account(
         mut,
@@ -3542,36 +3552,19 @@ pub struct SettleUnstake<'info> {
     #[account(mut, constraint = owner.key() == position.owner @ RodeoError::InvalidOwner)]
     pub owner: AccountInfo<'info>,
 
-    /// CHECK: The PositionReceipt Core Asset to be burned.
-    #[account(
-        mut,
-        seeds = [SEED_POSITION_RECEIPT, position.key().as_ref()],
-        bump,
-        constraint = receipt_asset.key() == position.receipt_asset @ RodeoError::InvalidCoreAssetOwner,
-    )]
+    /// CHECK: PDA, ownership, and relation to the position are validated manually.
+    #[account(mut)]
     pub receipt_asset: UncheckedAccount<'info>,
 
-    /// CHECK: The official Rodeo receipt Collection this asset belongs to.
-    #[account(
-        mut,
-        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
-        bump,
-    )]
+    /// CHECK: PDA is validated manually.
+    #[account(mut)]
     pub receipt_collection: UncheckedAccount<'info>,
 
-    /// CHECK: Stateless ReceiptAuthority PDA used to sign the `BurnV1` CPI.
-    #[account(
-        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
-        bump,
-    )]
+    /// CHECK: PDA is validated manually.
     pub receipt_authority: UncheckedAccount<'info>,
 
-    /// CHECK: The ReceiptFunder PDA that paid the create rent and receives the burn refund.
-    #[account(
-        mut,
-        seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
-        bump,
-    )]
+    /// CHECK: PDA is validated manually.
+    #[account(mut)]
     pub receipt_funder: UncheckedAccount<'info>,
 
     /// CHECK: MPL Core program.
@@ -5220,8 +5213,7 @@ fn settle_bull_unstake<'info>(
         1,
         RodeoError::ArithmeticUnderflow
     );
-    game_state.active_bull_count =
-        math::checked_sub_u64(game_state.active_bull_count, 1)?;
+    game_state.active_bull_count = math::checked_sub_u64(game_state.active_bull_count, 1)?;
     require_gte!(
         game_state.total_active_bull_power,
         buck_power as u64,
@@ -5238,11 +5230,7 @@ fn settle_bull_unstake<'info>(
         .remove_bull
         .as_ref()
         .ok_or(RodeoError::BullProofBufferIncomplete)?;
-    crate::bull_registry::verify_owner(
-        &bull_registry.owner_tree_root,
-        &owner,
-        current_owner,
-    )?;
+    crate::bull_registry::verify_owner(&bull_registry.owner_tree_root, &owner, current_owner)?;
     crate::bull_registry::verify_bull(
         &current_owner.leaf.bull_tree_root,
         &position_key,
@@ -5282,10 +5270,134 @@ fn settle_bull_unstake<'info>(
     Ok(AnsemUnstakeFate::ToOwner)
 }
 
-fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 32]) -> Result<()> {
+#[inline(never)]
+fn burn_position_receipt(
+    position_key: Pubkey,
+    owner: Pubkey,
+    position_id: u64,
+    receipt_asset: Pubkey,
+    ctx: &Context<SettleUnstake>,
+) -> Result<Pubkey> {
+    let global_config_key = ctx.accounts.global_config.key();
+    let (receipt_authority, receipt_authority_bump) = receipt_authority_pda(&global_config_key);
+    let (collection, _collection_bump) = receipt_collection_pda(&global_config_key);
+    let (funder, funder_bump) = receipt_funder_pda(&position_key);
 
-    let config: &ProtocolConfig = &**ctx.accounts.protocol_config;
+    require_keys_eq!(
+        ctx.accounts.receipt_authority.key(),
+        receipt_authority,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_collection.key(),
+        collection,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_funder.key(),
+        funder,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_asset.key(),
+        receipt_asset,
+        RodeoError::InvalidCoreAssetOwner
+    );
 
+    let burn_ix = BurnV1Builder::new()
+        .asset(receipt_asset)
+        .collection(Some(collection))
+        .authority(Some(receipt_authority))
+        .payer(funder)
+        .system_program(Some(solana_program::system_program::ID))
+        .instruction();
+
+    let burn_account_infos = [
+        ctx.accounts.receipt_asset.to_account_info(),
+        ctx.accounts.receipt_collection.to_account_info(),
+        ctx.accounts.receipt_funder.to_account_info(),
+        ctx.accounts.receipt_authority.to_account_info(),
+        ctx.accounts.system_program.to_account_info(),
+        ctx.accounts.mpl_core_program.to_account_info(),
+    ];
+    let receipt_authority_seeds = [
+        SEED_RECEIPT_AUTHORITY,
+        global_config_key.as_ref(),
+        &[receipt_authority_bump],
+    ];
+    let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
+
+    solana_program::program::invoke_signed(
+        &burn_ix,
+        &burn_account_infos,
+        &[&receipt_authority_seeds, &funder_seeds],
+    )
+    .map_err(|e: ProgramError| Into::<Error>::into(e))?;
+
+    let funder_lamports = ctx.accounts.receipt_funder.to_account_info().lamports();
+    if funder_lamports > 0 {
+        let funder_close_ix = solana_program::system_instruction::transfer(
+            &funder,
+            ctx.accounts.owner.key,
+            funder_lamports,
+        );
+        let funder_close_account_infos = [
+            ctx.accounts.receipt_funder.to_account_info(),
+            ctx.accounts.owner.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ];
+        solana_program::program::invoke_signed(
+            &funder_close_ix,
+            &funder_close_account_infos,
+            &[&funder_seeds],
+        )?;
+    }
+
+    emit!(ReceiptBurned {
+        position: position_key,
+        position_id,
+        receipt_asset,
+        owner,
+        collection,
+    });
+
+    Ok(collection)
+}
+
+fn load_historical_protocol_config(
+    protocol_config: &AccountInfo,
+    expected_key: &Pubkey,
+    expected_global_config: &Pubkey,
+    expected_version: u64,
+) -> Result<Box<ProtocolConfig>> {
+    require!(
+        protocol_config.key() == *expected_key,
+        RodeoError::InvalidProbabilityTable
+    );
+    require!(
+        protocol_config.owner == &crate::ID,
+        RodeoError::InvalidProbabilityTable
+    );
+    let data = protocol_config.data.borrow();
+    let mut data: &[u8] = &**data;
+    let config = ProtocolConfig::try_deserialize(&mut data)
+        .map_err(|_| error!(RodeoError::InvalidProbabilityTable))?;
+    require!(
+        config.global_config == *expected_global_config,
+        RodeoError::InvalidProbabilityTable
+    );
+    require!(
+        config.config_version == expected_version,
+        RodeoError::InvalidProbabilityTable
+    );
+    Ok(Box::new(config))
+}
+
+fn settle_unstake_common(
+    ctx: &mut Context<SettleUnstake>,
+    random_output: [u8; 32],
+    config: &ProtocolConfig,
+) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let position_key = ctx.accounts.position.key();
     let action_type = ctx.accounts.pending_randomness.action_type;
@@ -5466,90 +5578,19 @@ fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 3
     // Burn the PositionReceipt and close the ReceiptFunder, returning the
     // remaining SOL reserve to the current owner. The receipt must already
     // exist (reveal was successful) because `position.receipt_asset` is set.
-    let global_config_key = ctx.accounts.global_config.key();
-    let (receipt_authority, receipt_authority_bump) = receipt_authority_pda(&global_config_key);
-    let (collection, _collection_bump) = receipt_collection_pda(&global_config_key);
-    let (funder, funder_bump) = receipt_funder_pda(&position_key);
 
-    require_keys_eq!(
-        ctx.accounts.receipt_authority.key(),
-        receipt_authority,
-        RodeoError::InvalidCoreAssetOwner
-    );
-    require_keys_eq!(
-        ctx.accounts.receipt_collection.key(),
-        collection,
-        RodeoError::InvalidCoreAssetOwner
-    );
-    require_keys_eq!(
-        ctx.accounts.receipt_funder.key(),
-        funder,
-        RodeoError::InvalidCoreAssetOwner
-    );
-    require_keys_eq!(
-        ctx.accounts.receipt_asset.key(),
-        position.receipt_asset,
-        RodeoError::InvalidCoreAssetOwner
-    );
+    // Capture the values needed by the receipt-burn helper and by the
+    // post-burn events before the context is borrowed for the CPI call.
+    let position_id = position.position_id;
+    let receipt_asset = position.receipt_asset;
+    let committed_slot = pending_randomness.committed_slot;
+    let committed_protocol_epoch = pending_randomness.committed_protocol_epoch;
+    let config_version_snapshot = pending_randomness.config_version_snapshot;
 
-    let burn_ix = BurnV1Builder::new()
-        .asset(position.receipt_asset)
-        .collection(Some(collection))
-        .authority(Some(receipt_authority))
-        .payer(funder)
-        .system_program(Some(solana_program::system_program::ID))
-        .instruction();
+    let _collection =
+        burn_position_receipt(position_key, owner, position_id, receipt_asset, &*ctx)?;
 
-    let burn_account_infos = [
-        ctx.accounts.receipt_asset.to_account_info(),
-        ctx.accounts.receipt_collection.to_account_info(),
-        ctx.accounts.receipt_funder.to_account_info(),
-        ctx.accounts.receipt_authority.to_account_info(),
-        ctx.accounts.system_program.to_account_info(),
-        ctx.accounts.mpl_core_program.to_account_info(),
-    ];
-    let receipt_authority_seeds = [
-        SEED_RECEIPT_AUTHORITY,
-        global_config_key.as_ref(),
-        &[receipt_authority_bump],
-    ];
-    let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
-
-    solana_program::program::invoke_signed(
-        &burn_ix,
-        &burn_account_infos,
-        &[&receipt_authority_seeds, &funder_seeds],
-    )
-    .map_err(|e: ProgramError| Into::<Error>::into(e))?;
-
-    let funder_lamports = ctx.accounts.receipt_funder.to_account_info().lamports();
-    if funder_lamports > 0 {
-        let funder_close_ix = solana_program::system_instruction::transfer(
-            &funder,
-            ctx.accounts.owner.key,
-            funder_lamports,
-        );
-        let funder_close_account_infos = [
-            ctx.accounts.receipt_funder.to_account_info(),
-            ctx.accounts.owner.to_account_info(),
-            ctx.accounts.system_program.to_account_info(),
-        ];
-        solana_program::program::invoke_signed(
-            &funder_close_ix,
-            &funder_close_account_infos,
-            &[&funder_seeds],
-        )?;
-    }
-
-    emit!(ReceiptBurned {
-        position: position_key,
-        position_id: position.position_id,
-        receipt_asset: position.receipt_asset,
-        owner,
-        collection,
-    });
-
-    position.receipt_asset = Pubkey::default();
+    ctx.accounts.position.receipt_asset = Pubkey::default();
 
     emit!(PositionUnstaked {
         position: position_key,
@@ -5570,17 +5611,17 @@ fn settle_unstake_common(ctx: &mut Context<SettleUnstake>, random_output: [u8; 3
             0
         },
         settlement_nonce,
-        config_version: pending_randomness.config_version_snapshot,
+        config_version: config_version_snapshot,
     });
     emit!(RandomnessSettled {
         position: position_key,
         action_type,
         action_nonce,
         settlement_nonce,
-        committed_slot: pending_randomness.committed_slot,
-        committed_protocol_epoch: pending_randomness.committed_protocol_epoch,
+        committed_slot,
+        committed_protocol_epoch,
         settled_at: now,
-        config_version_snapshot: pending_randomness.config_version_snapshot,
+        config_version_snapshot,
     });
 
     if let Some(buffer_info) = ctx.accounts.bull_proof_buffer.as_ref() {
