@@ -1,11 +1,12 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::hash::hashv;
 
+use crate::borrowed_proof::{BullProofRef, OwnerProofRef};
 use crate::constants::*;
 use crate::math;
 use crate::sparse_tree::{
-    hash_node, recompute_root_after_replace, verify_with_prefix, CompressedSparseProof,
-    SparseMerkleNode, SPARSE_TREE_DEPTH,
+    hash_node, recompute_root_after_replace, recompute_root_after_replace_ref, verify_with_prefix,
+    CompressedSparseProof, SparseMerkleNode, SPARSE_TREE_DEPTH,
 };
 use crate::RodeoError;
 
@@ -495,6 +496,102 @@ pub fn remove_bull_from_registry(
         owner_proof,
         &new_owner_leaf,
     )?;
+    registry.total_bull_count = math::checked_sub_u64(registry.total_bull_count, 1)?;
+    registry.total_buck_power =
+        math::checked_sub_u64(registry.total_buck_power, bull_leaf.buck_power as u64)?;
+    registry.registry_version = math::checked_add_u64(registry.registry_version, 1)?;
+    Ok(())
+}
+
+/// Borrowed-proof variant of `remove_bull_from_registry`.
+///
+/// Accepts `OwnerProofRef` and `BullProofRef` (zero-copy borrowed views over
+/// the raw BullProofBuffer payload) and uses `recompute_root_after_replace_ref`
+/// so no owned `CompressedOwnerProof` / `CompressedBullProof` / `Vec<u8>` is
+/// materialized on the production Bull Unstake SBF path.
+///
+/// The caller is responsible for authenticating the owner and Bull leaves via
+/// `verify_owner_ref` / `verify_bull_ref` BEFORE calling this helper; this
+/// function only performs the deterministic tree recomputation and registry
+/// accounting.
+pub fn remove_bull_from_registry_borrowed(
+    registry: &mut crate::state::BullRegistry,
+    bull_leaf: &BullLeaf,
+    owner_proof: &OwnerProofRef<'_>,
+    bull_proof: &BullProofRef<'_>,
+) -> Result<()> {
+    require!(
+        !bull_proof.leaf.is_empty(),
+        RodeoError::BullRegistrySlotEmpty
+    );
+    require!(
+        bull_proof.leaf.owner == owner_proof.leaf.owner,
+        RodeoError::BullRegistryOwnerMismatch
+    );
+
+    // Recompute the owner's Bull subtree root after replacing the exiting
+    // Bull leaf with the canonical empty Bull node.
+    let new_bull_root = recompute_root_after_replace_ref(
+        &bull_proof.leaf.position.to_bytes(),
+        &bull_proof.proof,
+        &BullLeaf::empty().to_node(),
+        PREFIX_BULL_NODE,
+        &default_bull_leaf_node(),
+    )?;
+
+    let new_count = math::checked_sub_u64(owner_proof.leaf.active_bull_count, 1)?;
+    let new_power = math::checked_sub_u64(
+        owner_proof.leaf.total_buck_power,
+        bull_proof.leaf.buck_power as u64,
+    )?;
+
+    // If this was the owner's final Bull, the owner leaf becomes canonical
+    // empty.  Otherwise update count/power/bull_tree_root.
+    let new_owner_leaf = if new_count == 0 {
+        OwnerLeaf::empty()
+    } else {
+        OwnerLeaf {
+            owner: owner_proof.leaf.owner,
+            active_bull_count: new_count,
+            total_buck_power: new_power,
+            bull_tree_root: new_bull_root.hash,
+        }
+    };
+
+    // Recompute the global owner tree root after replacing the owner leaf.
+    let current_node = owner_proof.leaf.to_node();
+    let new_node = new_owner_leaf.to_node();
+
+    if !owner_proof.leaf.is_empty() {
+        require_keys_eq!(
+            owner_proof.leaf.owner,
+            bull_leaf.owner,
+            RodeoError::BullRegistryOwnerMismatch
+        );
+    }
+
+    // Verify the supplied proof reconstructs the current canonical root.
+    let check_root = recompute_root_after_replace_ref(
+        &bull_leaf.owner.to_bytes(),
+        &owner_proof.proof,
+        &current_node,
+        PREFIX_BULL_OWNER_NODE,
+        &default_owner_leaf_node(),
+    )?;
+    require!(
+        check_root.hash == registry.owner_tree_root,
+        RodeoError::BullRegistryInvalidRoot
+    );
+
+    let recomputed = recompute_root_after_replace_ref(
+        &bull_leaf.owner.to_bytes(),
+        &owner_proof.proof,
+        &new_node,
+        PREFIX_BULL_OWNER_NODE,
+        &default_owner_leaf_node(),
+    )?;
+
+    registry.owner_tree_root = recomputed.hash;
     registry.total_bull_count = math::checked_sub_u64(registry.total_bull_count, 1)?;
     registry.total_buck_power =
         math::checked_sub_u64(registry.total_buck_power, bull_leaf.buck_power as u64)?;

@@ -25,3 +25,4 @@ phase-2a-*.txt
 check_ix*.js
 tests/integration/localnet-hash-loop.test.ts
 tests/integration/localnet-heap-diagnostic.test.ts
+test-ledger/

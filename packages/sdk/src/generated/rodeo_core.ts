@@ -1,7 +1,7 @@
 import type { Idl } from "@coral-xyz/anchor";
 
 export const rodeoCoreIdl = {
-  "address": "EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z",
+  "address": "CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA",
   "metadata": {
     "name": "rodeo_core",
     "version": "0.1.0",
@@ -9,6 +9,83 @@ export const rodeoCoreIdl = {
     "description": "Rodeo Phase 2A core foundation: accounts, constants, probability, and initialization"
   },
   "instructions": [
+    {
+      "name": "append_bull_proof",
+      "discriminator": [
+        116,
+        101,
+        133,
+        187,
+        96,
+        216,
+        220,
+        112
+      ],
+      "accounts": [
+        {
+          "name": "prover",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "bull_proof_buffer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  112,
+                  114,
+                  111,
+                  111,
+                  102,
+                  45,
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bull_proof_buffer.pending_randomness",
+                "account": "BullProofBuffer"
+              },
+              {
+                "kind": "account",
+                "path": "prover"
+              },
+              {
+                "kind": "arg",
+                "path": "nonce"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "nonce",
+          "type": "u64"
+        },
+        {
+          "name": "offset",
+          "type": "u32"
+        },
+        {
+          "name": "chunk",
+          "type": "bytes"
+        }
+      ]
+    },
     {
       "name": "claim_position",
       "discriminator": [
@@ -237,6 +314,81 @@ export const rodeoCoreIdl = {
       "args": []
     },
     {
+      "name": "close_bull_proof",
+      "discriminator": [
+        211,
+        118,
+        225,
+        48,
+        176,
+        73,
+        171,
+        10
+      ],
+      "accounts": [
+        {
+          "name": "prover"
+        },
+        {
+          "name": "bull_proof_buffer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  112,
+                  114,
+                  111,
+                  111,
+                  102,
+                  45,
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bull_proof_buffer.pending_randomness",
+                "account": "BullProofBuffer"
+              },
+              {
+                "kind": "account",
+                "path": "prover"
+              },
+              {
+                "kind": "arg",
+                "path": "nonce"
+              }
+            ]
+          }
+        },
+        {
+          "name": "refund_recipient",
+          "writable": true
+        },
+        {
+          "name": "clock",
+          "address": "SysvarC1ock11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "nonce",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "close_epochs",
       "discriminator": [
         104,
@@ -391,6 +543,220 @@ export const rodeoCoreIdl = {
         {
           "name": "max_epochs",
           "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "finalize_bull_proof",
+      "discriminator": [
+        110,
+        36,
+        98,
+        138,
+        130,
+        249,
+        238,
+        55
+      ],
+      "accounts": [
+        {
+          "name": "prover",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "bull_proof_buffer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  112,
+                  114,
+                  111,
+                  111,
+                  102,
+                  45,
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bull_proof_buffer.pending_randomness",
+                "account": "BullProofBuffer"
+              },
+              {
+                "kind": "account",
+                "path": "prover"
+              },
+              {
+                "kind": "arg",
+                "path": "nonce"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "nonce",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "initialize_bull_proof",
+      "discriminator": [
+        19,
+        36,
+        91,
+        228,
+        141,
+        207,
+        64,
+        224
+      ],
+      "accounts": [
+        {
+          "name": "prover",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "account",
+                "path": "position.position_id",
+                "account": "Position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pending_randomness"
+        },
+        {
+          "name": "bull_proof_buffer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  112,
+                  114,
+                  111,
+                  111,
+                  102,
+                  45,
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pending_randomness"
+              },
+              {
+                "kind": "account",
+                "path": "prover"
+              },
+              {
+                "kind": "arg",
+                "path": "nonce"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "action_type",
+          "type": {
+            "defined": {
+              "name": "ActionType"
+            }
+          }
+        },
+        {
+          "name": "expected_payload_length",
+          "type": "u32"
+        },
+        {
+          "name": "nonce",
+          "type": "u64"
         }
       ]
     },
@@ -560,6 +926,36 @@ export const rodeoCoreIdl = {
           }
         },
         {
+          "name": "bull_registry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
           "name": "protocol_config",
           "writable": true
         },
@@ -615,6 +1011,84 @@ export const rodeoCoreIdl = {
               }
             ]
           }
+        },
+        {
+          "name": "receipt_collection",
+          "docs": [
+            "`initialize_protocol` via the MPL Core `CreateCollectionV2` CPI."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_authority",
+          "docs": [
+            "authority and as the signer for all receipt lifecycle actions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
         },
         {
           "name": "token_program",
@@ -842,6 +1316,9 @@ export const rodeoCoreIdl = {
         },
         {
           "name": "owner",
+          "docs": [
+            "Also receives the unused ReceiptFunder reserve when the reveal times out."
+          ],
           "writable": true
         },
         {
@@ -874,6 +1351,40 @@ export const rodeoCoreIdl = {
               {
                 "kind": "account",
                 "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_funder",
+          "docs": [
+            "because the reveal was never completed and no receipt was created."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
               }
             ]
           }
@@ -1171,6 +1682,14 @@ export const rodeoCoreIdl = {
         {
           "name": "clock",
           "address": "SysvarC1ock11111111111111111111111111111111"
+        },
+        {
+          "name": "provider_randomness_account",
+          "docs": [
+            "fulfilled and used as the entropy source for unstake settlement.",
+            "Must be owned by the Switchboard On-Demand program and unresolved."
+          ],
+          "writable": true
         }
       ],
       "args": []
@@ -1315,6 +1834,36 @@ export const rodeoCoreIdl = {
           }
         },
         {
+          "name": "bull_registry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
           "name": "position",
           "writable": true,
           "pda": {
@@ -1347,6 +1896,21 @@ export const rodeoCoreIdl = {
         {
           "name": "pending_randomness",
           "writable": true
+        },
+        {
+          "name": "bull_proof_buffer",
+          "docs": [
+            "Proof buffer is optional.  It is required when mint theft or new-Bull",
+            "current-mutation proof data is needed, and must be omitted when no",
+            "proof is required."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "refund_recipient",
+          "writable": true,
+          "optional": true
         },
         {
           "name": "protocol_config",
@@ -1386,7 +1950,151 @@ export const rodeoCoreIdl = {
         },
         {
           "name": "owner",
+          "docs": [
+            "Also used as the embedded Core asset owner for the PositionReceipt."
+          ],
           "writable": true
+        },
+        {
+          "name": "receipt_asset",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_collection",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_authority",
+          "docs": [
+            "and asset-creation authority."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_funder",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        },
+        {
+          "name": "provider_randomness_account",
+          "docs": [
+            "Required in production builds; ignored when the `mock-randomness` feature is enabled."
+          ],
+          "optional": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
         },
         {
           "name": "clock",
@@ -1535,6 +2243,57 @@ export const rodeoCoreIdl = {
           }
         },
         {
+          "name": "bull_registry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bull_proof_buffer",
+          "docs": [
+            "Proof buffer is only required for Bull removal.",
+            "It is loaded manually in the handler to keep `SettleUnstake::try_accounts`",
+            "within the SBF stack limit.  The buffer is prover-funded and its",
+            "`refund_recipient` is committed at initialization to the prover's key,",
+            "which may differ from the position owner (independent proof service)."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "refund_recipient",
+          "docs": [
+            "Validated against `buffer.refund_recipient` in the handler.  This is",
+            "separate from the owner-funded ReceiptFunder reserve refund."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
           "name": "position",
           "writable": true,
           "pda": {
@@ -1569,40 +2328,7 @@ export const rodeoCoreIdl = {
           "writable": true
         },
         {
-          "name": "protocol_config",
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  114,
-                  111,
-                  116,
-                  111,
-                  99,
-                  111,
-                  108,
-                  45,
-                  99,
-                  111,
-                  110,
-                  102,
-                  105,
-                  103
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "global_config"
-              },
-              {
-                "kind": "account",
-                "path": "pending_randomness.config_version_snapshot",
-                "account": "PendingRandomness"
-              }
-            ]
-          }
+          "name": "protocol_config"
         },
         {
           "name": "principal_vault",
@@ -1650,15 +2376,48 @@ export const rodeoCoreIdl = {
         },
         {
           "name": "owner",
+          "docs": [
+            "Also receives the residual ReceiptFunder SOL after receipt burn."
+          ],
           "writable": true
+        },
+        {
+          "name": "receipt_asset",
+          "writable": true
+        },
+        {
+          "name": "receipt_collection",
+          "writable": true
+        },
+        {
+          "name": "receipt_authority"
+        },
+        {
+          "name": "receipt_funder",
+          "writable": true
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
         },
         {
           "name": "token_program",
           "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
         },
         {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
           "name": "clock",
           "address": "SysvarC1ock11111111111111111111111111111111"
+        },
+        {
+          "name": "provider_randomness_account",
+          "docs": [
+            "request time and must now be resolved to settle the unstake."
+          ],
+          "writable": true
         }
       ],
       "args": []
@@ -1870,6 +2629,77 @@ export const rodeoCoreIdl = {
           }
         },
         {
+          "name": "bull_registry",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_funder",
+          "docs": [
+            "Created and prefunded by the player during stake_and_commit; it is",
+            "later used as the MPL Core payer for receipt create/burn."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "provider_randomness_account",
+          "docs": [
+            "Required in production builds; ignored when the `mock-randomness` feature is enabled."
+          ],
+          "optional": true
+        },
+        {
           "name": "token_program",
           "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
         },
@@ -1910,6 +2740,32 @@ export const rodeoCoreIdl = {
         22,
         3,
         121
+      ]
+    },
+    {
+      "name": "BullProofBuffer",
+      "discriminator": [
+        149,
+        159,
+        68,
+        187,
+        102,
+        204,
+        75,
+        17
+      ]
+    },
+    {
+      "name": "BullRegistry",
+      "discriminator": [
+        80,
+        20,
+        181,
+        29,
+        55,
+        244,
+        226,
+        245
       ]
     },
     {
@@ -2019,6 +2875,19 @@ export const rodeoCoreIdl = {
       ]
     },
     {
+      "name": "BullRegistryTransition",
+      "discriminator": [
+        42,
+        86,
+        103,
+        6,
+        234,
+        105,
+        0,
+        139
+      ]
+    },
+    {
       "name": "BullRewardDistributed",
       "discriminator": [
         145,
@@ -2055,6 +2924,19 @@ export const rodeoCoreIdl = {
         209,
         20,
         117
+      ]
+    },
+    {
+      "name": "MintTheft",
+      "discriminator": [
+        73,
+        70,
+        112,
+        8,
+        244,
+        86,
+        17,
+        30
       ]
     },
     {
@@ -2185,6 +3067,32 @@ export const rodeoCoreIdl = {
         74,
         178,
         144
+      ]
+    },
+    {
+      "name": "ReceiptBurned",
+      "discriminator": [
+        167,
+        239,
+        65,
+        58,
+        167,
+        36,
+        4,
+        147
+      ]
+    },
+    {
+      "name": "ReceiptCreated",
+      "discriminator": [
+        53,
+        236,
+        206,
+        24,
+        194,
+        10,
+        208,
+        163
       ]
     },
     {
@@ -2450,108 +3358,263 @@ export const rodeoCoreIdl = {
     },
     {
       "code": 6044,
+      "name": "InvalidPositionId",
+      "msg": "position_id must equal the next global position id"
+    },
+    {
+      "code": 6045,
       "name": "InvalidPrincipalVault",
       "msg": "Principal vault is invalid for the configured mint or authority"
     },
     {
-      "code": 6045,
+      "code": 6046,
       "name": "InvalidTokenAccount",
       "msg": "Owner token account is invalid for the configured mint or signer"
     },
     {
-      "code": 6046,
+      "code": 6047,
       "name": "PendingActionConflict",
       "msg": "Position already has a conflicting pending action"
     },
     {
-      "code": 6047,
+      "code": 6048,
       "name": "WrongActionType",
       "msg": "Pending action type does not match the requested operation"
     },
     {
-      "code": 6048,
+      "code": 6049,
       "name": "InvalidPendingRandomness",
       "msg": "Pending randomness account does not match the position and nonce"
     },
     {
-      "code": 6049,
+      "code": 6050,
       "name": "RandomnessNotReady",
       "msg": "Randomness result is not yet available"
     },
     {
-      "code": 6050,
+      "code": 6051,
       "name": "RandomnessTimeoutNotReached",
       "msg": "Randomness timeout has not been reached"
     },
     {
-      "code": 6051,
+      "code": 6052,
       "name": "RandomnessAlreadyAvailable",
       "msg": "Randomness has already been settled for this action"
     },
     {
-      "code": 6052,
+      "code": 6053,
       "name": "InvalidEpochBatch",
       "msg": "Invalid epoch batch size"
     },
     {
-      "code": 6053,
+      "code": 6054,
       "name": "NoElapsedEpoch",
       "msg": "No elapsed epoch to close"
     },
     {
-      "code": 6054,
+      "code": 6055,
       "name": "InvalidRewardVault",
       "msg": "Reward vault is invalid for the configured mint or authority"
     },
     {
-      "code": 6055,
+      "code": 6056,
       "name": "InvalidAnsemMint",
       "msg": "ANSEM mint account is invalid"
     },
     {
-      "code": 6056,
+      "code": 6057,
       "name": "InvalidRewardDestination",
       "msg": "Reward destination account is invalid"
     },
     {
-      "code": 6057,
+      "code": 6058,
       "name": "InsufficientRecognizedRewards",
       "msg": "Insufficient recognized rewards for the requested operation"
     },
     {
-      "code": 6058,
+      "code": 6059,
       "name": "LiabilityUnderflow",
       "msg": "Liability underflow"
     },
     {
-      "code": 6059,
+      "code": 6060,
       "name": "InvalidRewardIndex",
       "msg": "Invalid reward index ordering"
     },
     {
-      "code": 6060,
+      "code": 6061,
       "name": "InvalidRole",
       "msg": "Position role is invalid for this operation"
     },
     {
-      "code": 6061,
+      "code": 6062,
       "name": "UnstakeNotEligible",
       "msg": "Position is not yet eligible for unstake"
     },
     {
-      "code": 6062,
+      "code": 6063,
       "name": "NoPendingUnstakeAction",
       "msg": "No unstake action is pending for this position"
     },
     {
-      "code": 6063,
+      "code": 6064,
       "name": "UnstakeAlreadySettled",
       "msg": "Unstake has already been settled"
     },
     {
-      "code": 6064,
+      "code": 6065,
       "name": "InvalidRodeoDestination",
       "msg": "RODEO destination account is invalid"
+    },
+    {
+      "code": 6066,
+      "name": "InvalidCoreAssetProgramOwner",
+      "msg": "Account is not owned by the MPL Core program"
+    },
+    {
+      "code": 6067,
+      "name": "CoreAssetDeserializationFailed",
+      "msg": "Failed to deserialize a Core asset account"
+    },
+    {
+      "code": 6068,
+      "name": "MissingPermanentTransferDelegate",
+      "msg": "Missing or malformed permanent transfer delegate"
+    },
+    {
+      "code": 6069,
+      "name": "MissingPermanentBurnDelegate",
+      "msg": "Missing or malformed permanent burn delegate"
+    },
+    {
+      "code": 6070,
+      "name": "MissingPermanentFreezeDelegate",
+      "msg": "Missing or malformed permanent freeze delegate"
+    },
+    {
+      "code": 6071,
+      "name": "CoreAssetFrozen",
+      "msg": "Core receipt asset is frozen"
+    },
+    {
+      "code": 6072,
+      "name": "CoreAssetNotFrozen",
+      "msg": "Core receipt asset is not frozen"
+    },
+    {
+      "code": 6073,
+      "name": "InvalidCoreAssetOwner",
+      "msg": "Core receipt asset is not owned by the expected address"
+    },
+    {
+      "code": 6074,
+      "name": "BullRegistryMalformedProof",
+      "msg": "BullRegistry Merkle proof is malformed or incomplete"
+    },
+    {
+      "code": 6075,
+      "name": "BullRegistryInvalidRoot",
+      "msg": "BullRegistry Merkle root does not match the canonical root"
+    },
+    {
+      "code": 6076,
+      "name": "BullRegistrySlotOccupied",
+      "msg": "BullRegistry proof leaf is not the expected empty slot"
+    },
+    {
+      "code": 6077,
+      "name": "BullRegistrySlotEmpty",
+      "msg": "BullRegistry proof leaf is not the expected occupied slot"
+    },
+    {
+      "code": 6078,
+      "name": "BullRegistryOwnerMismatch",
+      "msg": "BullRegistry owner bucket does not match the leaf owner"
+    },
+    {
+      "code": 6079,
+      "name": "BullProofBufferNotFinalized",
+      "msg": "BullRegistry proof buffer is not finalized"
+    },
+    {
+      "code": 6080,
+      "name": "BullProofBufferAlreadyConsumed",
+      "msg": "BullRegistry proof buffer has already been consumed"
+    },
+    {
+      "code": 6081,
+      "name": "InvalidBullProofBufferPda",
+      "msg": "BullRegistry proof buffer PDA is invalid"
+    },
+    {
+      "code": 6082,
+      "name": "InvalidRegistrySnapshot",
+      "msg": "BullRegistry snapshot root or version does not match"
+    },
+    {
+      "code": 6083,
+      "name": "BullProofBufferExpired",
+      "msg": "BullRegistry proof buffer has expired"
+    },
+    {
+      "code": 6084,
+      "name": "BullProofBufferBindingMismatch",
+      "msg": "BullRegistry proof buffer is bound to a different account"
+    },
+    {
+      "code": 6085,
+      "name": "BullProofBufferEmptyPayload",
+      "msg": "BullProofBuffer payload length must be greater than zero"
+    },
+    {
+      "code": 6086,
+      "name": "BullProofBufferOversized",
+      "msg": "BullProofBuffer payload exceeds the schema maximum"
+    },
+    {
+      "code": 6087,
+      "name": "BullProofBufferOffsetGap",
+      "msg": "BullProofBuffer append offset is not sequential"
+    },
+    {
+      "code": 6088,
+      "name": "BullProofBufferWrongPosition",
+      "msg": "BullProofBuffer is bound to a different Position"
+    },
+    {
+      "code": 6089,
+      "name": "BullProofBufferWrongProver",
+      "msg": "BullProofBuffer can only be written by the original prover"
+    },
+    {
+      "code": 6090,
+      "name": "BullProofBufferFinalized",
+      "msg": "BullProofBuffer has already been finalized"
+    },
+    {
+      "code": 6091,
+      "name": "BullProofBufferIncomplete",
+      "msg": "BullProofBuffer payload is incomplete or wrong length"
+    },
+    {
+      "code": 6092,
+      "name": "BullProofBufferNotAbandoned",
+      "msg": "BullProofBuffer cannot be closed before expiry or consumption"
+    },
+    {
+      "code": 6093,
+      "name": "NoEligibleExternalBull",
+      "msg": "No eligible external Bull exists for this theft"
+    },
+    {
+      "code": 6094,
+      "name": "InvalidProviderAccount",
+      "msg": "The provided randomness account is not a valid Switchboard randomness account"
+    },
+    {
+      "code": 6095,
+      "name": "RandomnessNotResolved",
+      "msg": "The Switchboard randomness account has not yet been revealed for this slot"
     }
   ],
   "types": [
@@ -2624,6 +3687,34 @@ export const rodeoCoreIdl = {
       }
     },
     {
+      "name": "BullLeaf",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "position_id",
+            "type": "u64"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "buck_power",
+            "type": "u8"
+          },
+          {
+            "name": "reveal_config_version",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "BullPoolContribution",
       "type": {
         "kind": "struct",
@@ -2648,6 +3739,288 @@ export const rodeoCoreIdl = {
       }
     },
     {
+      "name": "BullPoolSource",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "CowboyClaimTax"
+          },
+          {
+            "name": "DesperadoClaimTax"
+          },
+          {
+            "name": "UnstakeTheft"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BullProofBuffer",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "schema_version",
+            "docs": [
+              "Schema version of the payload layout."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "pending_randomness",
+            "docs": [
+              "The PendingRandomness this buffer is bound to."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "position",
+            "docs": [
+              "The Position being settled."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "action_type",
+            "docs": [
+              "The action this proof buffer is for (Reveal or Unstake)."
+            ],
+            "type": {
+              "defined": {
+                "name": "ActionType"
+              }
+            }
+          },
+          {
+            "name": "snapshot_root",
+            "docs": [
+              "Snapshot root the proof must be verified against."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "snapshot_version",
+            "docs": [
+              "Snapshot version the proof must be verified against."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "snapshot_total_power",
+            "docs": [
+              "Historical snapshot total power used for external-weight calculation."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "snapshot_total_count",
+            "docs": [
+              "Historical snapshot total Bull count used for threshold checks."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "refund_recipient",
+            "docs": [
+              "The party that funded the buffer and receives its rent on close."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "expiry_timestamp",
+            "docs": [
+              "Timestamp after which the buffer is abandonable even if unconsumed."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "nonce",
+            "docs": [
+              "Nonce used in the PDA derivation to allow multiple buffers per prover."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "expected_payload_length",
+            "docs": [
+              "Expected total payload length in bytes. Finalize enforces exact match."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "finalized",
+            "docs": [
+              "True once the prover has finalized the payload; settlement may then consume it."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "consumed",
+            "docs": [
+              "True once the buffer has been consumed by settlement."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "filled",
+            "docs": [
+              "Number of payload bytes written so far (test-fixture overwrite tracking)."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump for the proof-buffer PDA."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "payload",
+            "docs": [
+              "Serialized proof payload (variable length, bounded by `BULL_PROOF_BUFFER_MAX_PAYLOAD`)."
+            ],
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BullRegistry",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "global_config",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner_tree_root",
+            "docs": [
+              "Merkle-sum root of the owner tree."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "total_bull_count",
+            "docs": [
+              "Total active Bull Position count across all owners."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "total_buck_power",
+            "docs": [
+              "Total active buck power across all owners."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "registry_version",
+            "docs": [
+              "Monotonically increasing version. Incremented on every canonical root change."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BullRegistryOperation",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Add"
+          },
+          {
+            "name": "Remove"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BullRegistryTransition",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "old_root",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "new_root",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "old_version",
+            "type": "u64"
+          },
+          {
+            "name": "new_version",
+            "type": "u64"
+          },
+          {
+            "name": "operation",
+            "type": {
+              "defined": {
+                "name": "BullRegistryOperation"
+              }
+            }
+          },
+          {
+            "name": "bull_position",
+            "type": "pubkey"
+          },
+          {
+            "name": "position_id",
+            "type": "u64"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "buck_power",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
       "name": "BullRewardDistributed",
       "type": {
         "kind": "struct",
@@ -2667,23 +4040,6 @@ export const rodeoCoreIdl = {
           {
             "name": "reward_per_weight_scaled",
             "type": "u128"
-          }
-        ]
-      }
-    },
-    {
-      "name": "BullPoolSource",
-      "type": {
-        "kind": "enum",
-        "variants": [
-          {
-            "name": "CowboyClaimTax"
-          },
-          {
-            "name": "DesperadoClaimTax"
-          },
-          {
-            "name": "UnstakeTheft"
           }
         ]
       }
@@ -2921,6 +4277,46 @@ export const rodeoCoreIdl = {
       }
     },
     {
+      "name": "MintTheft",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "position_id",
+            "type": "u64"
+          },
+          {
+            "name": "prospective_owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "final_owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "winning_bull_position",
+            "type": "pubkey"
+          },
+          {
+            "name": "winning_bull_owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "registry_snapshot_version",
+            "type": "u64"
+          },
+          {
+            "name": "config_version",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "OrphanedRewardReleased",
       "type": {
         "kind": "struct",
@@ -3044,6 +4440,14 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "registry_version_snapshot",
+            "type": "u64"
+          },
+          {
+            "name": "registry_total_count_snapshot",
+            "type": "u64"
+          },
+          {
+            "name": "registry_total_power_snapshot",
             "type": "u64"
           },
           {
@@ -3581,6 +4985,10 @@ export const rodeoCoreIdl = {
             "type": "pubkey"
           },
           {
+            "name": "bull_registry",
+            "type": "pubkey"
+          },
+          {
             "name": "protocol_config",
             "type": "pubkey"
           },
@@ -3711,6 +5119,14 @@ export const rodeoCoreIdl = {
             "type": "u64"
           },
           {
+            "name": "registry_total_count_snapshot",
+            "type": "u64"
+          },
+          {
+            "name": "registry_total_power_snapshot",
+            "type": "u64"
+          },
+          {
             "name": "config_version_snapshot",
             "type": "u64"
           },
@@ -3798,6 +5214,62 @@ export const rodeoCoreIdl = {
                 "name": "TimeoutRecoveryAction"
               }
             }
+          }
+        ]
+      }
+    },
+    {
+      "name": "ReceiptBurned",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "position_id",
+            "type": "u64"
+          },
+          {
+            "name": "receipt_asset",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "collection",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ReceiptCreated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "position_id",
+            "type": "u64"
+          },
+          {
+            "name": "receipt_asset",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "collection",
+            "type": "pubkey"
           }
         ]
       }

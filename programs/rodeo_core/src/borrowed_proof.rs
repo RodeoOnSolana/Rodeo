@@ -499,6 +499,87 @@ pub fn validate_reveal_bull_proof_buffer<'a>(
     Ok(buffer)
 }
 
+/// Validate a raw BullProofBuffer for production Bull SettleUnstake.
+///
+/// Unlike Reveal (which binds to a HISTORICAL registry snapshot from
+/// `PendingRandomness`), Unstake binds to the CURRENT BullRegistry
+/// root/version at settlement time.  The buffer's `snapshot_root` and
+/// `snapshot_version` fields must match the live registry so that stale
+/// proofs are rejected before expensive verification.
+pub fn validate_unstake_bull_proof_buffer<'a>(
+    info: &AccountInfo,
+    data: &'a [u8],
+    position: &Pubkey,
+    pending_randomness: &PendingRandomness,
+    pending_randomness_key: &Pubkey,
+    refund_recipient: &Pubkey,
+    current_registry_root: &[u8; 32],
+    current_registry_version: u64,
+    now: i64,
+) -> Result<BullProofBufferRef<'a>> {
+    let buffer = load_bull_proof_buffer_ref(info, data)?;
+
+    let expected_pda = Pubkey::create_program_address(
+        &[
+            SEED_BULL_PROOF_BUFFER,
+            buffer.pending_randomness.as_ref(),
+            buffer.refund_recipient.as_ref(),
+            &buffer.nonce.to_le_bytes(),
+            &[buffer.bump],
+        ],
+        &crate::ID,
+    )
+    .map_err(|_| error!(RodeoError::InvalidBullProofBufferPda))?;
+    require!(
+        info.key() == expected_pda,
+        RodeoError::InvalidBullProofBufferPda
+    );
+
+    require_keys_eq!(
+        buffer.pending_randomness,
+        *pending_randomness_key,
+        RodeoError::InvalidPendingRandomness
+    );
+    require_keys_eq!(
+        buffer.position,
+        *position,
+        RodeoError::BullProofBufferWrongPosition
+    );
+    require!(
+        buffer.action_type == ActionType::Unstake as u8,
+        RodeoError::WrongActionType
+    );
+    require!(
+        buffer.action_type == pending_randomness.action_type as u8,
+        RodeoError::WrongActionType
+    );
+    require!(
+        buffer.refund_recipient == *refund_recipient,
+        RodeoError::BullProofBufferWrongProver
+    );
+    // Bind to CURRENT registry state (not a historical snapshot).
+    require!(
+        buffer.snapshot_root == *current_registry_root,
+        RodeoError::BullRegistryInvalidRoot
+    );
+    require!(
+        buffer.snapshot_version == current_registry_version,
+        RodeoError::BullRegistryInvalidRoot
+    );
+    require!(
+        buffer.expected_payload_length > 0,
+        RodeoError::BullProofBufferIncomplete
+    );
+    require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
+    require!(!buffer.consumed, RodeoError::BullProofBufferAlreadyConsumed);
+    require!(
+        now < buffer.expiry_timestamp,
+        RodeoError::BullProofBufferExpired
+    );
+
+    Ok(buffer)
+}
+
 /// Close a raw BullProofBuffer account without materializing payload Vec.
 /// Sets the consumed flag, transfers all lamports to the refund recipient,
 /// and reclaims the account data.

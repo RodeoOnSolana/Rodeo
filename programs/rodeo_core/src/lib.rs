@@ -3866,11 +3866,18 @@ pub struct SettleUnstake<'info> {
     pub bull_registry: Box<Account<'info, BullRegistry>>,
 
     /// Proof buffer is only required for Bull removal.
-    /// Its refund recipient is constrained to match the position owner.
     /// It is loaded manually in the handler to keep `SettleUnstake::try_accounts`
-    /// within the SBF stack limit.
+    /// within the SBF stack limit.  The buffer is prover-funded and its
+    /// `refund_recipient` is committed at initialization to the prover's key,
+    /// which may differ from the position owner (independent proof service).
     #[account(mut)]
     pub bull_proof_buffer: Option<AccountInfo<'info>>,
+
+    /// CHECK: Receives the proof-buffer rent refund when a buffer is consumed.
+    /// Validated against `buffer.refund_recipient` in the handler.  This is
+    /// separate from the owner-funded ReceiptFunder reserve refund.
+    #[account(mut)]
+    pub refund_recipient: Option<AccountInfo<'info>>,
 
     #[account(
         mut,
@@ -5675,6 +5682,7 @@ fn settle_cowboy_unstake<'info>(
     }
 }
 
+#[inline(never)]
 fn settle_bull_unstake<'info>(
     bull_registry: &mut crate::state::BullRegistry,
     reward_state: &mut RewardState,
@@ -5689,7 +5697,7 @@ fn settle_bull_unstake<'info>(
     buck_power: u8,
     reveal_config_version: u64,
     claimable: u64,
-    payload: &BullProofPayloadV1,
+    payload: &BullProofPayloadRef,
 ) -> Result<AnsemUnstakeFate> {
     if claimable > 0 {
         require_gte!(
@@ -5748,20 +5756,27 @@ fn settle_bull_unstake<'info>(
     game_state.total_active_bull_power =
         math::checked_sub_u64(game_state.total_active_bull_power, buck_power as u64)?;
 
+    // Borrowed proof verification against the CURRENT BullRegistry root.
     let current_owner = payload
-        .current_owner
-        .as_ref()
+        .current_owner()?
         .ok_or(RodeoError::BullProofBufferIncomplete)?;
     let remove_bull = payload
-        .remove_bull
-        .as_ref()
+        .remove_bull()?
         .ok_or(RodeoError::BullProofBufferIncomplete)?;
-    crate::bull_registry::verify_owner(&bull_registry.owner_tree_root, &owner, current_owner)?;
-    crate::bull_registry::verify_bull(
-        &current_owner.leaf.bull_tree_root,
-        &position_key,
-        remove_bull,
-    )?;
+
+    // Verify CURRENT owner membership using borrowed verifier (returns LEAF
+    // count/power, not root totals).
+    crate::borrowed_proof::verify_owner_ref(&bull_registry.owner_tree_root, &owner, current_owner)?;
+
+    // Verify exact Bull membership in the owner's Bull subtree.
+    let owner_bull_root = if current_owner.leaf.is_empty() {
+        empty_bull_tree_root()
+    } else {
+        current_owner.leaf.bull_tree_root
+    };
+    crate::borrowed_proof::verify_bull_ref(&owner_bull_root, &position_key, remove_bull)?;
+
+    // Authenticate the exiting Bull leaf matches canonical Position state.
     let canonical_bull_leaf = BullLeaf {
         position: position_key,
         position_id,
@@ -5773,13 +5788,14 @@ fn settle_bull_unstake<'info>(
         remove_bull.leaf == canonical_bull_leaf,
         RodeoError::BullProofBufferIncomplete
     );
+
     let old_root = bull_registry.owner_tree_root;
     let old_version = bull_registry.registry_version;
-    crate::bull_registry::remove_bull_from_registry(
+    crate::bull_registry::remove_bull_from_registry_borrowed(
         bull_registry,
         &canonical_bull_leaf,
-        current_owner,
-        remove_bull,
+        &current_owner,
+        &remove_bull,
     )?;
     emit!(BullRegistryTransition {
         old_root,
@@ -5929,36 +5945,53 @@ fn settle_unstake_common(
     let action_type = ctx.accounts.pending_randomness.action_type;
     let action_nonce = ctx.accounts.pending_randomness.action_nonce;
 
-    let payload: Option<Box<BullProofPayloadV1>> =
-        if let Some(buffer_info) = ctx.accounts.bull_proof_buffer.as_ref() {
-            require_keys_eq!(
-                *buffer_info.owner,
-                crate::ID,
-                RodeoError::BullProofBufferWrongProver
-            );
-            let data = buffer_info.data.borrow();
-            let mut data_slice: &[u8] = &**data;
-            let buffer = BullProofBuffer::try_deserialize(&mut data_slice)?;
-            require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
-            require!(
-                buffer.action_type == ActionType::Unstake,
-                RodeoError::BullProofBufferIncomplete
-            );
-            require!(
-                buffer.position == position_key,
-                RodeoError::BullProofBufferWrongPosition
-            );
-            require_keys_eq!(
-                buffer.refund_recipient,
-                ctx.accounts.owner.key(),
-                RodeoError::BullProofBufferWrongProver
-            );
-            Some(Box::new(bull_registry::verify_bull_proof_payload(
-                &buffer.payload,
-            )?))
-        } else {
-            None
-        };
+    // Parse the optional finalized proof buffer using the borrowed/zero-copy
+    // path.  No BullProofBuffer deserialization or BullProofPayloadV1
+    // materialization occurs on the production SBF path.
+    let info = ctx
+        .accounts
+        .bull_proof_buffer
+        .as_ref()
+        .map(|b| b.to_account_info());
+    let mut _buffer_data = None;
+    let mut _buffer_ref = None;
+    let payload = if info.is_some() {
+        let now = ctx.accounts.clock.unix_timestamp;
+        let buffer_info = info.as_ref().unwrap();
+        let data = buffer_info
+            .try_borrow_data()
+            .map_err(|_| RodeoError::BullProofBufferIncomplete)?;
+        _buffer_data = Some(data);
+
+        let data_ref = _buffer_data.as_ref().unwrap();
+        let data_slice: &[u8] = data_ref;
+
+        let refund_recipient = ctx
+            .accounts
+            .refund_recipient
+            .as_ref()
+            .map(|r| r.key())
+            .ok_or(RodeoError::BullProofBufferWrongProver)?;
+
+        let buffer_ref = crate::borrowed_proof::validate_unstake_bull_proof_buffer(
+            buffer_info,
+            data_slice,
+            &position_key,
+            &ctx.accounts.pending_randomness,
+            &ctx.accounts.pending_randomness.key(),
+            &refund_recipient,
+            &ctx.accounts.bull_registry.owner_tree_root,
+            ctx.accounts.bull_registry.registry_version,
+            now,
+        )?;
+        _buffer_ref = Some(buffer_ref);
+
+        let payload_ref = BullProofPayloadRef::new(_buffer_ref.as_ref().unwrap().payload)
+            .map_err(|_| RodeoError::BullProofBufferIncomplete)?;
+        Some(payload_ref)
+    } else {
+        None
+    };
 
     let position = &mut ctx.accounts.position;
     let pending_randomness = &mut ctx.accounts.pending_randomness;
@@ -6017,7 +6050,6 @@ fn settle_unstake_common(
     let settlement_nonce = math::checked_add_u64(position.settlement_nonce, 1)?;
     position.settlement_nonce = settlement_nonce;
 
-    let payload_ref = payload.as_deref();
     let ansem_fate = match position.role {
         Role::Cowboy => settle_cowboy_unstake(
             reward_state,
@@ -6049,7 +6081,9 @@ fn settle_unstake_common(
             position.buck_power,
             position.reveal_config_version,
             claimable,
-            payload_ref.ok_or(RodeoError::BullProofBufferIncomplete)?,
+            payload
+                .as_ref()
+                .ok_or(RodeoError::BullProofBufferIncomplete)?,
         )?,
         Role::Unassigned => {
             return Err(error!(RodeoError::InvalidRole));
@@ -6150,20 +6184,13 @@ fn settle_unstake_common(
         config_version_snapshot,
     });
 
+    // Close the raw BullProofBuffer account, refunding lamports to the
+    // committed refund_recipient (the prover who funded the buffer).  This
+    // is separate from the owner-funded ReceiptFunder reserve refund.
+    // No payload Vec deserialization is needed for the close path.
     if let Some(buffer_info) = ctx.accounts.bull_proof_buffer.as_ref() {
-        let lamports = buffer_info.lamports();
-        if lamports > 0 {
-            let close_ix = solana_program::system_instruction::transfer(
-                buffer_info.key,
-                ctx.accounts.owner.key,
-                lamports,
-            );
-            let close_account_infos = [
-                buffer_info.to_account_info(),
-                ctx.accounts.owner.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-            ];
-            solana_program::program::invoke(&close_ix, &close_account_infos)?;
+        if let Some(refund) = ctx.accounts.refund_recipient.as_ref() {
+            crate::borrowed_proof::close_bull_proof_buffer(buffer_info, refund)?;
         }
     }
 
@@ -7616,5 +7643,10 @@ mod tests {
     mod reveal_tests {
         use super::*;
         include!("reveal_tests.rs");
+    }
+
+    mod unstake_tests {
+        use super::*;
+        include!("unstake_tests.rs");
     }
 }
