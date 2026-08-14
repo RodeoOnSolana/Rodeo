@@ -495,7 +495,11 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     return { position, pendingRandomness, protocolConfig };
   }
 
-  async function settleReveal(positionId: BN, settler = payer) {
+  async function settleReveal(
+    positionId: BN,
+    settler = payer,
+    bullProof?: { bufferPda: web3.PublicKey; refundRecipient: web3.PublicKey },
+  ) {
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
     const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     const pendingRandomnessAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(
@@ -514,27 +518,32 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       [Buffer.from("receipt-funder"), position.toBuffer()],
       rodeoCoreProgram.programId,
     );
+    const accounts: Record<string, web3.PublicKey> = {
+      settler: settler.publicKey,
+      globalConfig,
+      globalGameState,
+      rewardState,
+      bullAccumulator,
+      position,
+      pendingRandomness,
+      protocolConfig,
+      owner: pos.owner,
+      receiptAsset,
+      receiptCollection,
+      receiptAuthority,
+      receiptFunder,
+      providerRandomnessAccount: web3.SYSVAR_RENT_PUBKEY,
+      mplCoreProgram: MPL_CORE_PROGRAM_ID,
+      systemProgram: web3.SystemProgram.programId,
+      clock: web3.SYSVAR_CLOCK_PUBKEY,
+    };
+    if (bullProof) {
+      accounts.bullProofBuffer = bullProof.bufferPda;
+      accounts.refundRecipient = bullProof.refundRecipient;
+    }
     await rodeoCoreProgram.methods
       .settleReveal()
-      .accounts({
-        settler: settler.publicKey,
-        globalConfig,
-        globalGameState,
-        rewardState,
-        bullAccumulator,
-        position,
-        pendingRandomness,
-        protocolConfig,
-        owner: pos.owner,
-        receiptAsset,
-        receiptCollection,
-        receiptAuthority,
-        receiptFunder,
-        providerRandomnessAccount: web3.SYSVAR_RENT_PUBKEY,
-        mplCoreProgram: MPL_CORE_PROGRAM_ID,
-        systemProgram: web3.SystemProgram.programId,
-        clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
+      .accounts(accounts)
       .signers([settler])
       .rpc();
   }
@@ -1118,7 +1127,12 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     return { position, pendingRandomness, actionNonce };
   }
 
-  async function settleUnstake(positionId: BN, actionNonce: BN, settler = payer) {
+  async function settleUnstake(
+    positionId: BN,
+    actionNonce: BN,
+    settler = payer,
+    bullProof?: { bufferPda: web3.PublicKey; refundRecipient: web3.PublicKey },
+  ) {
     const { position } = await deriveStakeAccounts(positionId);
     const [pendingRandomness] = deriveRandomness(
       rodeoCoreProgram.programId,
@@ -1141,32 +1155,37 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       [Buffer.from("receipt-funder"), position.toBuffer()],
       rodeoCoreProgram.programId,
     );
+    const accounts: Record<string, web3.PublicKey> = {
+      settler: settler.publicKey,
+      globalConfig,
+      globalGameState,
+      rewardState,
+      bullAccumulator,
+      position,
+      pendingRandomness,
+      protocolConfig,
+      principalVault,
+      rodeoMint,
+      ownerRodeoAccount: payerRodeoAccount,
+      rewardVault,
+      ownerAnsemAccount: payerAnsemAccount,
+      owner: payer.publicKey,
+      receiptAsset,
+      receiptCollection,
+      receiptAuthority,
+      receiptFunder,
+      mplCoreProgram: MPL_CORE_PROGRAM_ID,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: web3.SystemProgram.programId,
+      clock: web3.SYSVAR_CLOCK_PUBKEY,
+    };
+    if (bullProof) {
+      accounts.bullProofBuffer = bullProof.bufferPda;
+      accounts.refundRecipient = bullProof.refundRecipient;
+    }
     await rodeoCoreProgram.methods
       .settleUnstake()
-      .accounts({
-        settler: settler.publicKey,
-        globalConfig,
-        globalGameState,
-        rewardState,
-        bullAccumulator,
-        position,
-        pendingRandomness,
-        protocolConfig,
-        principalVault,
-        rodeoMint,
-        ownerRodeoAccount: payerRodeoAccount,
-        rewardVault,
-        ownerAnsemAccount: payerAnsemAccount,
-        owner: payer.publicKey,
-        receiptAsset,
-        receiptCollection,
-        receiptAuthority,
-        receiptFunder,
-        mplCoreProgram: MPL_CORE_PROGRAM_ID,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: web3.SystemProgram.programId,
-        clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
+      .accounts(accounts)
       .signers([settler])
       .rpc();
   }
