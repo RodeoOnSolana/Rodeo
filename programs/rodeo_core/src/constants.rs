@@ -129,7 +129,10 @@ pub const BULL_REGISTRY_BULL_TREE_DEPTH: u32 = 20;
 // above the v1 benchmarked worst case and still well within Solana's
 // 10 MiB per-account data limit.
 pub const BULL_PROOF_BUFFER_SCHEMA_VERSION: u8 = 2;
+#[cfg(not(feature = "test-fixtures"))]
 pub const BULL_PROOF_BUFFER_MAX_PAYLOAD: usize = 16_384;
+#[cfg(feature = "test-fixtures")]
+pub const BULL_PROOF_BUFFER_MAX_PAYLOAD: usize = 5_000;
 
 // Compile-time guards for the production-safe default configuration. These are
 // always checked when the crate is compiled with the corresponding features.

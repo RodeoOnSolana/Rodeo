@@ -149,6 +149,8 @@ pub struct BullProofBuffer {
     pub finalized: bool,
     /// True once the buffer has been consumed by settlement.
     pub consumed: bool,
+    /// Number of payload bytes written so far (test-fixture overwrite tracking).
+    pub filled: u32,
     /// Bump for the proof-buffer PDA.
     pub bump: u8,
     /// Serialized proof payload (variable length, bounded by `BULL_PROOF_BUFFER_MAX_PAYLOAD`).

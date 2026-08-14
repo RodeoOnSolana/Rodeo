@@ -18,3 +18,10 @@ phase-2a-*.txt
 # silently stale in git history.
 /vendor/mpl-core/*.so
 /vendor/mpl-core/*.sha256
+
+# Local benchmark/CI artifacts and temporary diagnostic files
+.ci-artifacts/
+*.bak
+check_ix*.js
+tests/integration/localnet-hash-loop.test.ts
+tests/integration/localnet-heap-diagnostic.test.ts

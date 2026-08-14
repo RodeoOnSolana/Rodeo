@@ -1,16 +1,19 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{Burn, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z");
+declare_id!("CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA");
 
+pub mod borrowed_proof;
 pub mod bull_registry;
 pub mod constants;
+pub mod empty_nodes;
 pub mod math;
 pub mod probability;
 pub mod receipt;
 pub mod sparse_tree;
 pub mod state;
 
+use borrowed_proof::*;
 use bull_registry::*;
 use constants::*;
 use mpl_core::instructions::{
@@ -1478,100 +1481,121 @@ pub mod rodeo_core {
     /// Benchmark fixture for the sparse-tree verifier.  It exercises the exact
     /// production verification and add/remove paths and then restores the
     /// registry so the benchmark is non-destructive.  Compute units are read
-    /// from the Solana runtime after the transaction.
     #[cfg(feature = "test-fixtures")]
     pub fn benchmark_sparse_tree(
         ctx: Context<BenchmarkSparseTree>,
         victim: Option<Pubkey>,
         new_bull: Option<BullLeaf>,
     ) -> Result<()> {
-        let payload = if let Some(buffer_info) = ctx.accounts.bull_proof_buffer.as_ref() {
-            require!(*buffer_info.owner == crate::ID, RodeoError::BullProofBufferWrongProver);
-            let data = buffer_info.data.borrow();
-            let mut data_slice: &[u8] = &**data;
-            let buffer = BullProofBuffer::try_deserialize(&mut data_slice)
+        let snapshot = SparseTreeBenchmarkSnapshot {
+            owner_tree_root: ctx.accounts.bull_registry.owner_tree_root,
+            total_bull_count: ctx.accounts.bull_registry.total_bull_count,
+            total_buck_power: ctx.accounts.bull_registry.total_buck_power,
+            registry_version: ctx.accounts.bull_registry.registry_version,
+        };
+
+        let buffer_data = if let Some(buffer_info) = ctx.accounts.bull_proof_buffer.as_ref() {
+            require!(
+                buffer_info.owner == &crate::ID,
+                RodeoError::InvalidProgramAccount
+            );
+            Some(buffer_info.data.borrow())
+        } else {
+            None
+        };
+
+        let payload = if let Some(ref d) = buffer_data {
+            let buffer = BullProofBufferRef::from_account_data(&**d)
                 .map_err(|_| RodeoError::BullProofBufferIncomplete)?;
             require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
-            require_eq!(
-                buffer.schema_version,
-                BULL_PROOF_BUFFER_SCHEMA_VERSION,
-                RodeoError::BullProofBufferIncomplete
-            );
-            require_eq!(
-                buffer.payload.len() as u32,
-                buffer.expected_payload_length,
-                RodeoError::BullProofBufferIncomplete
-            );
-            bull_registry::verify_bull_proof_payload(&buffer.payload)?
+            Some(
+                BullProofPayloadRef::new(buffer.payload)
+                    .map_err(|_| RodeoError::BullProofBufferIncomplete)?,
+            )
         } else {
-            BullProofPayloadV1 {
-                schema_version: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
-                section_bitmap: 0,
-                victim_owner: None,
-                selected_owner: None,
-                selected_bull: None,
-                current_owner: None,
-                current_bull: None,
-                remove_bull: None,
-            }
+            None
         };
+
         let registry = &mut ctx.accounts.bull_registry;
 
-        let snapshot = SparseTreeBenchmarkSnapshot {
-            owner_tree_root: registry.owner_tree_root,
-            total_bull_count: registry.total_bull_count,
-            total_buck_power: registry.total_buck_power,
-            registry_version: registry.registry_version,
-        };
-
-        // 1. Owner membership / non-membership.
-        if let Some(ref key) = victim {
-            if let Some(ref proof) = payload.victim_owner {
-                bull_registry::verify_owner(&snapshot.owner_tree_root, key, proof)?;
+        if let Some(ref payload) = payload {
+            // victim owner membership / non-membership
+            if let Some(ref victim_key) = victim {
+                if let Some(victim_proof) = payload.victim_owner()? {
+                    verify_owner_ref(&registry.owner_tree_root, victim_key, victim_proof)?;
+                }
             }
-        }
 
-        // 2. Selected owner + Bull (composed theft selection).
-        if let Some(ref selected_owner) = payload.selected_owner {
-            let selected_key = selected_owner.leaf.owner;
-            bull_registry::verify_owner(&snapshot.owner_tree_root, &selected_key, selected_owner)?;
+            // selected owner
+            if let Some(selected_owner) = payload.selected_owner()? {
+                msg!("bench verify owner");
+                let owner = selected_owner.leaf.owner;
+                verify_owner_ref(&registry.owner_tree_root, &owner, selected_owner)?;
+            }
 
-            if let Some(ref selected_bull) = payload.selected_bull {
-                bull_registry::verify_bull(
-                    &selected_owner.leaf.bull_tree_root,
+            // selected bull, using the matching owner leaf's bull tree root
+            if let Some(selected_bull) = payload.selected_bull()? {
+                let owner = selected_bull.leaf.owner;
+                let owner_proof = payload
+                    .selected_owner()?
+                    .filter(|p| p.leaf.owner == owner)
+                    .or_else(|| {
+                        payload
+                            .current_owner()
+                            .ok()
+                            .flatten()
+                            .filter(|p| p.leaf.owner == owner)
+                    })
+                    .ok_or(RodeoError::BullRegistryOwnerMismatch)?;
+                verify_bull_ref(
+                    &owner_proof.leaf.bull_tree_root,
                     &selected_bull.leaf.position,
                     selected_bull,
                 )?;
             }
-        }
 
-        // 3. Bull add (under existing or absent owner).
-        if let Some(ref bull_leaf) = new_bull {
-            if let (Some(ref owner_proof), Some(ref bull_proof)) = (
-                payload.current_owner.as_ref(),
-                payload.current_bull.as_ref(),
-            ) {
-                bull_registry::add_bull_to_registry(registry, bull_leaf, owner_proof, bull_proof)?;
+            // remove takes precedence over add if both are present to avoid
+            // using a stale owner proof after mutation.
+            let mut mutated = false;
+            if let Some(remove_bull) = payload.remove_bull()? {
+                let remove_bull = remove_bull.to_owned()?;
+                let owner = remove_bull.leaf.owner;
+                let owner_proof = payload
+                    .current_owner()?
+                    .filter(|p| p.leaf.owner == owner)
+                    .or_else(|| {
+                        payload
+                            .selected_owner()
+                            .ok()
+                            .flatten()
+                            .filter(|p| p.leaf.owner == owner)
+                    })
+                    .ok_or(RodeoError::BullRegistryOwnerMismatch)?
+                    .to_owned()?;
+                remove_bull_from_registry(registry, &remove_bull.leaf, &owner_proof, &remove_bull)?;
+                mutated = true;
+            }
+
+            if !mutated {
+                if let Some(ref new_bull_leaf) = new_bull {
+                    let owner_proof = payload
+                        .current_owner()?
+                        .ok_or(RodeoError::BullRegistryOwnerMismatch)?
+                        .to_owned()?;
+                    let bull_proof = payload
+                        .current_bull()?
+                        .ok_or(RodeoError::BullRegistryMalformedProof)?
+                        .to_owned()?;
+                    add_bull_to_registry(registry, new_bull_leaf, &owner_proof, &bull_proof)?;
+                }
             }
         }
 
-        // 4. Bull remove.
-        if let Some(ref owner_proof) = payload.current_owner {
-            if let Some(ref remove_bull) = payload.remove_bull {
-                bull_registry::remove_bull_from_registry(
-                    registry,
-                    &remove_bull.leaf,
-                    owner_proof,
-                    remove_bull,
-                )?;
-            }
-        }
-
-        // Restore registry to keep the fixture non-destructive.
-        registry.owner_tree_root = snapshot.owner_tree_root;
-        registry.total_bull_count = snapshot.total_bull_count;
-        registry.total_buck_power = snapshot.total_buck_power;
-        registry.registry_version = snapshot.registry_version;
+        // restore registry to keep benchmark non-destructive
+        ctx.accounts.bull_registry.owner_tree_root = snapshot.owner_tree_root;
+        ctx.accounts.bull_registry.total_bull_count = snapshot.total_bull_count;
+        ctx.accounts.bull_registry.total_buck_power = snapshot.total_buck_power;
+        ctx.accounts.bull_registry.registry_version = snapshot.registry_version;
 
         emit!(SparseTreeBenchmarked {
             owner_tree_root: snapshot.owner_tree_root,
@@ -1579,13 +1603,131 @@ pub mod rodeo_core {
             total_buck_power: snapshot.total_buck_power,
             registry_version: snapshot.registry_version,
         });
+        msg!("SparseTreeBenchmarked");
 
         Ok(())
     }
+    /// Test-only fixture to probe the effective SBF heap size.
+    #[cfg(feature = "test-fixtures")]
+    pub fn benchmark_sparse_hash_loop(
+        _ctx: Context<BenchmarkSparseHashLoop>,
+        iterations: u32,
+    ) -> Result<[u8; 32]> {
+        const HASH_LOOP_PREFIX: &[u8] = b"rodeo_v2_bull_owner_node";
+        let mut buf = [0u8; 256];
+        let mut current_hash = [0u8; 32];
+        let mut current_count = 0u64;
+        let mut current_power = 0u64;
+        for level in 0..iterations {
+            let left_hash = current_hash;
+            let right_hash = [level as u8; 32];
+            let left_count = current_count;
+            let right_count = level as u64;
+            let left_power = current_power;
+            let right_power = level as u64;
+            let mut off = 0usize;
+            let append = |buf: &mut [u8; 256], off: &mut usize, bytes: &[u8]| {
+                let end = *off + bytes.len();
+                buf[*off..end].copy_from_slice(bytes);
+                *off = end;
+            };
+            append(&mut buf, &mut off, HASH_LOOP_PREFIX);
+            append(&mut buf, &mut off, &left_hash);
+            append(&mut buf, &mut off, &left_count.to_le_bytes());
+            append(&mut buf, &mut off, &left_power.to_le_bytes());
+            append(&mut buf, &mut off, &right_hash);
+            append(&mut buf, &mut off, &right_count.to_le_bytes());
+            append(&mut buf, &mut off, &right_power.to_le_bytes());
+            current_hash = anchor_lang::solana_program::hash::hash(&buf[..off]).to_bytes();
+            current_count = current_count.wrapping_add(right_count);
+            current_power = current_power.wrapping_add(right_power);
+            if level == 0 {
+                anchor_lang::solana_program::log::sol_log_64(0, 0, 0, 0, 0);
+            }
+            if level % 32 == 31 {
+                anchor_lang::solana_program::log::sol_log_64((level + 1) as u64, 0, 0, 0, 0);
+            }
+        }
+        anchor_lang::solana_program::log::sol_log_64(
+            iterations as u64,
+            current_hash[0] as u64,
+            current_hash[1] as u64,
+            current_hash[2] as u64,
+            current_hash[3] as u64,
+        );
+        msg!("HashLoopDone");
+        Ok(current_hash)
+    }
 
+    #[cfg(feature = "test-fixtures")]
+    pub fn benchmark_heap(
+        _ctx: Context<BenchmarkHeap>,
+        total_bytes: u32,
+        iterations: u32,
+    ) -> Result<()> {
+        anchor_lang::solana_program::log::sol_log_64(
+            total_bytes as u64,
+            iterations as u64,
+            0,
+            0,
+            0,
+        );
+        let mut allocated: u64 = 0;
+        for _ in 0..iterations {
+            let v = vec![0u8; total_bytes as usize];
+            allocated = allocated
+                .checked_add(v.len() as u64)
+                .ok_or(RodeoError::ArithmeticOverflow)?;
+        }
+        anchor_lang::solana_program::log::sol_log_64(allocated, 0, 0, 0, 0);
+        Ok(())
+    }
 
     /// Test-only fixture to set the BullRegistry root and counters for
+    /// Test-only fixture to set the BullRegistry root and counters for
     /// benchmark initialization.  Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_initialize_protocol_accounts(
+        ctx: Context<TestFixtureInitializeProtocolAccounts>,
+    ) -> Result<()> {
+        let global_bump = ctx.bumps.global_config;
+        let bull_bump = ctx.bumps.bull_registry;
+        let global_key = ctx.accounts.global_config.key();
+        ctx.accounts.global_config.set_inner(GlobalConfig {
+            version: 1,
+            rodeo_mint: Pubkey::default(),
+            ansem_mint: Pubkey::default(),
+            rodeo_decimals: 0,
+            ansem_decimals: 0,
+            stake_amount_atomic: 0,
+            expected_total_supply_atomic: 0,
+            launch_timestamp: 0,
+            principal_vault: Pubkey::default(),
+            reward_vault: Pubkey::default(),
+            pause_new_stakes: false,
+            pause_new_reveal_requests: false,
+            pause_new_marketplace_listings: false,
+            pause_router_swaps: false,
+            upgrade_council: Pubkey::default(),
+            treasury_council: Pubkey::default(),
+            emergency_guardians: Pubkey::default(),
+            current_config_version: 0,
+            bump: global_bump,
+            principal_vault_bump: 0,
+            reward_vault_bump: 0,
+        });
+        ctx.accounts.bull_registry.set_inner(BullRegistry {
+            version: 1,
+            global_config: global_key,
+            owner_tree_root: [0u8; 32],
+            total_bull_count: 0,
+            total_buck_power: 0,
+            registry_version: 0,
+            bump: bull_bump,
+        });
+        Ok(())
+    }
+
     #[cfg(feature = "test-fixtures")]
     pub fn test_fixture_set_bull_registry(
         ctx: Context<TestFixtureSetBullRegistry>,
@@ -1601,7 +1743,6 @@ pub mod rodeo_core {
         registry.registry_version = registry_version;
         Ok(())
     }
-
 
     /// Test-only fixture to initialize a BullProofBuffer for benchmark
     /// staging, using dummy position/pending-randomness and authority as
@@ -1657,7 +1798,11 @@ pub mod rodeo_core {
             new_len,
             RodeoError::BullProofBufferOversized
         );
-        require_gte!(BULL_PROOF_BUFFER_MAX_PAYLOAD, new_len, RodeoError::BullProofBufferOversized);
+        require_gte!(
+            BULL_PROOF_BUFFER_MAX_PAYLOAD,
+            new_len,
+            RodeoError::BullProofBufferOversized
+        );
         buffer.payload.extend_from_slice(&chunk);
         Ok(())
     }
@@ -2683,6 +2828,34 @@ pub mod rodeo_core {
 
         Ok(())
     }
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct TestFixtureInitializeProtocolAccounts<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + GlobalConfig::INIT_SPACE,
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + BullRegistry::INIT_SPACE,
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
+
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -3966,6 +4139,13 @@ pub struct CloseBullProof<'info> {
 }
 
 #[cfg(feature = "test-fixtures")]
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct BenchmarkSparseHashLoop<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+}
+
 #[derive(Accounts)]
 pub struct BenchmarkSparseTree<'info> {
     #[account(mut)]
@@ -3988,6 +4168,13 @@ pub struct BenchmarkSparseTree<'info> {
     /// real production proof transport.  None gives an empty/no-proof
     /// baseline.
     pub bull_proof_buffer: Option<AccountInfo<'info>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct BenchmarkHeap<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -4455,6 +4642,12 @@ pub enum RodeoError {
     BullProofBufferNotFinalized,
     #[msg("BullRegistry proof buffer has already been consumed")]
     BullProofBufferAlreadyConsumed,
+    #[msg("BullRegistry proof buffer PDA is invalid")]
+    InvalidBullProofBufferPda,
+    #[msg("BullRegistry snapshot root or version does not match")]
+    InvalidRegistrySnapshot,
+    #[msg("BullRegistry proof buffer has expired")]
+    BullProofBufferExpired,
     #[msg("BullRegistry proof buffer is bound to a different account")]
     BullProofBufferBindingMismatch,
     #[msg("BullProofBuffer payload length must be greater than zero")]

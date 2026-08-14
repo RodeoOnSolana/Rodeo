@@ -3,14 +3,12 @@ use std::path::PathBuf;
 use anchor_lang::prelude::*;
 use anchor_lang::AnchorSerialize;
 use rodeo_core::bull_registry::{
-    BullLeaf, BullProofPayloadV1, CompressedBullProof, CompressedOwnerProof,
-    OwnerLeaf, BULL_PROOF_PAYLOAD_SCHEMA_VERSION, SECTION_CURRENT_BULL,
-    SECTION_CURRENT_OWNER, SECTION_REMOVE_BULL, SECTION_SELECTED_BULL,
-    SECTION_SELECTED_OWNER, SECTION_VICTIM_OWNER,
+    BullLeaf, BullProofPayloadV1, CompressedBullProof, CompressedOwnerProof, OwnerLeaf,
+    BULL_PROOF_PAYLOAD_SCHEMA_VERSION, SECTION_CURRENT_BULL, SECTION_CURRENT_OWNER,
+    SECTION_REMOVE_BULL, SECTION_SELECTED_BULL, SECTION_SELECTED_OWNER, SECTION_VICTIM_OWNER,
 };
 use rodeo_core::sparse_tree::{
-    hash_node, verify_with_prefix, CompressedSparseProof, SparseMerkleNode,
-    SPARSE_TREE_DEPTH,
+    hash_node, verify_with_prefix, CompressedSparseProof, SparseMerkleNode, SPARSE_TREE_DEPTH,
 };
 use serde_json::json;
 use solana_program::hash::hashv;
@@ -48,8 +46,8 @@ struct SparseTree {
 
 impl SparseTree {
     fn new(empty_leaf: &SparseMerkleNode, prefix: &'static [u8]) -> Self {
-        let defaults = rodeo_core::sparse_tree::compute_default_empty_nodes(empty_leaf, prefix)
-            .unwrap();
+        let defaults =
+            rodeo_core::sparse_tree::compute_default_empty_nodes(empty_leaf, prefix).unwrap();
         let root = TrieNode::new(SPARSE_TREE_DEPTH as usize, &defaults);
         Self {
             root,
@@ -148,7 +146,12 @@ fn deterministic_owner(i: u64) -> Pubkey {
 
 fn deterministic_bull(owner_index: u64, bull_index: u64) -> Pubkey {
     Pubkey::new_from_array(
-        hashv(&[b"bull", &owner_index.to_le_bytes(), &bull_index.to_le_bytes()]).to_bytes(),
+        hashv(&[
+            b"bull",
+            &owner_index.to_le_bytes(),
+            &bull_index.to_le_bytes(),
+        ])
+        .to_bytes(),
     )
 }
 
@@ -618,8 +621,14 @@ fn generate_sparse_benchmark_fixtures() {
         .unwrap();
         let owner_root_matches = owner_recomputed.hash == owner_tree_root;
         assert!(owner_root_matches, "owner root mismatch at scale {}", scale);
-        assert_eq!(owner_recomputed.count, total_count, "owner total count mismatch");
-        assert_eq!(owner_recomputed.power, total_power, "owner total power mismatch");
+        assert_eq!(
+            owner_recomputed.count, total_count,
+            "owner total count mismatch"
+        );
+        assert_eq!(
+            owner_recomputed.power, total_power,
+            "owner total power mismatch"
+        );
 
         let sample_bull = &od.bulls[0];
         let bull_key = sample_bull.position.to_bytes();
@@ -635,8 +644,14 @@ fn generate_sparse_benchmark_fixtures() {
         .unwrap();
         let bull_root_matches = bull_recomputed.hash == od.owner_leaf.bull_tree_root;
         assert!(bull_root_matches, "bull root mismatch at scale {}", scale);
-        assert_eq!(bull_recomputed.count, od.owner_leaf.active_bull_count, "bull total count mismatch");
-        assert_eq!(bull_recomputed.power, od.owner_leaf.total_buck_power, "bull total power mismatch");
+        assert_eq!(
+            bull_recomputed.count, od.owner_leaf.active_bull_count,
+            "bull total count mismatch"
+        );
+        assert_eq!(
+            bull_recomputed.power, od.owner_leaf.total_buck_power,
+            "bull total power mismatch"
+        );
 
         parity.push(json!({
             "scale": scale,

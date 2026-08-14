@@ -35,8 +35,8 @@ use crate::RodeoError;
 
 const PREFIX_BULL_OWNER_LEAF: &[u8] = b"rodeo_v2_bull_owner_leaf";
 const PREFIX_BULL_LEAF: &[u8] = b"rodeo_v2_bull_leaf";
-const PREFIX_BULL_OWNER_NODE: &[u8] = b"rodeo_v2_bull_owner_node";
-const PREFIX_BULL_NODE: &[u8] = b"rodeo_v2_bull_node";
+pub const PREFIX_BULL_OWNER_NODE: &[u8] = b"rodeo_v2_bull_owner_node";
+pub const PREFIX_BULL_NODE: &[u8] = b"rodeo_v2_bull_node";
 
 // ---------------------------------------------------------------------------
 // Canonical leaf representations.  Serialization is what the Merkle hashes bind.
@@ -142,38 +142,27 @@ impl BullLeaf {
 // ---------------------------------------------------------------------------
 
 pub fn default_bull_leaf_hash() -> [u8; 32] {
-    BullLeaf::empty().hash()
+    crate::empty_nodes::EMPTY_BULL_NODES[0].hash
 }
 
 pub fn default_owner_leaf_hash() -> [u8; 32] {
-    OwnerLeaf::empty().hash()
+    crate::empty_nodes::EMPTY_OWNER_NODES[0].hash
 }
 
-fn default_bull_leaf_node() -> SparseMerkleNode {
-    BullLeaf::empty().to_node()
+pub fn default_bull_leaf_node() -> SparseMerkleNode {
+    crate::empty_nodes::EMPTY_BULL_NODES[0]
 }
 
-fn default_owner_leaf_node() -> SparseMerkleNode {
-    OwnerLeaf::empty().to_node()
+pub fn default_owner_leaf_node() -> SparseMerkleNode {
+    crate::empty_nodes::EMPTY_OWNER_NODES[0]
 }
 
 pub fn empty_bull_tree_root() -> [u8; 32] {
-    crate::sparse_tree::compute_default_empty_nodes(&default_bull_leaf_node(), PREFIX_BULL_NODE)
-        .unwrap()
-        .last()
-        .unwrap()
-        .hash
+    crate::empty_nodes::EMPTY_BULL_NODES[256].hash
 }
 
 pub fn empty_owner_tree_root() -> [u8; 32] {
-    crate::sparse_tree::compute_default_empty_nodes(
-        &default_owner_leaf_node(),
-        PREFIX_BULL_OWNER_NODE,
-    )
-    .unwrap()
-    .last()
-    .unwrap()
-    .hash
+    crate::empty_nodes::EMPTY_OWNER_NODES[256].hash
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +271,7 @@ pub fn verify_owner(
             RodeoError::BullRegistryOwnerMismatch
         );
     }
+    msg!("verify_owner before vwp");
     let (root, prefix) = verify_with_prefix(
         expected_root,
         &owner.to_bytes(),
@@ -470,6 +460,7 @@ pub fn skip_victim_interval(external_target: u64, victim_prefix: u64, victim_pow
     }
 }
 
+#[inline(never)]
 pub fn add_bull_to_registry(
     registry: &mut crate::state::BullRegistry,
     bull_leaf: &BullLeaf,
@@ -490,6 +481,7 @@ pub fn add_bull_to_registry(
     Ok(())
 }
 
+#[inline(never)]
 pub fn remove_bull_from_registry(
     registry: &mut crate::state::BullRegistry,
     bull_leaf: &BullLeaf,
