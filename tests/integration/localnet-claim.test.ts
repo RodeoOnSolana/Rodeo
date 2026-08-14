@@ -532,8 +532,6 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         receiptFunder,
         providerRandomnessAccount: web3.SYSVAR_RENT_PUBKEY,
         mplCoreProgram: MPL_CORE_PROGRAM_ID,
-        bullProofBuffer: null,
-        refundRecipient: null,
         systemProgram: web3.SystemProgram.programId,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
       })
@@ -1165,8 +1163,6 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         receiptAuthority,
         receiptFunder,
         mplCoreProgram: MPL_CORE_PROGRAM_ID,
-        bullProofBuffer: null,
-        refundRecipient: null,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: web3.SystemProgram.programId,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
