@@ -235,6 +235,31 @@ export type OrphanedRewardReleasedEvent = ProtocolEventEnvelope<"orphanedRewardR
   readonly totalAnsemLiabilityAtomicAfter: bigint;
 }>;
 
+export type BullRegistryOperation = "add" | "remove";
+
+export type BullRegistryTransitionEvent = ProtocolEventEnvelope<"bullRegistryTransition", {
+  readonly oldRoot: Uint8Array;
+  readonly newRoot: Uint8Array;
+  readonly oldVersion: bigint;
+  readonly newVersion: bigint;
+  readonly operation: BullRegistryOperation;
+  readonly bullPosition: string;
+  readonly positionId: bigint;
+  readonly owner: string;
+  readonly buckPower: number;
+}>;
+
+export type MintTheftEvent = ProtocolEventEnvelope<"mintTheft", {
+  readonly position: string;
+  readonly positionId: bigint;
+  readonly prospectiveOwner: string;
+  readonly finalOwner: string;
+  readonly winningBullPosition: string;
+  readonly winningBullOwner: string;
+  readonly registrySnapshotVersion: bigint;
+  readonly configVersion: bigint;
+}>;
+
 export type RodeoProtocolEvent =
   | ProtocolInitializedEvent
   | PositionStakedEvent
@@ -259,4 +284,6 @@ export type RodeoProtocolEvent =
   | RandomnessTimeoutRecoveredEvent
   | UnstakeRequestedEvent
   | PositionUnstakedEvent
-  | OrphanedRewardReleasedEvent;
+  | OrphanedRewardReleasedEvent
+  | BullRegistryTransitionEvent
+  | MintTheftEvent;
