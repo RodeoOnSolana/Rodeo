@@ -260,6 +260,32 @@ export type MintTheftEvent = ProtocolEventEnvelope<"mintTheft", {
   readonly configVersion: bigint;
 }>;
 
+
+export type ReceiptPluginAuthority =
+  | { readonly kind: "none" }
+  | { readonly kind: "owner" }
+  | { readonly kind: "updateAuthority" }
+  | { readonly kind: "address"; readonly address: string };
+
+export type SparseTreeBenchmarkedEvent = ProtocolEventEnvelope<"sparseTreeBenchmarked", {
+  readonly ownerTreeRoot: Uint8Array;
+  readonly totalBullCount: bigint;
+  readonly totalBuckPower: bigint;
+  readonly registryVersion: bigint;
+}>;
+
+export type PositionReceiptParsedEvent = ProtocolEventEnvelope<"positionReceiptParsed", {
+  readonly receiptAsset: string;
+  readonly owner: string;
+  readonly hasPermanentTransferDelegate: boolean;
+  readonly hasPermanentBurnDelegate: boolean;
+  readonly hasPermanentFreezeDelegate: boolean;
+  readonly frozen: boolean;
+  readonly permanentTransferAuthority: ReceiptPluginAuthority | null;
+  readonly permanentBurnAuthority: ReceiptPluginAuthority | null;
+  readonly permanentFreezeAuthority: ReceiptPluginAuthority | null;
+}>;
+
 export type RodeoProtocolEvent =
   | ProtocolInitializedEvent
   | PositionStakedEvent
@@ -286,4 +312,6 @@ export type RodeoProtocolEvent =
   | PositionUnstakedEvent
   | OrphanedRewardReleasedEvent
   | BullRegistryTransitionEvent
-  | MintTheftEvent;
+  | MintTheftEvent
+  | PositionReceiptParsedEvent
+  | SparseTreeBenchmarkedEvent;
