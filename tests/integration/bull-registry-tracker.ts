@@ -117,6 +117,8 @@ export interface StagedBullProof {
   refundRecipient: web3.PublicKey;
   nonce: BN;
   prover: web3.PublicKey;
+  payloadBytes: Buffer;
+  payloadLength: number;
 }
 
 /**
@@ -129,7 +131,7 @@ export async function stageBullProofBuffer(
   pendingRandomness: web3.PublicKey,
   prover: web3.Keypair,
   nonce: BN,
-  actionType: number,
+  actionType: { reveal?: {}; unstake?: {} },
   payloadBytes: Buffer,
 ): Promise<StagedBullProof> {
   const [bufferPda] = deriveBullProofBufferPda(
@@ -181,6 +183,8 @@ export async function stageBullProofBuffer(
     refundRecipient: prover.publicKey,
     nonce,
     prover: prover.publicKey,
+    payloadBytes,
+    payloadLength: payloadBytes.length,
   };
 }
 
@@ -208,7 +212,7 @@ export async function stageRevealProofForBull(
     pendingRandomness,
     prover,
     nonce,
-    0, // Reveal
+    { reveal: {} },
     payloadBytes,
   );
 }
@@ -238,7 +242,7 @@ export async function stageUnstakeProofForBull(
     pendingRandomness,
     prover,
     nonce,
-    1, // Unstake
+    { unstake: {} },
     payloadBytes,
   );
 }
