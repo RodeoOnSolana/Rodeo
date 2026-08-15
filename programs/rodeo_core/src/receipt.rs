@@ -689,8 +689,10 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    /// Deterministic vector: GlobalConfig PDA for the deployed rodeo_core
-    /// program id, seeded by `[b"global-config"]`.
+    /// Deterministic vector: GlobalConfig PDA for the canonical rodeo_core program id
+    /// CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA (crate::ID).  All PDA vectors
+    /// below are tied to this canonical id and must not be rewritten to match a
+    /// temporary local deploy keypair.
     fn sample_global_config() -> Pubkey {
         Pubkey::find_program_address(&[SEED_GLOBAL_CONFIG], &crate::ID).0
     }
