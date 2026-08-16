@@ -1,16 +1,13 @@
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Idl } from "@coral-xyz/anchor";
 import { AnchorProvider, BN, Program, setProvider, web3 } from "@coral-xyz/anchor";
 import {
-  AuthorityType,
-  TOKEN_PROGRAM_ID,
-  createAssociatedTokenAccount,
-  createMint,
-  getMint,
-  mintTo,
-  setAuthority,
-} from "@solana/spl-token";
+  buildRegistry,
+  type BullLeaf,
+  type RegistryEntry,
+} from "./sparse-tree.js";
 import { beforeAll, describe, expect, it } from "vitest";
 
 const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
@@ -19,52 +16,24 @@ const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
 const MPL_CORE_PROGRAM_ID = new web3.PublicKey(
   "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d",
 );
-const RODEO_CORE_PROGRAM_ID = new web3.PublicKey(
-  "EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z",
-);
 
 const localnetAvailable = Boolean(process.env.ANCHOR_PROVIDER_URL && process.env.ANCHOR_WALLET);
 const skipBenchmarkSuite = process.env.RODEO_TEST_SUITE !== "benchmark";
 const BENCHMARK_HEAP_BYTES = Number(process.env.RODEO_HEAP_BYTES ?? 32_768);
 const root = resolve(import.meta.dirname, "../..");
+const PARITY_SAMPLE_SIZE = 10_000;
 
 function loadIdl(name: string): Idl {
   const path = resolve(root, "target/idl", `${name}.json`);
   return JSON.parse(readFileSync(path, "utf8")) as Idl;
 }
 
-function programDataAddress(programId: web3.PublicKey): web3.PublicKey {
-  return web3.PublicKey.findProgramAddressSync(
-    [programId.toBuffer()],
-    BPF_LOADER_UPGRADEABLE_PROGRAM_ID,
-  )[0];
-}
-
-function deriveProtocolConfig(
-  programId: web3.PublicKey,
-  globalConfig: web3.PublicKey,
-  configVersion: BN,
-): [web3.PublicKey, number] {
-  return web3.PublicKey.findProgramAddressSync(
-    [
-      Buffer.from("protocol-config"),
-      globalConfig.toBuffer(),
-      configVersion.toArrayLike(Buffer, "le", 8),
-    ],
-    programId,
-  );
-}
-
-async function revokeMintAuthorities(
-  connection: web3.Connection,
-  payer: web3.Keypair,
-  mint: web3.PublicKey,
-) {
-  await setAuthority(connection, payer, mint, payer, AuthorityType.MintTokens, null);
-  const freezeAuthority = (await getMint(connection, mint)).freezeAuthority;
-  if (freezeAuthority !== null) {
-    await setAuthority(connection, payer, mint, payer, AuthorityType.FreezeAccount, null);
-  }
+function cuFrom(tx: any): number {
+  const raw = tx.meta?.computeUnitsConsumed;
+  if (typeof raw === "number") return raw;
+  if (typeof raw === "bigint") return Number(raw);
+  if (typeof raw === "string") return Number(raw);
+  throw new Error(`computeUnitsConsumed unavailable in transaction metadata`);
 }
 
 async function getConfirmedTransaction(
@@ -80,12 +49,87 @@ async function getConfirmedTransaction(
   return tx as any;
 }
 
-function cuFrom(tx: any): number {
-  const raw = tx.meta?.computeUnitsConsumed;
-  if (typeof raw === "number") return raw;
-  if (typeof raw === "bigint") return Number(raw);
-  if (typeof raw === "string") return Number(raw);
-  throw new Error(`computeUnitsConsumed unavailable in transaction metadata`);
+function bytesEq(a: Uint8Array | number[], b: Uint8Array | number[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+const POWERS = [4, 6, 8, 10];
+const BULL_DISTRIBUTION = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+function sha256(data: Buffer): Buffer {
+  return createHash("sha256").update(data).digest();
+}
+
+function u64le(n: number): Buffer {
+  const b = Buffer.alloc(8);
+  b.writeBigUInt64LE(BigInt(n), 0);
+  return b;
+}
+
+function detOwner(i: number): web3.PublicKey {
+  return new web3.PublicKey(sha256(Buffer.concat([Buffer.from("owner"), u64le(i)])));
+}
+
+function detBull(ownerIndex: number, bullIndex: number): web3.PublicKey {
+  return new web3.PublicKey(sha256(Buffer.concat([Buffer.from("bull"), u64le(ownerIndex), u64le(bullIndex)])));
+}
+
+function buildTsRegistry(scale: number) {
+  const entries: RegistryEntry[] = [];
+  let totalCount = 0;
+  let totalPower = 0n;
+  let ownerIndex = 0;
+
+  const denseCount = scale >= 2000 ? 1000 : Math.floor(scale / 2);
+  let remaining = scale - denseCount;
+
+  function addOwner(count: number) {
+    const owner = detOwner(ownerIndex);
+    const bulls: BullLeaf[] = [];
+    for (let j = 0; j < count; j++) {
+      const position = detBull(ownerIndex, j);
+      const power = POWERS[(ownerIndex + j) % POWERS.length];
+      bulls.push({
+        position,
+        positionId: BigInt(totalCount + 1),
+        owner,
+        buckPower: power,
+        revealConfigVersion: 1n,
+      });
+      totalCount++;
+      totalPower += BigInt(power);
+    }
+    entries.push({ owner, bulls });
+    ownerIndex++;
+  }
+
+  if (denseCount > 0) addOwner(denseCount);
+  let patternIdx = 0;
+  while (remaining > 0) {
+    const wanted = BULL_DISTRIBUTION[patternIdx % BULL_DISTRIBUTION.length];
+    const count = Math.min(wanted, remaining);
+    if (count === 0) break;
+    addOwner(count);
+    remaining -= count;
+    patternIdx++;
+  }
+
+  const reg = buildRegistry(entries);
+  return { reg, totalCount, totalPower };
+}
+
+interface FixtureScale {
+  scale: number;
+  ownerCount: number;
+  totalBullCount: number;
+  totalBuckPower: number;
+  ownerTreeRoot: number[];
+  generationTimeSeconds: number;
+  peakMemoryKb: number;
+  ownerRootMatches?: boolean;
+  bullRootMatches?: boolean;
 }
 
 interface FixtureCase {
@@ -93,6 +137,10 @@ interface FixtureCase {
   scale: number;
   ownerCount: number;
   bullsInSelectedOwner: number;
+  ownerTreeRoot: number[];
+  totalBullCount: number;
+  totalBuckPower: number;
+  registryVersion: number;
   victim: string | null;
   newBull: {
     position: string;
@@ -103,30 +151,27 @@ interface FixtureCase {
   } | null;
   nonDefaultOwnerSiblings: number;
   nonDefaultBullSiblings: number;
-  ownerSiblings: string[];
-  bullSiblings: string[];
   payloadBytes: number;
   payloadHex: string;
-  ownerTreeRoot: number[];
-  totalBullCount: number;
-  totalBuckPower: number;
-  registryVersion: number;
+  ownerSiblings: string[];
+  bullSiblings: string[];
+  expectedSuccess?: boolean;
 }
 
 interface FixtureFile {
-  scales: { scale: number; ownerCount: number; totalBullCount: number; totalBuckPower: number }[];
+  scales: FixtureScale[];
   cases: FixtureCase[];
+  meta?: { generatedAt: string; full: boolean };
 }
 
 describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF sparse-tree BenchmarkSparseTree", () => {
   let provider: AnchorProvider;
-  let payer: web3.Keypair;
   let rodeoCoreProgram: Program<Idl>;
   let globalConfig: web3.PublicKey;
   let bullRegistry: web3.PublicKey;
   const fixtures = JSON.parse(
-      readFileSync(resolve(root, "tests/integration/fixtures/benchmark_fixtures.json"), "utf8"),
-    ) as FixtureFile;
+    readFileSync(resolve(root, "tests/integration/fixtures/benchmark_fixtures.json"), "utf8"),
+  ) as FixtureFile;
   const results: any[] = [];
 
   beforeAll(async () => {
@@ -136,7 +181,7 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF sparse-tree Bench
     const idl = loadIdl("rodeo_core");
     const instructionNames = idl.instructions.map((i: any) => i.name);
     if (!instructionNames.includes("benchmark_sparse_tree")) {
-      throw new Error("benchmark_sparse_tree not found in target/idl/rodeo_core.json; build without test-fixtures?");
+      throw new Error("benchmark_sparse_tree not found in target/idl/rodeo_core.json");
     }
     if (!instructionNames.includes("test_fixture_initialize_protocol_accounts")) {
       throw new Error("test_fixture_initialize_protocol_accounts not found in IDL; build without test-fixtures?");
@@ -168,183 +213,239 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF sparse-tree Bench
   const CHUNK_SIZE = 900;
   let bufferNonce = 0;
 
-  it.each(fixtures.cases.filter((c: any) => c.case === "A"))("%s @ %i", async (fixture) => {
-    const authority = provider.wallet.publicKey;
-    const nonce = new BN(++bufferNonce);
+  it.each(fixtures.cases.map((c) => [c.case, c.scale, c] as [string, number, FixtureCase]))(
+    "%s @ %i",
+    async (_caseName, _scale, fixture) => {
+      const authority = provider.wallet.publicKey;
+      const nonce = new BN(++bufferNonce);
 
-    await rodeoCoreProgram.methods
-      .testFixtureSetBullRegistry(
-        Buffer.from(new Uint8Array(fixture.ownerTreeRoot)),
-        new BN(fixture.totalBullCount),
-        new BN(fixture.totalBuckPower),
-        new BN(fixture.registryVersion),
-      )
-      .accounts({
-        authority,
-        globalConfig,
-        bullRegistry,
-      })
-      .rpc();
-
-    const payload = Buffer.from(fixture.payloadHex, "hex");
-    let bufferPda: web3.PublicKey | null = null;
-    let bufferAccountBytes = 0;
-    let appendTxCount = 0;
-    let initCu = 0;
-    let appendCu = 0;
-    let finalizeCu = 0;
-    let bufferRent = 0;
-
-    if (payload.length > 0) {
-      [bufferPda] = web3.PublicKey.findProgramAddressSync(
-        [
-          Buffer.from("bull-proof-buffer"),
-          authority.toBuffer(),
-          authority.toBuffer(),
-          nonce.toArrayLike(Buffer, "le", 8),
-        ],
-        rodeoCoreProgram.programId,
-      );
-
-      const initSig = await rodeoCoreProgram.methods
-        .testFixtureInitializeBullProofBuffer(new BN(payload.length), nonce)
+      await rodeoCoreProgram.methods
+        .testFixtureSetBullRegistry(
+          Buffer.from(new Uint8Array(fixture.ownerTreeRoot)),
+          new BN(fixture.totalBullCount),
+          new BN(fixture.totalBuckPower),
+          new BN(fixture.registryVersion),
+        )
         .accounts({
           authority,
           globalConfig,
-          bullProofBuffer: bufferPda,
-          systemProgram: web3.SystemProgram.programId,
-          rent: web3.SYSVAR_RENT_PUBKEY,
+          bullRegistry,
         })
         .rpc();
 
-      const initTx = await getConfirmedTransaction(provider.connection, initSig);
-      initCu = cuFrom(initTx);
+      const payload = Buffer.from(fixture.payloadHex, "hex");
+      let bufferPda: web3.PublicKey | null = null;
+      let bufferAccountBytes = 0;
+      let appendTxCount = 0;
+      let initCu = 0;
+      let appendCu = 0;
+      let finalizeCu = 0;
+      let bufferRent = 0;
 
-      const bufferInfo = await provider.connection.getAccountInfo(bufferPda);
-      bufferAccountBytes = bufferInfo?.data.length ?? 0;
-      bufferRent = await provider.connection.getMinimumBalanceForRentExemption(bufferAccountBytes);
+      if (payload.length > 0) {
+        [bufferPda] = web3.PublicKey.findProgramAddressSync(
+          [
+            Buffer.from("bull-proof-buffer"),
+            authority.toBuffer(),
+            authority.toBuffer(),
+            nonce.toArrayLike(Buffer, "le", 8),
+          ],
+          rodeoCoreProgram.programId,
+        );
 
-      for (let offset = 0; offset < payload.length; offset += CHUNK_SIZE) {
-        const chunk = payload.subarray(offset, offset + CHUNK_SIZE);
-        const appendSig = await rodeoCoreProgram.methods
-          .testFixtureAppendBullProofBuffer(nonce, new BN(offset), chunk)
+        const initSig = await rodeoCoreProgram.methods
+          .testFixtureInitializeBullProofBuffer(new BN(payload.length), nonce)
+          .accounts({
+            authority,
+            globalConfig,
+            bullProofBuffer: bufferPda,
+            systemProgram: web3.SystemProgram.programId,
+            rent: web3.SYSVAR_RENT_PUBKEY,
+          })
+          .rpc();
+
+        const initTx = await getConfirmedTransaction(provider.connection, initSig);
+        initCu = cuFrom(initTx);
+
+        const bufferInfo = await provider.connection.getAccountInfo(bufferPda);
+        bufferAccountBytes = bufferInfo?.data.length ?? 0;
+        bufferRent = await provider.connection.getMinimumBalanceForRentExemption(bufferAccountBytes);
+
+        for (let offset = 0; offset < payload.length; offset += CHUNK_SIZE) {
+          const chunk = payload.subarray(offset, offset + CHUNK_SIZE);
+          const appendSig = await rodeoCoreProgram.methods
+            .testFixtureAppendBullProofBuffer(nonce, new BN(offset), chunk)
+            .accounts({
+              authority,
+              bullProofBuffer: bufferPda,
+            })
+            .rpc();
+          const appendTx = await getConfirmedTransaction(provider.connection, appendSig);
+          appendCu += cuFrom(appendTx);
+          appendTxCount += 1;
+        }
+
+        const finalizeSig = await rodeoCoreProgram.methods
+          .testFixtureFinalizeBullProofBuffer(nonce)
           .accounts({
             authority,
             bullProofBuffer: bufferPda,
           })
           .rpc();
-        const appendTx = await getConfirmedTransaction(provider.connection, appendSig);
-        appendCu += cuFrom(appendTx);
-        appendTxCount += 1;
+        const finalizeTx = await getConfirmedTransaction(provider.connection, finalizeSig);
+        finalizeCu = cuFrom(finalizeTx);
       }
 
-      const finalizeSig = await rodeoCoreProgram.methods
-        .testFixtureFinalizeBullProofBuffer(nonce)
+      const victim = fixture.victim ? new web3.PublicKey(fixture.victim) : null;
+      const newBull = fixture.newBull
+        ? {
+            position: new web3.PublicKey(fixture.newBull.position),
+            positionId: new BN(fixture.newBull.position_id),
+            owner: new web3.PublicKey(fixture.newBull.owner),
+            buckPower: fixture.newBull.buck_power,
+            revealConfigVersion: new BN(fixture.newBull.reveal_config_version),
+          }
+        : null;
+
+      const benchIx = await rodeoCoreProgram.methods
+        .benchmarkSparseTree(victim, newBull)
         .accounts({
           authority,
-          bullProofBuffer: bufferPda,
+          globalConfig,
+          bullRegistry,
+          bullProofBuffer: bufferPda ?? web3.PublicKey.default,
         })
-        .rpc();
-      const finalizeTx = await getConfirmedTransaction(provider.connection, finalizeSig);
-      finalizeCu = cuFrom(finalizeTx);
-    }
+        .instruction();
 
-    const victim = fixture.victim ? new web3.PublicKey(fixture.victim) : null;
-    const newBull = fixture.newBull
-      ? {
-          position: new web3.PublicKey(fixture.newBull.position),
-          positionId: new BN(fixture.newBull.position_id),
-          owner: new web3.PublicKey(fixture.newBull.owner),
-          buckPower: fixture.newBull.buck_power,
-          revealConfigVersion: new BN(fixture.newBull.reveal_config_version),
-        }
-      : null;
-
-    const benchIx = await rodeoCoreProgram.methods
-      .benchmarkSparseTree(victim, newBull)
-      .accounts({
-        authority,
-        globalConfig,
-        bullRegistry,
-        bullProofBuffer: bufferPda ?? web3.PublicKey.default,
-      })
-      .instruction();
-
-    const benchTx = new web3.Transaction().add(
-      web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
-      web3.ComputeBudgetProgram.requestHeapFrame({ bytes: BENCHMARK_HEAP_BYTES }),
-      benchIx,
-    );
-
-    let benchmarkCu = 0;
-    let benchmarkSuccess = false;
-    let benchmarkLogs: string[] = [];
-    let benchSig: string | null = null;
-    try {
-      benchTx.feePayer = provider.wallet.publicKey;
-      benchSig = await provider.sendAndConfirm(benchTx);
-      const tx = await getConfirmedTransaction(provider.connection, benchSig);
-      benchmarkCu = cuFrom(tx);
-      benchmarkLogs = tx!.meta?.logMessages ?? [];
-      benchmarkSuccess = benchmarkLogs.some((m: string) =>
-        m.includes("SparseTreeBenchmarked"),
+      const benchTx = new web3.Transaction().add(
+        web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+        web3.ComputeBudgetProgram.requestHeapFrame({ bytes: BENCHMARK_HEAP_BYTES }),
+        benchIx,
       );
-    } catch (err: any) {
-      const sig = err?.txid ?? err?.signature ?? null;
-      if (sig) {
-        const tx = await getConfirmedTransaction(provider.connection, sig);
-        if (tx) {
-          benchmarkCu = cuFrom(tx);
-          benchmarkLogs = tx.meta?.logMessages ?? [];
+
+      let benchmarkCu = 0;
+      let benchmarkSuccess = false;
+      let benchmarkLogs: string[] = [];
+      let benchSig: string | null = null;
+      try {
+        benchTx.feePayer = provider.wallet.publicKey;
+        benchSig = await provider.sendAndConfirm(benchTx);
+        const tx = await getConfirmedTransaction(provider.connection, benchSig);
+        benchmarkCu = cuFrom(tx);
+        benchmarkLogs = tx!.meta?.logMessages ?? [];
+        benchmarkSuccess = benchmarkLogs.some((m: string) => m.includes("SparseTreeBenchmarked"));
+      } catch (err: any) {
+        const sig = err?.txid ?? err?.signature ?? null;
+        if (sig) {
+          const tx = await getConfirmedTransaction(provider.connection, sig);
+          if (tx) {
+            benchmarkCu = cuFrom(tx);
+            benchmarkLogs = tx.meta?.logMessages ?? [];
+          }
         }
+        const logs = err?.logs ?? (typeof err?.getLogs === "function" ? err.getLogs() : undefined) ?? [];
+        writeFileSync(
+          resolve(root, `.ci-artifacts/benchmark_err_${fixture.case}_${fixture.scale}.json`),
+          JSON.stringify(
+            {
+              case: fixture.case,
+              scale: fixture.scale,
+              message: err?.message ?? String(err),
+              txid: sig,
+              logs: Array.isArray(logs) ? logs : [logs],
+            },
+            null,
+            2,
+          ),
+        );
+        benchmarkSuccess = false;
       }
-      const logs = err?.logs ?? (typeof err?.getLogs === "function" ? err.getLogs() : undefined) ?? [];
-      writeFileSync(
-        resolve(root, `.ci-artifacts/benchmark_err_${fixture.case}_${fixture.scale}.json`),
-        JSON.stringify({
-          case: fixture.case,
-          scale: fixture.scale,
-          message: err?.message ?? String(err),
-          txid: sig,
-          logs: Array.isArray(logs) ? logs : [logs],
-        }, null, 2)
-      );
-      benchmarkSuccess = false;
+
+      const expectedSuccess = fixture.expectedSuccess !== false;
+      if (expectedSuccess) {
+        expect(benchmarkSuccess).toBe(true);
+      } else {
+        expect(benchmarkSuccess).toBe(false);
+      }
+
+      const row = {
+        case_name: fixture.case,
+        tree_scale: fixture.scale,
+        owner_count: fixture.ownerCount,
+        selected_owner_bull_count: fixture.bullsInSelectedOwner,
+        victim_present: fixture.victim !== null,
+        non_default_owner_siblings: fixture.nonDefaultOwnerSiblings,
+        non_default_bull_siblings: fixture.nonDefaultBullSiblings,
+        compressed_proof_bytes: fixture.payloadBytes,
+        payload_bytes: fixture.payloadBytes,
+        buffer_account_bytes: bufferAccountBytes,
+        buffer_rent_lamports: bufferRent,
+        append_tx_count: appendTxCount,
+        init_compute_units: initCu,
+        append_compute_units: appendCu,
+        finalize_compute_units: finalizeCu,
+        staging_compute_units: initCu + appendCu + finalizeCu,
+        requested_heap_bytes: BENCHMARK_HEAP_BYTES,
+        benchmark_compute_units: benchmarkCu,
+        success: benchmarkSuccess,
+      };
+      if (!benchmarkSuccess) {
+        writeFileSync(
+          resolve(root, `.ci-artifacts/benchmark_logs_${fixture.case}_${fixture.scale}.json`),
+          JSON.stringify({ case: fixture.case, scale: fixture.scale, logs: benchmarkLogs, cu: benchmarkCu }, null, 2),
+        );
+      }
+
+      results.push(row);
+      console.log(row);
+    },
+    120_000,
+  );
+
+  it("TypeScript/Rust deterministic root parity", () => {
+    const parityResults: any[] = [];
+    // Only compare the canonical owner-population scales (ownerCount > 10).
+    // Bull-subtree and remove-one fixtures reuse small scale numbers but have
+    // a different registry shape, so they are not meaningful root-parity targets
+    // for the full owner-tree generator.
+    const mainOwnerScales = fixtures.scales.filter(
+      (s) => s.scale >= 100 && s.ownerCount > 10,
+    );
+    const uniqueSampleSizes = [
+      ...new Set(mainOwnerScales.map((s) => Math.min(s.scale, PARITY_SAMPLE_SIZE))),
+    ].sort((a, b) => a - b);
+
+    for (const sampleSize of uniqueSampleSizes) {
+      const target = mainOwnerScales.find((s) => s.scale === sampleSize);
+      if (!target) {
+        console.log(`No ${sampleSize} fixture for parity`);
+        continue;
+      }
+
+      const { reg, totalCount, totalPower } = buildTsRegistry(sampleSize);
+      const root = reg.rootNode;
+      const ownerRootMatch = bytesEq(root.hash, target.ownerTreeRoot);
+      const countMatch = root.count === BigInt(target.totalBullCount);
+      const powerMatch = root.power === BigInt(target.totalBuckPower);
+
+      parityResults.push({
+        sampleSize,
+        ownerRootMatch,
+        countMatch,
+        powerMatch,
+        expectedRoot: Buffer.from(target.ownerTreeRoot).toString("hex"),
+        gotRoot: Buffer.from(root.hash).toString("hex"),
+      });
+
+      expect(ownerRootMatch).toBe(true);
+      expect(countMatch).toBe(true);
+      expect(powerMatch).toBe(true);
     }
 
-    const row = {
-      case_name: fixture.case,
-      tree_scale: fixture.scale,
-      owner_count: fixture.ownerCount,
-      selected_owner_bull_count: fixture.bullsInSelectedOwner,
-      victim_present: fixture.victim !== null,
-      non_default_owner_siblings: fixture.nonDefaultOwnerSiblings,
-      non_default_bull_siblings: fixture.nonDefaultBullSiblings,
-      compressed_proof_bytes: fixture.payloadBytes,
-      payload_bytes: fixture.payloadBytes,
-      buffer_account_bytes: bufferAccountBytes,
-      buffer_rent_lamports: bufferRent,
-      append_tx_count: appendTxCount,
-      init_compute_units: initCu,
-      append_compute_units: appendCu,
-      finalize_compute_units: finalizeCu,
-      staging_compute_units: initCu + appendCu + finalizeCu,
-      requested_heap_bytes: BENCHMARK_HEAP_BYTES,
-      benchmark_compute_units: benchmarkCu,
-      success: benchmarkSuccess,
-    };
-    if (!benchmarkSuccess) {
-      writeFileSync(
-        resolve(root, `.ci-artifacts/benchmark_logs_${fixture.case}_${fixture.scale}.json`),
-        JSON.stringify({ case: fixture.case, scale: fixture.scale, logs: benchmarkLogs, cu: benchmarkCu }, null, 2)
-      );
-    }
+    console.table(parityResults);
+  }, 300_000);
 
-    results.push(row);
-    console.log(row);
-  }, 90_000);
-
-  it("prints benchmark result table", async () => {
+  it("prints benchmark result table", () => {
     console.table(results);
     const outDir = resolve(root, ".ci-artifacts");
     mkdirSync(outDir, { recursive: true });
