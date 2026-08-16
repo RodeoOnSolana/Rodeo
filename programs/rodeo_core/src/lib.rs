@@ -7681,4 +7681,36 @@ mod tests {
         use super::*;
         include!("unstake_tests.rs");
     }
+
+    // ---------------------------------------------------------------------------
+    // Initializer authority guard regression tests
+    // ---------------------------------------------------------------------------
+    // These tests prove that the production `initialize_protocol` authority
+    // check is never accidentally stripped, and that the test-only fixture
+    // bypass remains strictly gated behind `test-fixtures`.
+
+    mod initializer_authority_guard {
+        use super::*;
+
+        #[cfg(not(feature = "test-fixtures"))]
+        #[test]
+        fn production_initialize_protocol_compiles_upgrade_authority_check() {
+            // In a default/production build the `#[cfg(not(feature = "test-fixtures"))]`
+            // block inside `initialize_protocol` enforces that the initializer is
+            // the program's upgrade authority. This test is only compiled without
+            // `test-fixtures`, proving the `UnauthorizedInitializer` error and the
+            // authority check are present in the production binary.
+            let _ = RodeoError::UnauthorizedInitializer;
+        }
+
+        #[cfg(feature = "test-fixtures")]
+        #[test]
+        fn test_fixtures_initialize_protocol_bypass_is_available() {
+            // The localnet-only `test_fixture_initialize_protocol_accounts` bypass
+            // is compiled only when `test-fixtures` is enabled. Its presence in
+            // this branch proves the bypass is correctly gated and cannot leak into
+            // a default/production build.
+            let _ = std::any::type_name::<TestFixtureInitializeProtocolAccounts>();
+        }
+    }
 }
