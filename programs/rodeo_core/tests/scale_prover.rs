@@ -1,23 +1,27 @@
+#![recursion_limit = "256"]
+
 use std::path::PathBuf;
 use std::time::Instant;
 
 use anchor_lang::prelude::*;
 use anchor_lang::AnchorSerialize;
 use rodeo_core::bull_registry::{
-    leaf_contains_target, skip_victim_interval, BullLeaf, BullProofPayloadV1, CompressedBullProof,
-    CompressedOwnerProof, OwnerLeaf, BULL_PROOF_PAYLOAD_SCHEMA_VERSION, SECTION_CURRENT_BULL,
-    SECTION_CURRENT_OWNER, SECTION_REMOVE_BULL, SECTION_SELECTED_BULL, SECTION_SELECTED_OWNER,
-    SECTION_VICTIM_OWNER,
+    add_bull_to_owner_leaf, apply_owner_leaf_update, leaf_contains_target, skip_victim_interval,
+    BullLeaf, BullProofPayloadV1, CompressedBullProof, CompressedOwnerProof, OwnerLeaf,
+    BULL_PROOF_PAYLOAD_SCHEMA_VERSION, SECTION_CURRENT_BULL, SECTION_CURRENT_OWNER,
+    SECTION_REMOVE_BULL, SECTION_SELECTED_BULL, SECTION_SELECTED_OWNER, SECTION_VICTIM_OWNER,
 };
+use rodeo_core::constants::*;
 use rodeo_core::probability::{
-    map_mint_theft_flag, protocol_config_v1, rejection_sample_draw, RandomnessDomain,
-    RandomnessSampleContext,
+    buck_power_for_tier, map_bull_tier, map_mint_theft_flag, map_role, protocol_config_v1,
+    rejection_sample_draw, RandomnessDomain, RandomnessSampleContext,
 };
 use rodeo_core::sparse_tree::{
     hash_node, verify_with_prefix, CompressedSparseProof, SparseMerkleNode, SPARSE_TREE_DEPTH,
 };
+use rodeo_core::state::{ActionType, Role};
 use serde_json::json;
-use solana_program::hash::hashv;
+use solana_program::hash::{hash, hashv};
 
 // Protocol private node prefixes reproduced here for the off-chain prover.
 const PREFIX_BULL_OWNER_NODE: &[u8] = b"rodeo_v2_bull_owner_node";
@@ -1828,6 +1832,584 @@ fn generate_sparse_scale_fixtures() {
     let pkg_local = PathBuf::from("tests/integration/fixtures");
     std::fs::create_dir_all(&pkg_local).unwrap();
     let out_path = pkg_local.join("benchmark_fixtures.json");
+    std::fs::write(&out_path, serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    eprintln!("Wrote {}", out_path.display());
+}
+
+// ---------------------------------------------------------------------------
+// SettleReveal full-path fixture generator.
+// ---------------------------------------------------------------------------
+
+const LOCALNET_PROGRAM_ID: &str = "EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z";
+
+fn derive_commitment_position(
+    position: Pubkey,
+    action_type: ActionType,
+    action_nonce: u64,
+    protocol_epoch: u64,
+) -> [u8; 32] {
+    let mut preimage = [0u8; 32 + 1 + 8 + 8];
+    preimage[0..32].copy_from_slice(position.as_ref());
+    preimage[32] = action_type as u8;
+    preimage[33..41].copy_from_slice(&action_nonce.to_le_bytes());
+    preimage[41..49].copy_from_slice(&protocol_epoch.to_le_bytes());
+    hash(&preimage).to_bytes()
+}
+
+fn derive_global_config_pda(program_id: Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[SEED_GLOBAL_CONFIG], &program_id)
+}
+
+fn derive_position_pda(
+    program_id: Pubkey,
+    global_config: Pubkey,
+    position_id: u64,
+) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[
+            SEED_POSITION,
+            global_config.as_ref(),
+            &position_id.to_le_bytes(),
+        ],
+        &program_id,
+    )
+}
+
+fn load_anchor_wallet_pubkey() -> Option<Pubkey> {
+    let path = std::env::var("ANCHOR_WALLET").ok().or_else(|| {
+        let home = std::env::var("HOME").ok()?;
+        Some(format!("{}/.config/solana/id.json", home))
+    })?;
+    let content = std::fs::read_to_string(path).ok()?;
+    let arr: Vec<u8> = serde_json::from_str(&content).ok()?;
+    if arr.len() < 64 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&arr[32..64]);
+    Some(Pubkey::new_from_array(bytes))
+}
+
+#[derive(Clone, Debug)]
+struct TheftTarget {
+    selected_idx: usize,
+    selected_owner: Pubkey,
+    selected_bull: BullLeaf,
+    selected_owner_prefix: u64,
+    selected_owner_power: u64,
+    selected_bull_prefix: u64,
+    selected_bull_power: u64,
+    victim_prefix: u64,
+    victim_power: u64,
+    victim_count: u64,
+    external_count: u64,
+    external_power: u64,
+    random_output: [u8; 32],
+    tier: u8,
+    power: u8,
+}
+
+fn build_bull_intervals(bulls: &[BullLeaf]) -> Vec<(u64, u64, BullLeaf)> {
+    let mut indexed: Vec<_> = bulls
+        .iter()
+        .map(|b| {
+            let mut key = b.position.to_bytes();
+            key.reverse();
+            (b.clone(), key)
+        })
+        .collect();
+    indexed.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let mut out = Vec::with_capacity(bulls.len());
+    let mut prefix = 0u64;
+    for (b, _) in indexed {
+        let power = b.buck_power as u64;
+        out.push((prefix, power, b));
+        prefix = prefix.saturating_add(power);
+    }
+    out
+}
+
+fn find_bull_by_intervals(
+    intervals: &[(u64, u64, BullLeaf)],
+    target: u64,
+) -> Option<(&BullLeaf, u64, u64)> {
+    if intervals.is_empty() {
+        return None;
+    }
+    let mut lo = 0usize;
+    let mut hi = intervals.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if intervals[mid].0 <= target {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let idx = lo.saturating_sub(1);
+    let (prefix, power, b) = &intervals[idx];
+    if leaf_contains_target(*prefix, *power, target) {
+        Some((b, *prefix, *power))
+    } else {
+        None
+    }
+}
+
+fn resolve_theft_target_for_position(
+    owners: &[OwnerData],
+    sorted: &[(usize, u64, u64, u64)],
+    bull_intervals: &mut std::collections::HashMap<usize, Vec<(u64, u64, BullLeaf)>>,
+    victim_idx: Option<usize>,
+    total_bull_count: u64,
+    total_buck_power: u64,
+    position: Pubkey,
+    action_nonce: u64,
+) -> Option<TheftTarget> {
+    let config = protocol_config_v1(Pubkey::default(), 0);
+    let random_output = derive_commitment_position(position, ActionType::Reveal, action_nonce, 0);
+
+    let role_ctx = RandomnessSampleContext {
+        random_output,
+        domain: RandomnessDomain::Role,
+        position,
+        action_nonce,
+    };
+    if map_role(role_ctx, &config).ok()? != Role::Bull {
+        return None;
+    }
+
+    let theft_ctx = RandomnessSampleContext {
+        random_output,
+        domain: RandomnessDomain::MintTheft,
+        position,
+        action_nonce,
+    };
+    if !map_mint_theft_flag(theft_ctx, &config).ok()? {
+        return None;
+    }
+
+    let (victim_count, victim_power, victim_prefix) = match victim_idx {
+        Some(idx) => {
+            let &(_, prefix, count, power) = sorted
+                .iter()
+                .find(|&&(i, _, _, _)| i == idx)
+                .expect("victim not found in sorted owners");
+            (count, power, prefix)
+        }
+        None => (0u64, 0u64, 0u64),
+    };
+    let external_count = total_bull_count.checked_sub(victim_count)?;
+    let external_power = total_buck_power.checked_sub(victim_power)?;
+    if external_count < config.min_bulls_for_theft || external_power == 0 {
+        return None;
+    }
+
+    let owner_ctx = RandomnessSampleContext {
+        random_output,
+        domain: RandomnessDomain::OwnerSelection,
+        position,
+        action_nonce,
+    };
+    let owner_target = rejection_sample_draw(owner_ctx, external_power).ok()?;
+    let safe_owner_target = skip_victim_interval(owner_target, victim_prefix, victim_power);
+    let (selected_idx, selected_owner_prefix, _selected_count, selected_owner_power) =
+        find_owner_by_target(&sorted, safe_owner_target);
+    if Some(selected_idx) == victim_idx || selected_owner_power == 0 {
+        return None;
+    }
+
+    let selected_owner = &owners[selected_idx];
+    let intervals = bull_intervals
+        .entry(selected_idx)
+        .or_insert_with(|| build_bull_intervals(&selected_owner.bulls));
+
+    let bull_ctx = RandomnessSampleContext {
+        random_output,
+        domain: RandomnessDomain::BullSelection,
+        position,
+        action_nonce,
+    };
+    let bull_target = rejection_sample_draw(bull_ctx, selected_owner_power).ok()?;
+    let (selected_bull, selected_bull_prefix, selected_bull_power) =
+        find_bull_by_intervals(intervals, bull_target)?;
+    if selected_bull.owner != selected_owner.owner {
+        return None;
+    }
+
+    let tier_ctx = RandomnessSampleContext {
+        random_output,
+        domain: RandomnessDomain::BullTier,
+        position,
+        action_nonce,
+    };
+    let tier = map_bull_tier(tier_ctx, &config).ok()?;
+    let power = buck_power_for_tier(&config, tier);
+
+    Some(TheftTarget {
+        selected_idx,
+        selected_owner: selected_owner.owner,
+        selected_bull: *selected_bull,
+        selected_owner_prefix,
+        selected_owner_power,
+        selected_bull_prefix,
+        selected_bull_power,
+        victim_prefix,
+        victim_power,
+        victim_count,
+        external_count,
+        external_power,
+        random_output,
+        tier,
+        power,
+    })
+}
+
+fn find_position_for_settle_reveal(
+    owners: &[OwnerData],
+    sorted: &[(usize, u64, u64, u64)],
+    bull_intervals: &mut std::collections::HashMap<usize, Vec<(u64, u64, BullLeaf)>>,
+    total_bull_count: u64,
+    total_buck_power: u64,
+    program_id: Pubkey,
+    global_config: Pubkey,
+    max_position_id: u64,
+) -> Option<(u64, Pubkey, TheftTarget)> {
+    for position_id in 0..max_position_id {
+        let (position, _bump) = derive_position_pda(program_id, global_config, position_id);
+        if let Some(target) = resolve_theft_target_for_position(
+            owners,
+            sorted,
+            bull_intervals,
+            None,
+            total_bull_count,
+            total_buck_power,
+            position,
+            0,
+        ) {
+            return Some((position_id, position, target));
+        }
+    }
+    None
+}
+
+fn make_settle_reveal_case(
+    case: &str,
+    scale: usize,
+    position_id: u64,
+    position: Pubkey,
+    owner_tree: &SparseTree,
+    owners: &[OwnerData],
+    total_bull_count: u64,
+    total_buck_power: u64,
+    owner_tree_root: &[u8; 32],
+    target: &TheftTarget,
+    victim: Pubkey,
+) -> serde_json::Value {
+    let selected = select_owners(owners);
+    let selected_owner = &owners[target.selected_idx];
+
+    // Historical proofs.
+    let vproof = owner_proof_with_leaf(owner_tree, &victim, OwnerLeaf::empty());
+    let oproof = owner_proof_with_leaf(
+        owner_tree,
+        &target.selected_owner,
+        selected_owner.owner_leaf.clone(),
+    );
+    let bproof = bull_proof(selected_owner, &target.selected_bull.position);
+
+    // Choose a non-final, non-victim owner to mutate for J1.
+    let extra_owner_idx = if target.selected_idx != selected.normal {
+        selected.normal
+    } else {
+        selected.dense
+    };
+
+    // Current registry variant.
+    let (current_root, current_count, current_power, current_owner_proof, current_bull_proof) =
+        if case.starts_with("J1") {
+            let mut current_owners = owners.to_vec();
+            let extra_owner_index = extra_owner_idx as u64;
+            let extra_bull_index = 1_000_000u64;
+            let extra_bull_position = deterministic_bull(extra_owner_index, extra_bull_index);
+            let extra_bull_power =
+                POWERS[((extra_owner_index + extra_bull_index) as usize) % POWERS.len()];
+            let extra_bull = BullLeaf {
+                position: extra_bull_position,
+                position_id: total_bull_count + 1,
+                owner: current_owners[extra_owner_idx].owner,
+                buck_power: extra_bull_power,
+                reveal_config_version: 1,
+            };
+            current_owners[extra_owner_idx].bulls.push(extra_bull);
+            current_owners[extra_owner_idx].owner_leaf = owner_leaf_from_bulls(
+                current_owners[extra_owner_idx].owner,
+                &current_owners[extra_owner_idx].bulls,
+            );
+            current_owners[extra_owner_idx].bull_tree = None;
+
+            let mut current_owner_tree =
+                SparseTree::new(&OwnerLeaf::empty().to_node(), PREFIX_BULL_OWNER_NODE);
+            let mut current_total_count = 0u64;
+            let mut current_total_power = 0u64;
+            for od in &current_owners {
+                current_owner_tree.insert(&od.owner.to_bytes(), od.owner_leaf.to_node());
+                current_total_count += od.owner_leaf.active_bull_count;
+                current_total_power += od.owner_leaf.total_buck_power;
+            }
+            let current_root_node = *current_owner_tree.root();
+
+            let selected_owner_leaf = current_owners[target.selected_idx].owner_leaf.clone();
+            let coproof = owner_proof_with_leaf(
+                &current_owner_tree,
+                &target.selected_owner,
+                selected_owner_leaf,
+            );
+            let cbproof = bull_proof(&current_owners[target.selected_idx], &position);
+
+            (
+                current_root_node.hash,
+                current_total_count,
+                current_total_power,
+                coproof,
+                cbproof,
+            )
+        } else {
+            // J2: final owner is absent from the current registry.
+            let mut current_owners = owners.to_vec();
+            current_owners.retain(|od| od.owner != target.selected_owner);
+            let mut current_owner_tree =
+                SparseTree::new(&OwnerLeaf::empty().to_node(), PREFIX_BULL_OWNER_NODE);
+            let mut current_total_count = 0u64;
+            let mut current_total_power = 0u64;
+            for od in &current_owners {
+                current_owner_tree.insert(&od.owner.to_bytes(), od.owner_leaf.to_node());
+                current_total_count += od.owner_leaf.active_bull_count;
+                current_total_power += od.owner_leaf.total_buck_power;
+            }
+            let current_root_node = *current_owner_tree.root();
+
+            let coproof = owner_proof_with_leaf(
+                &current_owner_tree,
+                &target.selected_owner,
+                OwnerLeaf::empty(),
+            );
+            let empty_selected = OwnerData {
+                owner: target.selected_owner,
+                owner_leaf: OwnerLeaf::empty(),
+                bull_tree: Some(build_bull_tree(&[])),
+                bulls: Vec::new(),
+            };
+            let cbproof = bull_proof(&empty_selected, &position);
+
+            (
+                current_root_node.hash,
+                current_total_count,
+                current_total_power,
+                coproof,
+                cbproof,
+            )
+        };
+
+    let new_bull = BullLeaf {
+        position,
+        position_id,
+        owner: target.selected_owner,
+        buck_power: target.power,
+        reveal_config_version: 1,
+    };
+
+    let final_owner_leaf =
+        add_bull_to_owner_leaf(&current_owner_proof.leaf, &new_bull, &current_bull_proof)
+            .expect("final owner leaf");
+    let final_root = apply_owner_leaf_update(
+        &current_root,
+        &target.selected_owner,
+        &current_owner_proof,
+        &final_owner_leaf,
+    )
+    .expect("final owner tree root");
+    let final_total_count = current_count + 1;
+    let final_total_power = current_power + target.power as u64;
+    let final_registry_version = 1u64 + 1;
+
+    let payload = BullProofPayloadV1 {
+        schema_version: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+        section_bitmap: SECTION_VICTIM_OWNER
+            | SECTION_SELECTED_OWNER
+            | SECTION_SELECTED_BULL
+            | SECTION_CURRENT_OWNER
+            | SECTION_CURRENT_BULL,
+        victim_owner: Some(vproof),
+        selected_owner: Some(oproof.clone()),
+        selected_bull: Some(bproof),
+        current_owner: Some(current_owner_proof),
+        current_bull: Some(current_bull_proof),
+        remove_bull: None,
+    };
+    let payload_bytes = payload.try_to_vec().unwrap();
+
+    json!({
+        "case": case,
+        "scale": scale,
+        "ownerCount": owners.len(),
+        "bullsInSelectedOwner": selected_owner.owner_leaf.active_bull_count,
+        "ownerTreeRoot": hash_array(&final_root),
+        "totalBullCount": final_total_count,
+        "totalBuckPower": final_total_power,
+        "registryVersion": final_registry_version,
+        "victim": victim.to_string(),
+        "selectedOwner": target.selected_owner.to_string(),
+        "selectedBull": bull_leaf_json(&target.selected_bull),
+        "newBull": bull_leaf_json(&new_bull),
+        "finalOwner": target.selected_owner.to_string(),
+        "tier": target.tier,
+        "power": target.power,
+        "payloadHex": hex::encode(&payload_bytes),
+        "nonDefaultOwnerSiblings": oproof.proof.siblings.len(),
+        "nonDefaultBullSiblings": payload.selected_bull.as_ref().unwrap().proof.siblings.len(),
+        "payloadBytes": payload_bytes.len(),
+        "ownerSiblings": siblings_hex(&oproof.proof),
+        "bullSiblings": siblings_hex(&payload.selected_bull.as_ref().unwrap().proof),
+        "expectedSuccess": true,
+        "sectionBytes": compute_section_bytes(&payload),
+        "randomOutput": json!(target.random_output.to_vec()),
+        "position": position.to_string(),
+        "positionId": position_id,
+        "actionNonce": 0u64,
+        "programId": LOCALNET_PROGRAM_ID,
+        "globalConfig": derive_global_config_pda(LOCALNET_PROGRAM_ID.parse::<Pubkey>().unwrap()).0.to_string(),
+        "externalCount": target.external_count,
+        "externalPower": target.external_power,
+        "selectedOwnerIntervalStart": target.selected_owner_prefix,
+        "selectedOwnerIntervalEnd": target.selected_owner_prefix + target.selected_owner_power,
+        "selectedBullIntervalStart": target.selected_bull_prefix,
+        "selectedBullIntervalEnd": target.selected_bull_prefix + target.selected_bull_power,
+        "snapshotRoot": hash_array(owner_tree_root),
+        "snapshotTotalCount": total_bull_count,
+        "snapshotTotalPower": total_buck_power,
+        "snapshotVersion": 0u64,
+        "currentOwnerTreeRoot": hash_array(&current_root),
+        "currentTotalBullCount": current_count,
+        "currentTotalBuckPower": current_power,
+        "currentRegistryVersion": 1u64,
+    })
+}
+
+#[test]
+#[ignore = "slow settle-reveal fixture generator"]
+fn generate_settle_reveal_fixtures() {
+    let full = std::env::var("RODEO_BENCH_FULL").is_ok();
+    let scales: Vec<usize> = if full {
+        vec![4, 10_000, 100_000, 1_000_000]
+    } else {
+        vec![4, 10_000, 100_000]
+    };
+
+    let victim = load_anchor_wallet_pubkey().expect(
+        "settle-reveal fixture generator requires ANCHOR_WALLET or ~/.config/solana/id.json",
+    );
+
+    let program_id: Pubkey = LOCALNET_PROGRAM_ID
+        .parse()
+        .expect("valid localnet program id");
+    let (global_config, _global_bump) = derive_global_config_pda(program_id);
+
+    let mut all_cases: Vec<serde_json::Value> = Vec::new();
+    let mut meta = json!({
+        "generatedAt": format!("{:?}", std::time::SystemTime::now()),
+        "full": full,
+    });
+
+    let overall_start = Instant::now();
+
+    for scale in scales {
+        eprintln!("[settle-reveal] Building fixtures for scale {} ...", scale);
+        let start = Instant::now();
+        let (owner_root, owners, total_count, total_power, owner_tree) = build_registry(scale);
+        let owner_tree_root = owner_root.hash;
+        let build_elapsed = start.elapsed();
+
+        // Ensure the staker is not one of the registered owners.
+        if owners.iter().any(|od| od.owner == victim) {
+            panic!("victim/staker pubkey collides with a registered owner");
+        }
+
+        let sorted = sort_owners_by_path(&owners);
+        let mut bull_intervals = std::collections::HashMap::new();
+
+        let max_position_id = if scale >= 1_000_000 {
+            2_000_000
+        } else {
+            100_000
+        };
+        let search = find_position_for_settle_reveal(
+            &owners,
+            &sorted,
+            &mut bull_intervals,
+            total_count,
+            total_power,
+            program_id,
+            global_config,
+            max_position_id,
+        )
+        .expect("no valid SettleReveal target found");
+        let (position_id, position, target) = search;
+
+        let search_elapsed = start.elapsed();
+
+        all_cases.push(make_settle_reveal_case(
+            "J1",
+            scale,
+            position_id,
+            position,
+            &owner_tree,
+            &owners,
+            total_count,
+            total_power,
+            &owner_tree_root,
+            &target,
+            victim,
+        ));
+        all_cases.push(make_settle_reveal_case(
+            "J2",
+            scale,
+            position_id,
+            position,
+            &owner_tree,
+            &owners,
+            total_count,
+            total_power,
+            &owner_tree_root,
+            &target,
+            victim,
+        ));
+
+        eprintln!(
+            "[settle-reveal] scale {} done in {:.2}s (search {:.2}s, position_id {})",
+            scale,
+            search_elapsed.as_secs_f64(),
+            (search_elapsed - build_elapsed).as_secs_f64(),
+            position_id,
+        );
+    }
+
+    meta["overallTimeSeconds"] = overall_start.elapsed().as_secs_f64().into();
+
+    let output = json!({
+        "cases": all_cases,
+        "meta": meta,
+    });
+
+    let repo_root = PathBuf::from("../../tests/integration/fixtures");
+    std::fs::create_dir_all(&repo_root).unwrap();
+    let out_path = repo_root.join("settle_reveal_fixtures.json");
+    std::fs::write(&out_path, serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    eprintln!("Wrote {}", out_path.display());
+
+    let pkg_local = PathBuf::from("tests/integration/fixtures");
+    std::fs::create_dir_all(&pkg_local).unwrap();
+    let out_path = pkg_local.join("settle_reveal_fixtures.json");
     std::fs::write(&out_path, serde_json::to_string_pretty(&output).unwrap()).unwrap();
     eprintln!("Wrote {}", out_path.display());
 }

@@ -494,26 +494,48 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     }
   }, 30_000);
 
-  it("exports only the Phase 2C1 instructions and referenced ABI entries", async () => {
+  it("exports the Phase 2C1 instructions plus benchmark/test helpers and no out-of-scope instructions", async () => {
     const idl = loadIdl("rodeo_core");
     const instructionNames = idl.instructions?.map((ix: { name: string }) => ix.name) ?? [];
     const accountNames = new Set(idl.accounts?.map((account: { name: string }) => account.name));
 
-    expect(instructionNames.sort()).toEqual(
-      [
-        "initialize_protocol",
-        "stake_and_commit",
-        "settle_reveal",
-        "recover_reveal_timeout",
-        "close_epochs",
-        "recognize_rewards",
-        "claim_position",
-        "request_unstake",
-        "settle_unstake",
-        "recover_unstake_timeout",
-      ].sort(),
-    );
+    const phase2c1Instructions = [
+      "initialize_protocol",
+      "stake_and_commit",
+      "settle_reveal",
+      "recover_reveal_timeout",
+      "close_epochs",
+      "recognize_rewards",
+      "claim_position",
+      "request_unstake",
+      "settle_unstake",
+      "recover_unstake_timeout",
+    ];
+    for (const name of phase2c1Instructions) {
+      expect(instructionNames).toContain(name);
+    }
     expect(instructionNames).not.toContain("ensure_idl_accounts");
+
+    const allowedExtraPrefixes = ["test_fixture_", "benchmark_"];
+    const allowedExtraInstructions = [
+      "append_bull_proof",
+      "close_bull_proof",
+      "finalize_bull_proof",
+      "initialize_bull_proof",
+      "set_current_config_version_fixture",
+      "create_protocol_config_v2_fixture",
+      "test_set_pause_flags",
+    ];
+    for (const name of instructionNames) {
+      if (
+        phase2c1Instructions.includes(name) ||
+        allowedExtraInstructions.includes(name) ||
+        allowedExtraPrefixes.some((p) => name.startsWith(p))
+      ) {
+        continue;
+      }
+      throw new Error(`Unexpected instruction in IDL: ${name}`);
+    }
 
     const outOfScopeInstructions = [
       "stake",
@@ -538,6 +560,8 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       "RewardState",
       "GlobalGameState",
       "BullAccumulator",
+      "BullProofBuffer",
+      "BullRegistry",
       "Position",
       "PendingRandomness",
       "WalletClaimCooldown",
@@ -1088,6 +1112,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         pendingRandomness,
         protocolConfig,
         owner: pos.owner,
+        receiptOwner: pos.owner,
         receiptAsset,
         receiptCollection,
         receiptAuthority,
@@ -1096,7 +1121,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         mplCoreProgram: MPL_CORE_PROGRAM_ID,
         systemProgram: web3.SystemProgram.programId,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
+        bullProofBuffer: null,
+        refundRecipient: null,
+      } as any)
       .signers([settler])
       .rpc();
   }
@@ -1574,6 +1601,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           pendingRandomness: wrongRandomness,
           protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
           owner: payer.publicKey,
+          receiptOwner: payer.publicKey,
           receiptAsset,
           receiptCollection,
           receiptAuthority,
@@ -1582,7 +1610,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           mplCoreProgram: MPL_CORE_PROGRAM_ID,
           systemProgram: web3.SystemProgram.programId,
           clock: web3.SYSVAR_CLOCK_PUBKEY,
-        })
+          bullProofBuffer: null,
+          refundRecipient: null,
+        } as any)
         .rpc(),
     ).rejects.toThrow();
   }, 60_000);

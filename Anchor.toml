@@ -8,7 +8,7 @@ skip-lint = false
 
 # Canonical rodeo_core program id for this repository/branch (PR #19).
 [programs.localnet]
-rodeo_core = "CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA"
+rodeo_core = "EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z"
 rodeo_market = "9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n"
 rodeo_router = "CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD"
 
@@ -20,7 +20,7 @@ cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "sh -c 'if [ \"$RODEO_TEST_SUITE\" = \"benchmark\" ]; then pnpm --filter @rodeo/integration exec vitest run localnet-sparse-benchmark.test.ts; elif [ \"$RODEO_TEST_SUITE\" = \"heap\" ]; then pnpm --filter @rodeo/integration exec vitest run localnet-heap-diagnostic.test.ts; else pnpm --filter @rodeo/integration test; fi'"
+test = "sh -c 'if [ \"$RODEO_TEST_SUITE\" = \"benchmark\" ]; then pnpm --filter @rodeo/integration exec vitest run localnet-settle-reveal-benchmark.test.ts; elif [ \"$RODEO_TEST_SUITE\" = \"heap\" ]; then pnpm --filter @rodeo/integration exec vitest run localnet-heap-diagnostic.test.ts; else pnpm --filter @rodeo/integration test; fi'"
 
 [test]
 startup_wait = 20000

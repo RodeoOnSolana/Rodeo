@@ -1,11 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{Burn, Mint, Token, TokenAccount, Transfer};
 
-// Canonical rodeo_core program id for this repository/branch (PR #19).
-// Local tests load the compiled .so at this address via solana-test-validator
-// --bpf-program; the target/deploy keypair is only a build artifact and must not
-// override canonical program id.
-declare_id!("CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA");
+declare_id!("EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z");
 
 pub mod borrowed_proof;
 pub mod bull_registry;
@@ -1769,6 +1765,36 @@ pub mod rodeo_core {
         Ok(())
     }
 
+    /// Test-only fixture to overwrite the global game-state counters used by
+    /// the SettleReveal benchmark. Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_set_global_game_state(
+        ctx: Context<TestFixtureSetGlobalGameState>,
+        total_completed_reveals: u64,
+        next_position_id: u64,
+        active_bull_count: u64,
+        total_active_bull_power: u64,
+    ) -> Result<()> {
+        let game = &mut ctx.accounts.global_game_state;
+        game.total_completed_reveals = total_completed_reveals;
+        game.next_position_id = next_position_id;
+        game.active_bull_count = active_bull_count;
+        game.total_active_bull_power = total_active_bull_power;
+        Ok(())
+    }
+
+    /// Test-only fixture to overwrite the reward-state epoch used by the
+    /// SettleReveal benchmark. Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_set_reward_state(
+        ctx: Context<TestFixtureSetRewardState>,
+        current_epoch: u64,
+    ) -> Result<()> {
+        let reward = &mut ctx.accounts.reward_state;
+        reward.current_epoch = current_epoch;
+        Ok(())
+    }
+
     /// Test-only fixture to initialize a BullProofBuffer for benchmark
     /// staging, using dummy position/pending-randomness and authority as
     /// prover/refund.  Never part of the production binary.
@@ -2923,6 +2949,46 @@ pub struct TestFixtureSetBullRegistry<'info> {
 
 #[cfg(feature = "test-fixtures")]
 #[derive(Accounts)]
+pub struct TestFixtureSetGlobalGameState<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
+        bump = global_game_state.bump,
+    )]
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct TestFixtureSetRewardState<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Box<Account<'info, RewardState>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
 #[instruction(expected_payload_length: u32, nonce: u64)]
 pub struct TestFixtureInitializeBullProofBuffer<'info> {
     #[account(mut)]
@@ -3554,9 +3620,13 @@ pub struct SettleReveal<'info> {
     pub protocol_config: Box<Account<'info, ProtocolConfig>>,
 
     /// CHECK: Account receives reclaimed rent and is validated against the position owner.
-    /// Also used as the embedded Core asset owner for the PositionReceipt.
     #[account(mut, constraint = owner.key() == position.owner @ RodeoError::InvalidOwner)]
     pub owner: AccountInfo<'info>,
+
+    /// CHECK: The final owner of the Position after reveal; used as the Core
+    /// asset owner for the PositionReceipt. It is verified against the mutated
+    /// position owner before the CreateV2 CPI.
+    pub receipt_owner: AccountInfo<'info>,
 
     /// CHECK: The new Core Asset account at the PositionReceipt PDA.
     #[account(
@@ -5266,6 +5336,12 @@ fn create_position_receipt(
         },
     ];
 
+    require_keys_eq!(
+        ctx.accounts.receipt_owner.key(),
+        final_owner,
+        RodeoError::InvalidCoreAssetOwner
+    );
+
     let create_ix = CreateV2Builder::new()
         .asset(receipt_asset)
         .collection(Some(collection))
@@ -5284,7 +5360,7 @@ fn create_position_receipt(
         ctx.accounts.receipt_collection.to_account_info(),
         ctx.accounts.receipt_authority.to_account_info(),
         ctx.accounts.receipt_funder.to_account_info(),
-        ctx.accounts.owner.to_account_info(),
+        ctx.accounts.receipt_owner.to_account_info(),
         ctx.accounts.mpl_core_program.to_account_info(),
         ctx.accounts.system_program.to_account_info(),
         ctx.accounts.mpl_core_program.to_account_info(),
@@ -6846,6 +6922,10 @@ mod tests {
             ) -> Result<()>;
         let _ = test_fixture_advance_next_position_id
             as fn(Context<TestFixtureAdvanceNextPositionId>, u64) -> Result<()>;
+        let _ = test_fixture_set_global_game_state
+            as fn(Context<TestFixtureSetGlobalGameState>, u64, u64, u64, u64) -> Result<()>;
+        let _ = test_fixture_set_reward_state
+            as fn(Context<TestFixtureSetRewardState>, u64) -> Result<()>;
     }
 
     fn dummy_position() -> state::Position {

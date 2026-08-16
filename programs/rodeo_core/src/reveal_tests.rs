@@ -1759,7 +1759,14 @@ fn historical_and_current_roots_are_distinct_domains() {
     assert!(curr_result.is_err());
 }
 
+// Adversarial structural-bound test: each compressed sparse proof carries
+// the maximum 256 non-default siblings. This is not a realistic population
+// benchmark; it proves the borrowed parser/verifier remains bounded and
+// does not panic or allocate unboundedly at the legal wire maximum.
+// It serializes a ~62 KiB payload, so it is host-only (the 32 KiB SBF
+// heap would not safely hold it alongside the rest of the test).
 #[test]
+#[cfg(not(target_os = "solana"))]
 fn dense_five_section_payload_parses_and_verifies_without_panic() {
     // Adversarial structural-bound test: each compressed sparse proof carries
     // the maximum 256 non-default siblings. This is not a realistic population
@@ -1829,4 +1836,130 @@ fn dense_five_section_payload_parses_and_verifies_without_panic() {
     let selected_bull = parsed.selected_bull().unwrap().unwrap();
     assert!(borrowed_proof::verify_owner_ref(&wrong_root, &owner, victim).is_err());
     assert!(borrowed_proof::verify_bull_ref(&wrong_root, &bull_leaf.position, selected_bull).is_err());
+}
+
+// Manual Borsh writers for the accepted-cap SBF test below. They avoid
+// materializing the whole BullProofPayloadV1 and its multiple sibling Vecs
+// at the same time, so the test stays within the ordinary 32 KiB heap.
+fn write_node_bytes(bytes: &mut Vec<u8>, node: &SparseMerkleNode) {
+    bytes.extend_from_slice(&node.hash);
+    bytes.extend_from_slice(&node.count.to_le_bytes());
+    bytes.extend_from_slice(&node.power.to_le_bytes());
+}
+
+fn write_sparse_proof_bytes(
+    bytes: &mut Vec<u8>,
+    siblings: &[SparseMerkleNode],
+    leaf: &SparseMerkleNode,
+) {
+    bytes.extend_from_slice(&[0xffu8; 32]);
+    bytes.extend_from_slice(&(siblings.len() as u32).to_le_bytes());
+    for s in siblings {
+        write_node_bytes(bytes, s);
+    }
+    write_node_bytes(bytes, leaf);
+}
+
+fn write_owner_leaf_bytes(bytes: &mut Vec<u8>, leaf: &OwnerLeaf) {
+    bytes.extend_from_slice(leaf.owner.as_ref());
+    bytes.extend_from_slice(&leaf.active_bull_count.to_le_bytes());
+    bytes.extend_from_slice(&leaf.total_buck_power.to_le_bytes());
+    bytes.extend_from_slice(&leaf.bull_tree_root);
+}
+
+fn write_bull_leaf_bytes(bytes: &mut Vec<u8>, leaf: &BullLeaf) {
+    bytes.extend_from_slice(leaf.position.as_ref());
+    bytes.extend_from_slice(&leaf.position_id.to_le_bytes());
+    bytes.extend_from_slice(leaf.owner.as_ref());
+    bytes.push(leaf.buck_power);
+    bytes.extend_from_slice(&leaf.reveal_config_version.to_le_bytes());
+}
+
+/// Adversarial SBF test at the largest payload the current compilation accepts.
+/// Builds a five-section payload that fills BULL_PROOF_BUFFER_MAX_PAYLOAD bytes
+/// and exercises the borrowed parser/verifier without panicking. The proofs are
+/// not valid against an arbitrary root, so verification is expected to fail.
+#[test]
+#[cfg(target_os = "solana")]
+fn accepted_cap_dense_payload_parses_and_verifies_without_panic() {
+    let siblings_per_section = (BULL_PROOF_BUFFER_MAX_PAYLOAD - 830) / 240;
+    let leaf_node = SparseMerkleNode {
+        hash: [0u8; 32],
+        count: 0,
+        power: 0,
+    };
+    let mut siblings = Vec::with_capacity(siblings_per_section);
+    for i in 0..siblings_per_section {
+        let mut hash = [0u8; 32];
+        hash[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+        siblings.push(SparseMerkleNode {
+            hash,
+            count: i as u64 + 1,
+            power: i as u64 + 1,
+        });
+    }
+
+    let owner = pk(1);
+    let owner_leaf = OwnerLeaf {
+        owner,
+        active_bull_count: 1,
+        total_buck_power: 4,
+        bull_tree_root: empty_bull_tree_root(),
+    };
+    let bull_leaf = BullLeaf {
+        position: pk(2),
+        position_id: 1,
+        owner,
+        buck_power: 4,
+        reveal_config_version: 1,
+    };
+
+    let mut bytes = Vec::with_capacity(BULL_PROOF_BUFFER_MAX_PAYLOAD);
+    bytes.push(BULL_PROOF_PAYLOAD_SCHEMA_VERSION);
+    bytes.push(
+        SECTION_VICTIM_OWNER
+            | SECTION_SELECTED_OWNER
+            | SECTION_SELECTED_BULL
+            | SECTION_CURRENT_OWNER
+            | SECTION_CURRENT_BULL,
+    );
+
+    // victim_owner
+    bytes.push(1);
+    write_owner_leaf_bytes(&mut bytes, &owner_leaf);
+    write_sparse_proof_bytes(&mut bytes, &siblings, &leaf_node);
+    // selected_owner
+    bytes.push(1);
+    write_owner_leaf_bytes(&mut bytes, &owner_leaf);
+    write_sparse_proof_bytes(&mut bytes, &siblings, &leaf_node);
+    // selected_bull
+    bytes.push(1);
+    write_bull_leaf_bytes(&mut bytes, &bull_leaf);
+    write_sparse_proof_bytes(&mut bytes, &siblings, &leaf_node);
+    // current_owner
+    bytes.push(1);
+    write_owner_leaf_bytes(&mut bytes, &owner_leaf);
+    write_sparse_proof_bytes(&mut bytes, &siblings, &leaf_node);
+    // current_bull
+    bytes.push(1);
+    write_bull_leaf_bytes(&mut bytes, &bull_leaf);
+    write_sparse_proof_bytes(&mut bytes, &siblings, &leaf_node);
+    // remove_bull
+    bytes.push(0);
+
+    let parsed = BullProofPayloadRef::new(&bytes).unwrap();
+    assert_eq!(parsed.schema_version, BULL_PROOF_PAYLOAD_SCHEMA_VERSION);
+    assert!(parsed.victim_owner().unwrap().is_some());
+    assert!(parsed.selected_owner().unwrap().is_some());
+    assert!(parsed.selected_bull().unwrap().is_some());
+    assert!(parsed.current_owner().unwrap().is_some());
+    assert!(parsed.current_bull().unwrap().is_some());
+
+    let wrong_root = [0u8; 32];
+    let victim = parsed.victim_owner().unwrap().unwrap();
+    let selected_bull = parsed.selected_bull().unwrap().unwrap();
+    assert!(borrowed_proof::verify_owner_ref(&wrong_root, &owner, victim).is_err());
+    assert!(
+        borrowed_proof::verify_bull_ref(&wrong_root, &bull_leaf.position, selected_bull).is_err()
+    );
 }

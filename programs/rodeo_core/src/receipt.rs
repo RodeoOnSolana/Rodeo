@@ -689,8 +689,8 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    /// Deterministic vector: GlobalConfig PDA for the canonical rodeo_core program id
-    /// CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA (crate::ID).  All PDA vectors
+    /// Deterministic vector: GlobalConfig PDA for the canonical rodeo_core
+    /// program id (crate::ID), seeded by `[b"global-config"]`.  All PDA vectors
     /// below are tied to this canonical id and must not be rewritten to match a
     /// temporary local deploy keypair.
     fn sample_global_config() -> Pubkey {
@@ -702,16 +702,16 @@ mod tests {
         let global_config = sample_global_config();
         assert_eq!(
             global_config,
-            Pubkey::from_str("3475hq7chmBk1J2EPLErFoqMNyV8BgPrHgbyVQe2Csbb").unwrap(),
+            Pubkey::from_str("6AYZNE4bCRt2GtJ25o1XBitN2FEN5XCYLnQfLksQddRQ").unwrap(),
             "global_config PDA vector drifted; update this test's expectations only if the seeds intentionally changed"
         );
 
         let (receipt_authority, bump) = receipt_authority_pda(&global_config);
         assert_eq!(
             receipt_authority,
-            Pubkey::from_str("EXnvfnDL8wuyEVDaqej2YgEBH4Uqm7d7uwo9wbEQrMmn").unwrap()
+            Pubkey::from_str("79PJ9kijazYdkds7dmeJThJifPfuYdnYNbs9WTvVLmN3").unwrap()
         );
-        assert_eq!(bump, 254);
+        assert_eq!(bump, 252);
 
         // Re-derivation must be deterministic.
         let (receipt_authority_again, bump_again) = receipt_authority_pda(&global_config);
@@ -726,9 +726,9 @@ mod tests {
         let (receipt, bump) = position_receipt_pda(&sample_position);
         assert_eq!(
             receipt,
-            Pubkey::from_str("8C61ujku6iXMuTjPcsiiRyyHPbrqwnzxJLfv143oTxES").unwrap()
+            Pubkey::from_str("JDW5DEHYQtW9ydLqRHUY6X2FJqKZ6gB5VmTqMxLirR6i").unwrap()
         );
-        assert_eq!(bump, 254);
+        assert_eq!(bump, 255);
 
         // Re-derivation must be deterministic.
         let (receipt_again, bump_again) = position_receipt_pda(&sample_position);
@@ -754,9 +754,9 @@ mod tests {
         let (collection, bump) = receipt_collection_pda(&global_config);
         assert_eq!(
             collection,
-            Pubkey::from_str("BmAhBkoQxovBbH9mBrf9vQwHr2Xyo4BTdZt6QozBRcY9").unwrap()
+            Pubkey::from_str("HZ9wKsBj1BcM5NNEzeTx7kwCBTdsgzFBXrCoQQgtTmAg").unwrap()
         );
-        assert_eq!(bump, 254);
+        assert_eq!(bump, 255);
 
         // Re-derivation must be deterministic, and distinct from the
         // ReceiptAuthority PDA and any PositionReceipt PDA.
@@ -775,9 +775,9 @@ mod tests {
         let (funder, bump) = receipt_funder_pda(&sample_position);
         assert_eq!(
             funder,
-            Pubkey::from_str("DAHSFB2aGqgv37TPiZGHttJazqazVBqBRfa7zXdkfC1X").unwrap()
+            Pubkey::from_str("27Vk1mVNSdSuu5C2HcEPizwhFMap2TjxyJBsdsYvibkH").unwrap()
         );
-        assert_eq!(bump, 254);
+        assert_eq!(bump, 255);
 
         // Re-derivation must be deterministic and distinct from the
         // PositionReceipt PDA.

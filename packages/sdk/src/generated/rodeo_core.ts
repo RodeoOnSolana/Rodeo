@@ -1,7 +1,7 @@
 import type { Idl } from "@coral-xyz/anchor";
 
 export const rodeoCoreIdl = {
-  "address": "CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA",
+  "address": "EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z",
   "metadata": {
     "name": "rodeo_core",
     "version": "0.1.0",
@@ -83,6 +83,175 @@ export const rodeoCoreIdl = {
         {
           "name": "chunk",
           "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "benchmark_heap",
+      "discriminator": [
+        101,
+        14,
+        3,
+        107,
+        95,
+        188,
+        235,
+        98
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "total_bytes",
+          "type": "u32"
+        },
+        {
+          "name": "iterations",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "benchmark_sparse_hash_loop",
+      "discriminator": [
+        40,
+        205,
+        145,
+        186,
+        154,
+        95,
+        112,
+        35
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "iterations",
+          "type": "u32"
+        }
+      ],
+      "returns": {
+        "array": [
+          "u8",
+          32
+        ]
+      }
+    },
+    {
+      "name": "benchmark_sparse_tree",
+      "docs": [
+        "Benchmark fixture for the sparse-tree verifier.  It exercises the exact",
+        "production verification and add/remove paths and then restores the",
+        "registry so the benchmark is non-destructive.  Compute units are read"
+      ],
+      "discriminator": [
+        207,
+        216,
+        149,
+        46,
+        125,
+        94,
+        204,
+        16
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bull_registry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bull_proof_buffer",
+          "docs": [
+            "Benchmark reads a finalized BullProofBuffer account to mirror the",
+            "real production proof transport.  None gives an empty/no-proof",
+            "baseline."
+          ],
+          "optional": true
+        }
+      ],
+      "args": [
+        {
+          "name": "victim",
+          "type": {
+            "option": "pubkey"
+          }
+        },
+        {
+          "name": "new_bull",
+          "type": {
+            "option": {
+              "defined": {
+                "name": "BullLeaf"
+              }
+            }
+          }
         }
       ]
     },
@@ -543,6 +712,105 @@ export const rodeoCoreIdl = {
         {
           "name": "max_epochs",
           "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "create_protocol_config_v2_fixture",
+      "docs": [
+        "Test-only fixture to create a ProtocolConfig V2 with altered reveal",
+        "probabilities. Used to prove historical snapshot behavior on localnet."
+      ],
+      "discriminator": [
+        99,
+        143,
+        80,
+        12,
+        198,
+        127,
+        213,
+        65
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "protocol_config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "arg",
+                "path": "config_version"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "config_version",
+          "type": "u64"
         }
       ]
     },
@@ -1724,6 +1992,92 @@ export const rodeoCoreIdl = {
       "args": []
     },
     {
+      "name": "set_current_config_version_fixture",
+      "docs": [
+        "Test-only fixture to activate an already-created ProtocolConfig."
+      ],
+      "discriminator": [
+        153,
+        148,
+        223,
+        205,
+        63,
+        35,
+        89,
+        108
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "protocol_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "account",
+                "path": "protocol_config.config_version",
+                "account": "ProtocolConfig"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "settle_reveal",
       "discriminator": [
         160,
@@ -1979,10 +2333,14 @@ export const rodeoCoreIdl = {
         },
         {
           "name": "owner",
-          "docs": [
-            "Also used as the embedded Core asset owner for the PositionReceipt."
-          ],
           "writable": true
+        },
+        {
+          "name": "receipt_owner",
+          "docs": [
+            "asset owner for the PositionReceipt. It is verified against the mutated",
+            "position owner before the CreateV2 CPI."
+          ]
         },
         {
           "name": "receipt_asset",
@@ -2755,6 +3113,3189 @@ export const rodeoCoreIdl = {
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "test_fixture_advance_next_position_id",
+      "docs": [
+        "Test-only fixture to advance the global position-id counter. This lets",
+        "the claim-profile suite search for a deterministic position PDA without",
+        "staking every skipped id."
+      ],
+      "discriminator": [
+        49,
+        5,
+        174,
+        113,
+        116,
+        59,
+        98,
+        25
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "global_game_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  103,
+                  97,
+                  109,
+                  101,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "next_position_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_append_bull_proof_buffer",
+      "docs": [
+        "Test-only fixture to append a chunk to the benchmark",
+        "BullProofBuffer.  Never part of the production binary."
+      ],
+      "discriminator": [
+        176,
+        105,
+        238,
+        95,
+        206,
+        226,
+        53,
+        87
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "bull_proof_buffer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  112,
+                  114,
+                  111,
+                  111,
+                  102,
+                  45,
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              },
+              {
+                "kind": "arg",
+                "path": "nonce"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "nonce",
+          "type": "u64"
+        },
+        {
+          "name": "offset",
+          "type": "u32"
+        },
+        {
+          "name": "chunk",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_close_receipt_funder",
+      "docs": [
+        "Test-only fixture that closes a Rodeo-owned ReceiptFunder PDA, sending",
+        "its remaining lamports to the `beneficiary` (usually the original",
+        "Position owner). Proves the timeout/no-reveal refund path is",
+        "recoverable."
+      ],
+      "discriminator": [
+        66,
+        124,
+        223,
+        106,
+        211,
+        30,
+        210,
+        193
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "position"
+        },
+        {
+          "name": "funder",
+          "docs": [
+            "remaining lamports are transferred to the `beneficiary`."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "beneficiary",
+          "docs": [
+            "(typically the original Position owner)."
+          ]
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "test_fixture_create_position_receipt",
+      "docs": [
+        "Test-only fixture that creates a Core PositionReceipt at the deterministic",
+        "PDA for the given Position. Proves stateless ReceiptAuthority signing."
+      ],
+      "discriminator": [
+        27,
+        225,
+        89,
+        140,
+        76,
+        192,
+        73,
+        1
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position"
+        },
+        {
+          "name": "receipt_asset",
+          "docs": [
+            "It does not exist before the CPI; MPL Core creates it."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_authority",
+          "docs": [
+            "It does not need to be initialized or funded."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset_owner"
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "uri",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_create_position_receipt_in_collection",
+      "docs": [
+        "Test-only fixture that creates a Core PositionReceipt inside the",
+        "official Rodeo receipt Collection. Unlike",
+        "`test_fixture_create_position_receipt`, this omits a per-asset",
+        "`update_authority`, so the created asset's `UpdateAuthority` resolves",
+        "to `Collection(receipt_collection)`, meaning only whoever controls",
+        "the collection (the ReceiptAuthority PDA) can update its metadata."
+      ],
+      "discriminator": [
+        250,
+        87,
+        121,
+        203,
+        105,
+        165,
+        155,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position"
+        },
+        {
+          "name": "receipt_asset",
+          "docs": [
+            "It does not exist before the CPI; MPL Core creates it."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "collection",
+          "docs": [
+            "into. Must already exist (created by",
+            "`test_fixture_create_receipt_collection`)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_authority",
+          "docs": [
+            "authority and asset-creation authority (it also controls the",
+            "collection, so it may add assets to it)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset_owner"
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "uri",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_create_position_receipt_in_collection_via_funder",
+      "docs": [
+        "Test-only fixture that creates a PositionReceipt inside the official",
+        "Rodeo Collection using a prefunded Rodeo-owned ReceiptFunder PDA as",
+        "the MPL Core `CreateV2` payer. Proves that a user-prefunded PDA can",
+        "pay Core rent and that Rodeo can sign for it."
+      ],
+      "discriminator": [
+        45,
+        10,
+        199,
+        116,
+        205,
+        255,
+        50,
+        50
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position"
+        },
+        {
+          "name": "receipt_asset",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "collection",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_authority",
+          "docs": [
+            "authority and asset-creation authority."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset_owner"
+        },
+        {
+          "name": "funder",
+          "docs": [
+            "It is owned by the System Program (but derived by Rodeo) and",
+            "prefunded by the asset owner."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "uri",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_create_receipt_collection",
+      "docs": [
+        "Test-only fixture that creates the official Rodeo receipt Collection",
+        "at the deterministic receipt-collection PDA, with the stateless",
+        "ReceiptAuthority PDA as its update authority. Proves the collection",
+        "PDA derivation and that `CreateCollectionV2` accepts a Rodeo PDA as",
+        "both the collection address (self-signing via `invoke_signed`) and",
+        "its update authority (recorded, not required to sign at creation)."
+      ],
+      "discriminator": [
+        11,
+        122,
+        227,
+        193,
+        239,
+        252,
+        147,
+        122
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "collection",
+          "docs": [
+            "receipt-collection PDA. It does not exist before the CPI; MPL Core",
+            "creates it. `CreateCollectionV2` requires this account to sign, which",
+            "Rodeo provides via `invoke_signed` with this PDA's own seeds."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_authority",
+          "docs": [
+            "update authority. It does not need to be initialized or funded, and",
+            "does not need to sign collection creation (only asset creation and",
+            "updates require its signature)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "uri",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_create_receipt_funder",
+      "docs": [
+        "Test-only fixture that creates and prefunds a SYSTEM-OWNED",
+        "ReceiptFunder PDA for a given Position. The PDA address is derived by",
+        "Rodeo, but it is owned by the System Program so that MPL Core can",
+        "debit it as the `payer` in `CreateV2`/`BurnV1` and Rodeo can still",
+        "sign for it via `invoke_signed`."
+      ],
+      "discriminator": [
+        198,
+        234,
+        68,
+        85,
+        124,
+        173,
+        129,
+        254
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "position"
+        },
+        {
+          "name": "funder",
+          "docs": [
+            "derived by Rodeo. It is prefunded by the Position owner and Rodeo",
+            "signs for it via `invoke_signed`."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "funding_lamports",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_finalize_bull_proof_buffer",
+      "docs": [
+        "Test-only fixture to finalize the benchmark BullProofBuffer.",
+        "Never part of the production binary."
+      ],
+      "discriminator": [
+        210,
+        98,
+        88,
+        204,
+        216,
+        200,
+        13,
+        240
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "bull_proof_buffer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  112,
+                  114,
+                  111,
+                  111,
+                  102,
+                  45,
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              },
+              {
+                "kind": "arg",
+                "path": "nonce"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "nonce",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_force_burn_position_receipt",
+      "docs": [
+        "Test-only fixture that force-burns the frozen receipt using the",
+        "permanent burn delegate controlled by the stateless ReceiptAuthority."
+      ],
+      "discriminator": [
+        251,
+        245,
+        172,
+        165,
+        100,
+        222,
+        232,
+        94
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position"
+        },
+        {
+          "name": "receipt_asset",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "test_fixture_force_burn_position_receipt_in_collection",
+      "docs": [
+        "Test-only fixture that force-burns a collection-member PositionReceipt,",
+        "using the System-Program-owned ReceiptFunder PDA as the MPL Core",
+        "`BurnV1` payer. Proves the burn refund lands in the funder PDA."
+      ],
+      "discriminator": [
+        23,
+        61,
+        88,
+        100,
+        173,
+        52,
+        132,
+        141
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position"
+        },
+        {
+          "name": "receipt_asset",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "collection",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "funder",
+          "docs": [
+            "`BurnV1` and receiving the refund."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "test_fixture_force_transfer_position_receipt",
+      "docs": [
+        "Test-only fixture that force-transfers the frozen receipt using the",
+        "permanent transfer delegate controlled by the stateless ReceiptAuthority."
+      ],
+      "discriminator": [
+        182,
+        215,
+        45,
+        135,
+        223,
+        131,
+        132,
+        18
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position"
+        },
+        {
+          "name": "receipt_asset",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "new_owner_account"
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_owner",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_force_transfer_position_receipt_in_collection",
+      "docs": [
+        "Same as `test_fixture_force_transfer_position_receipt`, but for a",
+        "receipt that belongs to the official Rodeo receipt Collection: MPL",
+        "Core's `TransferV1` requires the collection account when the asset's",
+        "`UpdateAuthority` is `Collection(...)` (otherwise it rejects with",
+        "`MissingCollection`)."
+      ],
+      "discriminator": [
+        55,
+        177,
+        239,
+        196,
+        209,
+        249,
+        69,
+        166
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position"
+        },
+        {
+          "name": "receipt_asset",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "collection",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "new_owner_account"
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_owner",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_initialize_bull_proof_buffer",
+      "docs": [
+        "Test-only fixture to initialize a BullProofBuffer for benchmark",
+        "staging, using dummy position/pending-randomness and authority as",
+        "prover/refund.  Never part of the production binary."
+      ],
+      "discriminator": [
+        17,
+        156,
+        62,
+        121,
+        5,
+        236,
+        148,
+        126
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bull_proof_buffer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  112,
+                  114,
+                  111,
+                  111,
+                  102,
+                  45,
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              },
+              {
+                "kind": "arg",
+                "path": "nonce"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "expected_payload_length",
+          "type": "u32"
+        },
+        {
+          "name": "nonce",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_initialize_protocol_accounts",
+      "docs": [
+        "Test-only fixture to set the BullRegistry root and counters for",
+        "Test-only fixture to set the BullRegistry root and counters for",
+        "benchmark initialization.  Never part of the production binary."
+      ],
+      "discriminator": [
+        172,
+        29,
+        179,
+        237,
+        44,
+        247,
+        192,
+        187
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bull_registry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "test_fixture_parse_position_receipt",
+      "docs": [
+        "Test-only fixture that parses a PositionReceipt Core asset and emits a",
+        "`PositionReceiptParsed` event. Proves manual, non-Anchor Core parsing."
+      ],
+      "discriminator": [
+        44,
+        240,
+        78,
+        146,
+        122,
+        128,
+        6,
+        228
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "position"
+        },
+        {
+          "name": "receipt_asset",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "test_fixture_prepare_position",
+      "docs": [
+        "Test-only fixture to put a position into a deterministic, claim-ready",
+        "state and to credit the matching liability bucket. This removes the need",
+        "for real epoch closures in the claim-profile suite while leaving the",
+        "production claim/recognize guards untouched."
+      ],
+      "discriminator": [
+        65,
+        53,
+        198,
+        94,
+        120,
+        70,
+        46,
+        250
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bull_accumulator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  97,
+                  99,
+                  99,
+                  117,
+                  109,
+                  117,
+                  108,
+                  97,
+                  116,
+                  111,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "arg",
+                "path": "position_id"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "position_id",
+          "type": "u64"
+        },
+        {
+          "name": "role_code",
+          "type": "u8"
+        },
+        {
+          "name": "cowboy_kind_code",
+          "type": "u8"
+        },
+        {
+          "name": "accrual_weight",
+          "type": "u32"
+        },
+        {
+          "name": "buck_power",
+          "type": "u8"
+        },
+        {
+          "name": "claimable",
+          "type": "u64"
+        },
+        {
+          "name": "position_claimable_liability_delta",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_recognize_rewards",
+      "docs": [
+        "Test-only fixture to fund the reward vault and mark those funds as",
+        "recognized, bypassing the production recognition rules. This gives the",
+        "claim-profile tests a deterministic reserve to pay out."
+      ],
+      "discriminator": [
+        68,
+        36,
+        179,
+        65,
+        57,
+        179,
+        189,
+        229
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_vault",
+          "writable": true
+        },
+        {
+          "name": "payer_ansem_account",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_relinquish_update_authority",
+      "docs": [
+        "Test-only fixture that transitions a collection-member PositionReceipt's",
+        "`UpdateAuthority` to `None` using the collection-level ReceiptAuthority",
+        "PDA, then proves the asset can no longer have its metadata updated."
+      ],
+      "discriminator": [
+        179,
+        16,
+        250,
+        203,
+        60,
+        245,
+        122,
+        201
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position"
+        },
+        {
+          "name": "receipt_asset",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "collection",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "test_fixture_set_bull_proof_buffer_snapshot",
+      "docs": [
+        "Test-only fixture to set the snapshot fields on a benchmark",
+        "BullProofBuffer.  Never part of the production binary."
+      ],
+      "discriminator": [
+        37,
+        32,
+        0,
+        18,
+        56,
+        195,
+        126,
+        250
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "bull_proof_buffer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  112,
+                  114,
+                  111,
+                  111,
+                  102,
+                  45,
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              },
+              {
+                "kind": "account",
+                "path": "bull_proof_buffer.nonce",
+                "account": "BullProofBuffer"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "snapshot_root",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "snapshot_version",
+          "type": "u64"
+        },
+        {
+          "name": "snapshot_total_count",
+          "type": "u64"
+        },
+        {
+          "name": "snapshot_total_power",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_set_bull_registry",
+      "discriminator": [
+        127,
+        59,
+        181,
+        80,
+        206,
+        61,
+        236,
+        48
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bull_registry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  114,
+                  101,
+                  103,
+                  105,
+                  115,
+                  116,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "owner_tree_root",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "total_bull_count",
+          "type": "u64"
+        },
+        {
+          "name": "total_buck_power",
+          "type": "u64"
+        },
+        {
+          "name": "registry_version",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_set_global_game_state",
+      "docs": [
+        "Test-only fixture to overwrite the global game-state counters used by",
+        "the SettleReveal benchmark. Never part of the production binary."
+      ],
+      "discriminator": [
+        97,
+        178,
+        246,
+        98,
+        69,
+        18,
+        244,
+        51
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "global_game_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  103,
+                  97,
+                  109,
+                  101,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "total_completed_reveals",
+          "type": "u64"
+        },
+        {
+          "name": "next_position_id",
+          "type": "u64"
+        },
+        {
+          "name": "active_bull_count",
+          "type": "u64"
+        },
+        {
+          "name": "total_active_bull_power",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_set_orphaned_remainder",
+      "docs": [
+        "Test-only fixture to set the global orphaned-remainder fields and the",
+        "liability buckets needed to exercise close_epoch conversion. Used to",
+        "establish deterministic boundary state for orphaned-remainder",
+        "materialization tests."
+      ],
+      "discriminator": [
+        80,
+        69,
+        90,
+        55,
+        107,
+        171,
+        148,
+        70
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "bull_accumulator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  108,
+                  108,
+                  45,
+                  97,
+                  99,
+                  99,
+                  117,
+                  109,
+                  117,
+                  108,
+                  97,
+                  116,
+                  111,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "cowboy_orphaned_accrual_remainder_scaled",
+          "type": "u128"
+        },
+        {
+          "name": "bull_orphaned_accrual_remainder_scaled",
+          "type": "u128"
+        },
+        {
+          "name": "cowboy_unmaterialized_liability_atomic",
+          "type": "u64"
+        },
+        {
+          "name": "bull_pool_liability_atomic",
+          "type": "u64"
+        },
+        {
+          "name": "total_ansem_liability_atomic",
+          "type": "u64"
+        },
+        {
+          "name": "recognized_reward_balance_atomic",
+          "type": "u64"
+        },
+        {
+          "name": "last_closed_epoch_timestamp",
+          "type": "i64"
+        },
+        {
+          "name": "epoch_started_at",
+          "type": "i64"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_set_position_remainders",
+      "docs": [
+        "Test-only fixture to set the per-position scaled accrual remainders and",
+        "reward checkpoints. Used to establish deterministic boundary state for",
+        "orphaned-remainder materialization tests."
+      ],
+      "discriminator": [
+        142,
+        86,
+        192,
+        11,
+        203,
+        106,
+        251,
+        188
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "arg",
+                "path": "position_id"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "position_id",
+          "type": "u64"
+        },
+        {
+          "name": "cowboy_accrual_remainder_scaled",
+          "type": "u128"
+        },
+        {
+          "name": "bull_accrual_remainder_scaled",
+          "type": "u128"
+        },
+        {
+          "name": "last_cowboy_reward_index",
+          "type": "u128"
+        },
+        {
+          "name": "last_bull_reward_per_weight",
+          "type": "u128"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_set_reward_state",
+      "docs": [
+        "Test-only fixture to overwrite the reward-state epoch used by the",
+        "SettleReveal benchmark. Never part of the production binary."
+      ],
+      "discriminator": [
+        235,
+        184,
+        196,
+        119,
+        147,
+        153,
+        63,
+        107
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  119,
+                  97,
+                  114,
+                  100,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "current_epoch",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "test_fixture_update_position_receipt_metadata",
+      "docs": [
+        "Test-only fixture that updates a PositionReceipt's name/URI using the",
+        "stateless ReceiptAuthority PDA, authorized because it controls the",
+        "asset's collection (and the asset itself carries no per-asset update",
+        "authority override)."
+      ],
+      "discriminator": [
+        95,
+        54,
+        205,
+        117,
+        157,
+        19,
+        140,
+        92
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position"
+        },
+        {
+          "name": "receipt_asset",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "collection",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  99,
+                  111,
+                  108,
+                  108,
+                  101,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "receipt_authority",
+          "docs": [
+            "is authorized because it is the collection's update authority, and",
+            "the asset itself was created with no per-asset update authority",
+            "override (so its `UpdateAuthority` resolves to `Collection(...)`)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_name",
+          "type": {
+            "option": "string"
+          }
+        },
+        {
+          "name": "new_uri",
+          "type": {
+            "option": "string"
+          }
+        }
+      ]
+    },
+    {
+      "name": "test_set_pause_flags",
+      "docs": [
+        "Test-only fixture to set pause flags for localnet/CI coverage. It is",
+        "compiled only when the `test-fixtures` feature is enabled and is never",
+        "part of the production ABI."
+      ],
+      "discriminator": [
+        48,
+        60,
+        122,
+        76,
+        31,
+        218,
+        70,
+        66
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "pause_new_stakes",
+          "type": "bool"
+        },
+        {
+          "name": "pause_new_reveal_requests",
+          "type": "bool"
+        }
+      ]
     }
   ],
   "accounts": [
@@ -3008,6 +6549,19 @@ export const rodeoCoreIdl = {
       ]
     },
     {
+      "name": "PositionReceiptParsed",
+      "discriminator": [
+        148,
+        86,
+        29,
+        47,
+        187,
+        183,
+        62,
+        151
+      ]
+    },
+    {
       "name": "PositionRevealed",
       "discriminator": [
         27,
@@ -3148,6 +6702,19 @@ export const rodeoCoreIdl = {
         177,
         19,
         95
+      ]
+    },
+    {
+      "name": "SparseTreeBenchmarked",
+      "discriminator": [
+        32,
+        101,
+        210,
+        57,
+        106,
+        190,
+        210,
+        193
       ]
     },
     {
@@ -4691,6 +8258,68 @@ export const rodeoCoreIdl = {
       }
     },
     {
+      "name": "PositionReceiptParsed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "receipt_asset",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "has_permanent_transfer_delegate",
+            "type": "bool"
+          },
+          {
+            "name": "has_permanent_burn_delegate",
+            "type": "bool"
+          },
+          {
+            "name": "has_permanent_freeze_delegate",
+            "type": "bool"
+          },
+          {
+            "name": "frozen",
+            "type": "bool"
+          },
+          {
+            "name": "permanent_transfer_authority",
+            "type": {
+              "option": {
+                "defined": {
+                  "name": "ReceiptPluginAuthority"
+                }
+              }
+            }
+          },
+          {
+            "name": "permanent_burn_authority",
+            "type": {
+              "option": {
+                "defined": {
+                  "name": "ReceiptPluginAuthority"
+                }
+              }
+            }
+          },
+          {
+            "name": "permanent_freeze_authority",
+            "type": {
+              "option": {
+                "defined": {
+                  "name": "ReceiptPluginAuthority"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
       "name": "PositionRevealed",
       "type": {
         "kind": "struct",
@@ -5304,6 +8933,44 @@ export const rodeoCoreIdl = {
       }
     },
     {
+      "name": "ReceiptPluginAuthority",
+      "docs": [
+        "Rodeo-owned, Anchor-IDL-compatible mirror of `mpl_core::types::PluginAuthority`",
+        "(pinned fork revision `e31f5de77a0bd23793ddf27bc887dc675ecaec75`, which matches",
+        "the upstream mpl-core 0.11.2 shape). This exists solely so the test-only",
+        "`PositionReceiptParsed` event can report the actual parsed Core plugin",
+        "authority kind without embedding a foreign, non-`IdlBuild` type in an",
+        "Anchor-visible struct (`mpl-core` is compiled with `default-features =",
+        "false`, so its own Anchor trait impls are not available). This type is",
+        "test/proof instrumentation only and is never used in production Rodeo",
+        "state. Gated behind `test-fixtures` so it never leaks into the default",
+        "production IDL alongside the fixture instructions that use it."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "None"
+          },
+          {
+            "name": "Owner"
+          },
+          {
+            "name": "UpdateAuthority"
+          },
+          {
+            "name": "Address",
+            "fields": [
+              {
+                "name": "address",
+                "type": "pubkey"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "name": "RewardFundingRecognized",
       "type": {
         "kind": "struct",
@@ -5479,6 +9146,35 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "Bull"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SparseTreeBenchmarked",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner_tree_root",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "total_bull_count",
+            "type": "u64"
+          },
+          {
+            "name": "total_buck_power",
+            "type": "u64"
+          },
+          {
+            "name": "registry_version",
+            "type": "u64"
           }
         ]
       }
