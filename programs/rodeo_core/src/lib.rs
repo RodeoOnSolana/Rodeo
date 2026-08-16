@@ -1520,36 +1520,45 @@ pub mod rodeo_core {
             None
         };
 
-        let payload = if let Some(ref d) = buffer_data {
+        let current_owner_tree_root = ctx.accounts.bull_registry.owner_tree_root;
+        let (payload, historical_owner_tree_root) = if let Some(ref d) = buffer_data {
             let buffer = BullProofBufferRef::from_account_data(&**d)
                 .map_err(|_| RodeoError::BullProofBufferIncomplete)?;
             require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
-            Some(
-                BullProofPayloadRef::new(buffer.payload)
-                    .map_err(|_| RodeoError::BullProofBufferIncomplete)?,
+            let historical_root = if buffer.snapshot_root != [0u8; 32] {
+                buffer.snapshot_root
+            } else {
+                current_owner_tree_root
+            };
+            (
+                Some(
+                    BullProofPayloadRef::new(buffer.payload)
+                        .map_err(|_| RodeoError::BullProofBufferIncomplete)?,
+                ),
+                historical_root,
             )
         } else {
-            None
+            (None, current_owner_tree_root)
         };
 
         let registry = &mut ctx.accounts.bull_registry;
 
         if let Some(ref payload) = payload {
-            // victim owner membership / non-membership
+            // victim owner membership / non-membership against historical snapshot
             if let Some(ref victim_key) = victim {
                 if let Some(victim_proof) = payload.victim_owner()? {
-                    verify_owner_ref(&registry.owner_tree_root, victim_key, victim_proof)?;
+                    verify_owner_ref(&historical_owner_tree_root, victim_key, victim_proof)?;
                 }
             }
 
-            // selected owner
+            // selected owner against historical snapshot
             if let Some(selected_owner) = payload.selected_owner()? {
                 msg!("bench verify owner");
                 let owner = selected_owner.leaf.owner;
-                verify_owner_ref(&registry.owner_tree_root, &owner, selected_owner)?;
+                verify_owner_ref(&historical_owner_tree_root, &owner, selected_owner)?;
             }
 
-            // selected bull, using the matching owner leaf's bull tree root
+            // selected bull, using the matching HISTORICAL owner leaf's bull tree root
             if let Some(selected_bull) = payload.selected_bull()? {
                 let owner = selected_bull.leaf.owner;
                 let owner_proof = payload
@@ -1623,7 +1632,7 @@ pub mod rodeo_core {
 
         Ok(())
     }
-    /// Test-only fixture to probe the effective SBF heap size.
+
     #[cfg(feature = "test-fixtures")]
     pub fn benchmark_sparse_hash_loop(
         _ctx: Context<BenchmarkSparseHashLoop>,
@@ -1787,6 +1796,24 @@ pub mod rodeo_core {
         buffer.consumed = false;
         buffer.bump = ctx.bumps.bull_proof_buffer;
         buffer.payload = Vec::new();
+        Ok(())
+    }
+
+    /// Test-only fixture to set the snapshot fields on a benchmark
+    /// BullProofBuffer.  Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_set_bull_proof_buffer_snapshot(
+        ctx: Context<TestFixtureSetBullProofBufferSnapshot>,
+        snapshot_root: [u8; 32],
+        snapshot_version: u64,
+        snapshot_total_count: u64,
+        snapshot_total_power: u64,
+    ) -> Result<()> {
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        buffer.snapshot_root = snapshot_root;
+        buffer.snapshot_version = snapshot_version;
+        buffer.snapshot_total_count = snapshot_total_count;
+        buffer.snapshot_total_power = snapshot_total_power;
         Ok(())
     }
 
@@ -2923,6 +2950,26 @@ pub struct TestFixtureInitializeBullProofBuffer<'info> {
 
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(snapshot_root: [u8; 32], snapshot_version: u64, snapshot_total_count: u64, snapshot_total_power: u64)]
+pub struct TestFixtureSetBullProofBufferSnapshot<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            authority.key().as_ref(),
+            authority.key().as_ref(),
+            &bull_proof_buffer.nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
 }
 
 #[cfg(feature = "test-fixtures")]

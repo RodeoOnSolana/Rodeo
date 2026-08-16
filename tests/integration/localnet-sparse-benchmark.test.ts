@@ -156,6 +156,33 @@ interface FixtureCase {
   ownerSiblings: string[];
   bullSiblings: string[];
   expectedSuccess?: boolean;
+  sectionBytes: {
+    header: number;
+    victim_owner: number;
+    selected_owner: number;
+    selected_bull: number;
+    current_owner: number;
+    current_bull: number;
+    remove_bull: number;
+    total: number;
+  };
+  randomOutput: number[] | null;
+  position: string | null;
+  actionNonce: number;
+  externalCount: number;
+  externalPower: number;
+  selectedOwnerIntervalStart: number;
+  selectedOwnerIntervalEnd: number;
+  selectedBullIntervalStart: number;
+  selectedBullIntervalEnd: number;
+  snapshotRoot: number[];
+  snapshotTotalCount: number;
+  snapshotTotalPower: number;
+  snapshotVersion: number;
+  currentOwnerTreeRoot: number[];
+  currentTotalBullCount: number;
+  currentTotalBuckPower: number;
+  currentRegistryVersion: number;
 }
 
 interface FixtureFile {
@@ -221,10 +248,10 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF sparse-tree Bench
 
       await rodeoCoreProgram.methods
         .testFixtureSetBullRegistry(
-          Buffer.from(new Uint8Array(fixture.ownerTreeRoot)),
-          new BN(fixture.totalBullCount),
-          new BN(fixture.totalBuckPower),
-          new BN(fixture.registryVersion),
+          Buffer.from(new Uint8Array(fixture.currentOwnerTreeRoot)),
+          new BN(fixture.currentTotalBullCount),
+          new BN(fixture.currentTotalBuckPower),
+          new BN(fixture.currentRegistryVersion),
         )
         .accounts({
           authority,
@@ -270,6 +297,21 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF sparse-tree Bench
         const bufferInfo = await provider.connection.getAccountInfo(bufferPda);
         bufferAccountBytes = bufferInfo?.data.length ?? 0;
         bufferRent = await provider.connection.getMinimumBalanceForRentExemption(bufferAccountBytes);
+
+        if (!bytesEq(fixture.snapshotRoot, fixture.currentOwnerTreeRoot)) {
+          await rodeoCoreProgram.methods
+            .testFixtureSetBullProofBufferSnapshot(
+              Buffer.from(new Uint8Array(fixture.snapshotRoot)),
+              new BN(fixture.snapshotVersion),
+              new BN(fixture.snapshotTotalCount),
+              new BN(fixture.snapshotTotalPower),
+            )
+            .accounts({
+              authority,
+              bullProofBuffer: bufferPda,
+            })
+            .rpc();
+        }
 
         for (let offset = 0; offset < payload.length; offset += CHUNK_SIZE) {
           const chunk = payload.subarray(offset, offset + CHUNK_SIZE);
@@ -317,8 +359,9 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF sparse-tree Bench
         })
         .instruction();
 
+      const requestedComputeUnits = 1_400_000;
       const benchTx = new web3.Transaction().add(
-        web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+        web3.ComputeBudgetProgram.setComputeUnitLimit({ units: requestedComputeUnits }),
         web3.ComputeBudgetProgram.requestHeapFrame({ bytes: BENCHMARK_HEAP_BYTES }),
         benchIx,
       );
@@ -386,8 +429,21 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF sparse-tree Bench
         finalize_compute_units: finalizeCu,
         staging_compute_units: initCu + appendCu + finalizeCu,
         requested_heap_bytes: BENCHMARK_HEAP_BYTES,
+        requested_compute_units: requestedComputeUnits,
         benchmark_compute_units: benchmarkCu,
         success: benchmarkSuccess,
+        section_bytes: fixture.sectionBytes,
+        external_count: fixture.externalCount,
+        external_power: fixture.externalPower,
+        selected_owner_interval_start: fixture.selectedOwnerIntervalStart,
+        selected_owner_interval_end: fixture.selectedOwnerIntervalEnd,
+        selected_bull_interval_start: fixture.selectedBullIntervalStart,
+        selected_bull_interval_end: fixture.selectedBullIntervalEnd,
+        random_output: fixture.randomOutput,
+        position: fixture.position,
+        action_nonce: fixture.actionNonce,
+        snapshot_root: fixture.snapshotRoot,
+        current_owner_tree_root: fixture.currentOwnerTreeRoot,
       };
       if (!benchmarkSuccess) {
         writeFileSync(

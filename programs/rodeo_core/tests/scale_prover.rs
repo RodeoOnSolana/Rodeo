@@ -4,9 +4,14 @@ use std::time::Instant;
 use anchor_lang::prelude::*;
 use anchor_lang::AnchorSerialize;
 use rodeo_core::bull_registry::{
-    BullLeaf, BullProofPayloadV1, CompressedBullProof, CompressedOwnerProof, OwnerLeaf,
-    BULL_PROOF_PAYLOAD_SCHEMA_VERSION, SECTION_CURRENT_BULL, SECTION_CURRENT_OWNER,
-    SECTION_REMOVE_BULL, SECTION_SELECTED_BULL, SECTION_SELECTED_OWNER, SECTION_VICTIM_OWNER,
+    leaf_contains_target, skip_victim_interval, BullLeaf, BullProofPayloadV1, CompressedBullProof,
+    CompressedOwnerProof, OwnerLeaf, BULL_PROOF_PAYLOAD_SCHEMA_VERSION, SECTION_CURRENT_BULL,
+    SECTION_CURRENT_OWNER, SECTION_REMOVE_BULL, SECTION_SELECTED_BULL, SECTION_SELECTED_OWNER,
+    SECTION_VICTIM_OWNER,
+};
+use rodeo_core::probability::{
+    map_mint_theft_flag, protocol_config_v1, rejection_sample_draw, RandomnessDomain,
+    RandomnessSampleContext,
 };
 use rodeo_core::sparse_tree::{
     hash_node, verify_with_prefix, CompressedSparseProof, SparseMerkleNode, SPARSE_TREE_DEPTH,
@@ -162,6 +167,7 @@ impl SparseTree {
 // Registry construction
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 struct OwnerData {
     owner: Pubkey,
     owner_leaf: OwnerLeaf,
@@ -395,7 +401,7 @@ fn bull_proof(od: &OwnerData, position: &Pubkey) -> CompressedBullProof {
     let tree = od
         .bull_tree
         .as_ref()
-        .expect("bull tree required for selected owner");
+        .map_or_else(|| build_bull_tree(&od.bulls), |t| t.clone());
     let key = position.to_bytes();
     let proof = tree.proof(&key);
     if let Some(bull) = od.bulls.iter().find(|b| b.position == *position) {
@@ -474,6 +480,181 @@ fn select_owners(owners: &[OwnerData]) -> SelectedOwners {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Theft target selection
+// ---------------------------------------------------------------------------
+
+fn sort_owners_by_path(owners: &[OwnerData]) -> Vec<(usize, u64, u64, u64)> {
+    let mut indexed: Vec<_> = owners
+        .iter()
+        .enumerate()
+        .map(|(i, od)| {
+            let mut key = od.owner.to_bytes();
+            key.reverse();
+            (i, key)
+        })
+        .collect();
+    indexed.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let mut sorted = Vec::with_capacity(owners.len());
+    let mut prefix = 0u64;
+    for (i, _) in indexed {
+        let od = &owners[i];
+        let count = od.owner_leaf.active_bull_count;
+        let power = od.owner_leaf.total_buck_power;
+        sorted.push((i, prefix, count, power));
+        prefix = prefix.saturating_add(power);
+    }
+    sorted
+}
+
+fn find_owner_by_target(sorted: &[(usize, u64, u64, u64)], target: u64) -> (usize, u64, u64, u64) {
+    // binary search for the last entry with prefix <= target
+    let mut lo = 0usize;
+    let mut hi = sorted.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if sorted[mid].1 <= target {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let idx = lo.saturating_sub(1);
+    let (owner_idx, prefix, count, power) = sorted[idx];
+    assert!(
+        leaf_contains_target(prefix, power, target),
+        "target {} not found in owner tree",
+        target
+    );
+    (owner_idx, prefix, count, power)
+}
+
+fn find_bull_by_target(bulls: &[BullLeaf], target: u64) -> (&BullLeaf, u64, u64) {
+    let mut indexed: Vec<_> = bulls
+        .iter()
+        .map(|b| {
+            let mut key = b.position.to_bytes();
+            key.reverse();
+            (b, key)
+        })
+        .collect();
+    indexed.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let mut prefix = 0u64;
+    for (b, _) in indexed {
+        let power = b.buck_power as u64;
+        if leaf_contains_target(prefix, power, target) {
+            return (b, prefix, power);
+        }
+        prefix = prefix.saturating_add(power);
+    }
+    panic!("target {} not found in bull tree", target)
+}
+
+#[allow(clippy::type_complexity)]
+fn select_theft_target(
+    _owner_tree: &SparseTree,
+    owners: &[OwnerData],
+    victim_idx: Option<usize>,
+    prefer_selected_idx: usize,
+    total_bull_count: u64,
+    total_buck_power: u64,
+    position_seed: u64,
+) -> Option<(
+    [u8; 32],
+    Pubkey,
+    u64,
+    usize,
+    u64,
+    u64,
+    BullLeaf,
+    u64,
+    u64,
+    u64,
+    u64,
+)> {
+    let sorted = sort_owners_by_path(owners);
+    let (victim_prefix, victim_count, victim_power) = match victim_idx {
+        Some(idx) => {
+            let &(_, prefix, count, power) = sorted
+                .iter()
+                .find(|&&(i, _, _, _)| i == idx)
+                .expect("victim not found in sorted owners");
+            (prefix, count, power)
+        }
+        None => (0u64, 0u64, 0u64),
+    };
+    let external_count = total_bull_count - victim_count;
+    let external_power = total_buck_power - victim_power;
+    if external_power == 0 {
+        return None;
+    }
+
+    let config = protocol_config_v1(Pubkey::default(), 0);
+    let position = deterministic_bull(position_seed, 0);
+    let action_nonce = 1u64;
+    let victim_idx_value = victim_idx.unwrap_or(usize::MAX);
+
+    for attempt in 1u64..=200 {
+        let mut random_output = [0u8; 32];
+        random_output[0..8].copy_from_slice(&attempt.to_le_bytes());
+        let ctx = RandomnessSampleContext {
+            random_output,
+            domain: RandomnessDomain::MintTheft,
+            position,
+            action_nonce,
+        };
+        if !map_mint_theft_flag(ctx, &config).unwrap_or(false) {
+            continue;
+        }
+
+        let mut owner_ctx = ctx;
+        owner_ctx.domain = RandomnessDomain::OwnerSelection;
+        let owner_target = match rejection_sample_draw(owner_ctx, external_power) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let safe_owner_target = skip_victim_interval(owner_target, victim_prefix, victim_power);
+        let (selected_idx, selected_prefix, _selected_count, selected_power) =
+            find_owner_by_target(&sorted, safe_owner_target);
+        if selected_idx == victim_idx_value {
+            continue;
+        }
+        if selected_idx != prefer_selected_idx && attempt < 100 {
+            continue;
+        }
+
+        let selected_owner = &owners[selected_idx];
+        let mut bull_ctx = ctx;
+        bull_ctx.domain = RandomnessDomain::BullSelection;
+        let bull_target = match rejection_sample_draw(bull_ctx, selected_power) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let (selected_bull, selected_bull_prefix, selected_bull_power) =
+            find_bull_by_target(&selected_owner.bulls, bull_target);
+        if selected_bull.owner != selected_owner.owner {
+            continue;
+        }
+
+        return Some((
+            random_output,
+            position,
+            action_nonce,
+            selected_idx,
+            selected_prefix,
+            selected_power,
+            selected_bull.clone(),
+            selected_bull_prefix,
+            selected_bull_power,
+            external_count,
+            external_power,
+        ));
+    }
+    None
+}
+
 fn generate_case(
     name: &str,
     scale: usize,
@@ -503,6 +684,25 @@ fn generate_case(
     let mut owner_non_default = 0usize;
     let mut bull_non_default = 0usize;
     let mut expected_success = true;
+
+    let mut random_output = [0u8; 32];
+    let mut position = Pubkey::default();
+    let mut action_nonce = 0u64;
+    let mut external_count = 0u64;
+    let mut external_power = 0u64;
+    let mut selected_owner_interval_start = 0u64;
+    let mut selected_owner_interval_end = 0u64;
+    let mut selected_bull_interval_start = 0u64;
+    let mut selected_bull_interval_end = 0u64;
+
+    let mut snapshot_root = *owner_tree_root;
+    let mut snapshot_total_count = total_bull_count;
+    let mut snapshot_total_power = total_buck_power;
+    let mut snapshot_version = 0u64;
+    let mut current_root = *owner_tree_root;
+    let mut current_total_count = total_bull_count;
+    let mut current_total_power = total_buck_power;
+    let mut current_version = 0u64;
 
     match name {
         "A" => {
@@ -628,63 +828,578 @@ fn generate_case(
         }
         "H" => {
             let victim_idx = selected.normal;
-            let selected_idx = selected.dense;
+            let prefer_selected_idx = selected.dense;
+            let position_seed = 1_000_000_000u64 + scale as u64;
+            let result = select_theft_target(
+                owner_tree,
+                owners,
+                Some(victim_idx),
+                prefer_selected_idx,
+                total_bull_count,
+                total_buck_power,
+                position_seed,
+            )
+            .expect("no valid theft target found");
+            let (
+                random_output_val,
+                position_val,
+                action_nonce_val,
+                selected_idx,
+                selected_owner_prefix,
+                selected_owner_power,
+                selected_bull,
+                selected_bull_prefix,
+                selected_bull_power,
+                external_count_val,
+                external_power_val,
+            ) = result;
+
+            let victim_owner = &owners[victim_idx];
             let selected_owner = &owners[selected_idx];
-            let bull = &selected_owner.bulls[0];
             let vproof = owner_proof_with_leaf(
                 owner_tree,
-                &owners[victim_idx].owner,
-                owners[victim_idx].owner_leaf.clone(),
+                &victim_owner.owner,
+                victim_owner.owner_leaf.clone(),
             );
             let oproof = owner_proof_with_leaf(
                 owner_tree,
                 &selected_owner.owner,
                 selected_owner.owner_leaf.clone(),
             );
-            let bproof = bull_proof(selected_owner, &bull.position);
+            let bproof = bull_proof(selected_owner, &selected_bull.position);
             owner_siblings = siblings_hex(&oproof.proof);
             bull_siblings = siblings_hex(&bproof.proof);
             owner_non_default = oproof.proof.siblings.len();
             bull_non_default = bproof.proof.siblings.len();
             bulls_in_selected = selected_owner.owner_leaf.active_bull_count;
-            victim = Some(owners[victim_idx].owner);
+            victim = Some(victim_owner.owner);
             payload.section_bitmap =
                 SECTION_VICTIM_OWNER | SECTION_SELECTED_OWNER | SECTION_SELECTED_BULL;
             payload.victim_owner = Some(vproof);
             payload.selected_owner = Some(oproof);
             payload.selected_bull = Some(bproof);
+
+            random_output = random_output_val;
+            position = position_val;
+            action_nonce = action_nonce_val;
+            selected_owner_interval_start = selected_owner_prefix;
+            selected_owner_interval_end = selected_owner_prefix + selected_owner_power;
+            selected_bull_interval_start = selected_bull_prefix;
+            selected_bull_interval_end = selected_bull_prefix + selected_bull_power;
+            external_count = external_count_val;
+            external_power = external_power_val;
         }
         "I" => {
-            let selected_idx = selected.dense;
+            let prefer_selected_idx = selected.dense;
+            let position_seed = 1_000_000_000u64 + scale as u64;
+            let result = select_theft_target(
+                owner_tree,
+                owners,
+                None,
+                prefer_selected_idx,
+                total_bull_count,
+                total_buck_power,
+                position_seed,
+            )
+            .expect("no valid theft target found");
+            let (
+                random_output_val,
+                position_val,
+                action_nonce_val,
+                selected_idx,
+                selected_owner_prefix,
+                selected_owner_power,
+                selected_bull,
+                selected_bull_prefix,
+                selected_bull_power,
+                external_count_val,
+                external_power_val,
+            ) = result;
+
             let selected_owner = &owners[selected_idx];
-            let bull_idx = selected_owner.bulls.len() / 2;
-            let bull = &selected_owner.bulls[bull_idx];
+            let absent = deterministic_owner(1_000_000 + scale as u64);
+            let vproof = owner_proof_with_leaf(owner_tree, &absent, OwnerLeaf::empty());
             let oproof = owner_proof_with_leaf(
                 owner_tree,
                 &selected_owner.owner,
                 selected_owner.owner_leaf.clone(),
             );
-            let bproof = bull_proof(selected_owner, &bull.position);
+            let bproof = bull_proof(selected_owner, &selected_bull.position);
             owner_siblings = siblings_hex(&oproof.proof);
             bull_siblings = siblings_hex(&bproof.proof);
             owner_non_default = oproof.proof.siblings.len();
             bull_non_default = bproof.proof.siblings.len();
             bulls_in_selected = selected_owner.owner_leaf.active_bull_count;
-            victim = Some(selected_owner.owner);
+            victim = Some(absent);
             payload.section_bitmap =
                 SECTION_VICTIM_OWNER | SECTION_SELECTED_OWNER | SECTION_SELECTED_BULL;
-            payload.victim_owner = Some(owner_proof_with_leaf(
+            payload.victim_owner = Some(vproof);
+            payload.selected_owner = Some(oproof);
+            payload.selected_bull = Some(bproof);
+
+            random_output = random_output_val;
+            position = position_val;
+            action_nonce = action_nonce_val;
+            selected_owner_interval_start = selected_owner_prefix;
+            selected_owner_interval_end = selected_owner_prefix + selected_owner_power;
+            selected_bull_interval_start = selected_bull_prefix;
+            selected_bull_interval_end = selected_bull_prefix + selected_bull_power;
+            external_count = external_count_val;
+            external_power = external_power_val;
+        }
+        "I_NEG" => {
+            let victim_idx = selected.normal;
+            let prefer_selected_idx = selected.dense;
+            let position_seed = 1_000_000_000u64 + scale as u64;
+            let result = select_theft_target(
+                owner_tree,
+                owners,
+                Some(victim_idx),
+                prefer_selected_idx,
+                total_bull_count,
+                total_buck_power,
+                position_seed,
+            )
+            .expect("no valid theft target found");
+            let (
+                random_output_val,
+                position_val,
+                action_nonce_val,
+                selected_idx,
+                selected_owner_prefix,
+                selected_owner_power,
+                selected_bull,
+                selected_bull_prefix,
+                selected_bull_power,
+                external_count_val,
+                external_power_val,
+            ) = result;
+
+            let victim_owner = &owners[victim_idx];
+            let selected_owner = &owners[selected_idx];
+            let vproof = owner_proof_with_leaf(owner_tree, &victim_owner.owner, OwnerLeaf::empty());
+            let oproof = owner_proof_with_leaf(
                 owner_tree,
                 &selected_owner.owner,
                 selected_owner.owner_leaf.clone(),
-            ));
+            );
+            let bproof = bull_proof(selected_owner, &selected_bull.position);
+            owner_siblings = siblings_hex(&oproof.proof);
+            bull_siblings = siblings_hex(&bproof.proof);
+            owner_non_default = oproof.proof.siblings.len();
+            bull_non_default = bproof.proof.siblings.len();
+            bulls_in_selected = selected_owner.owner_leaf.active_bull_count;
+            victim = Some(victim_owner.owner);
+            payload.section_bitmap =
+                SECTION_VICTIM_OWNER | SECTION_SELECTED_OWNER | SECTION_SELECTED_BULL;
+            payload.victim_owner = Some(vproof);
             payload.selected_owner = Some(oproof);
             payload.selected_bull = Some(bproof);
+
+            random_output = random_output_val;
+            position = position_val;
+            action_nonce = action_nonce_val;
+            selected_owner_interval_start = selected_owner_prefix;
+            selected_owner_interval_end = selected_owner_interval_start + selected_owner_power;
+            selected_bull_interval_start = selected_bull_prefix;
+            selected_bull_interval_end = selected_bull_interval_start + selected_bull_power;
+            external_count = external_count_val;
+            external_power = external_power_val;
+            expected_success = false;
+        }
+        "J1" => {
+            let victim_idx = selected.normal;
+            let prefer_selected_idx = selected.dense;
+            let position_seed = 1_000_000_000u64 + scale as u64;
+            let result = select_theft_target(
+                owner_tree,
+                owners,
+                Some(victim_idx),
+                prefer_selected_idx,
+                total_bull_count,
+                total_buck_power,
+                position_seed,
+            )
+            .expect("no valid theft target found");
+            let (
+                random_output_val,
+                position_val,
+                action_nonce_val,
+                selected_idx,
+                selected_owner_prefix,
+                selected_owner_power,
+                selected_bull,
+                selected_bull_prefix,
+                selected_bull_power,
+                external_count_val,
+                external_power_val,
+            ) = result;
+
+            let victim_owner = &owners[victim_idx];
+            let selected_owner = &owners[selected_idx];
+
+            // Historical proofs.
+            let vproof = owner_proof_with_leaf(
+                owner_tree,
+                &victim_owner.owner,
+                victim_owner.owner_leaf.clone(),
+            );
+            let oproof = owner_proof_with_leaf(
+                owner_tree,
+                &selected_owner.owner,
+                selected_owner.owner_leaf.clone(),
+            );
+            let bproof = bull_proof(selected_owner, &selected_bull.position);
+
+            // Current registry: add one extra bull to a non-final owner.
+            let mut current_owners = owners.to_vec();
+            let extra_owner_idx = selected.normal;
+            let new_bull_owner_index = 1_000_000_000u64 + scale as u64;
+            let new_bull_bull_index = 1_000_000u64;
+            let new_bull_position = deterministic_bull(new_bull_owner_index, new_bull_bull_index);
+            let new_bull_power =
+                POWERS[((new_bull_owner_index + new_bull_bull_index) as usize) % POWERS.len()];
+            let extra_bull = BullLeaf {
+                position: new_bull_position,
+                position_id: total_bull_count + 1,
+                owner: current_owners[extra_owner_idx].owner,
+                buck_power: new_bull_power,
+                reveal_config_version: 1,
+            };
+            current_owners[extra_owner_idx].bulls.push(extra_bull);
+            current_owners[extra_owner_idx].owner_leaf = owner_leaf_from_bulls(
+                current_owners[extra_owner_idx].owner,
+                &current_owners[extra_owner_idx].bulls,
+            );
+            current_owners[extra_owner_idx].bull_tree =
+                Some(build_bull_tree(&current_owners[extra_owner_idx].bulls));
+
+            let mut current_owner_tree =
+                SparseTree::new(&OwnerLeaf::empty().to_node(), PREFIX_BULL_OWNER_NODE);
+            let mut computed_total_count = 0u64;
+            let mut computed_total_power = 0u64;
+            for od in &current_owners {
+                current_owner_tree.insert(&od.owner.to_bytes(), od.owner_leaf.to_node());
+                computed_total_count += od.owner_leaf.active_bull_count;
+                computed_total_power += od.owner_leaf.total_buck_power;
+            }
+            let current_root_node = *current_owner_tree.root();
+
+            let new_bull_leaf = BullLeaf {
+                position: new_bull_position,
+                position_id: computed_total_count + 1,
+                owner: selected_owner.owner,
+                buck_power: new_bull_power,
+                reveal_config_version: 1,
+            };
+            new_bull = Some(new_bull_leaf);
+
+            let current_owner_proof = owner_proof_with_leaf(
+                &current_owner_tree,
+                &selected_owner.owner,
+                selected_owner.owner_leaf.clone(),
+            );
+            let current_bull_proof = bull_proof(selected_owner, &new_bull_position);
+
+            owner_siblings = siblings_hex(&oproof.proof);
+            bull_siblings = siblings_hex(&bproof.proof);
+            owner_non_default = oproof.proof.siblings.len();
+            bull_non_default = bproof.proof.siblings.len();
+            bulls_in_selected = selected_owner.owner_leaf.active_bull_count;
+            victim = Some(victim_owner.owner);
+            payload.section_bitmap = SECTION_VICTIM_OWNER
+                | SECTION_SELECTED_OWNER
+                | SECTION_SELECTED_BULL
+                | SECTION_CURRENT_OWNER
+                | SECTION_CURRENT_BULL;
+            payload.victim_owner = Some(vproof);
+            payload.selected_owner = Some(oproof);
+            payload.selected_bull = Some(bproof);
+            payload.current_owner = Some(current_owner_proof);
+            payload.current_bull = Some(current_bull_proof);
+
+            random_output = random_output_val;
+            position = position_val;
+            action_nonce = action_nonce_val;
+            selected_owner_interval_start = selected_owner_prefix;
+            selected_owner_interval_end = selected_owner_interval_start + selected_owner_power;
+            selected_bull_interval_start = selected_bull_prefix;
+            selected_bull_interval_end = selected_bull_interval_start + selected_bull_power;
+            external_count = external_count_val;
+            external_power = external_power_val;
+
+            snapshot_root = *owner_tree_root;
+            snapshot_total_count = total_bull_count;
+            snapshot_total_power = total_buck_power;
+            snapshot_version = 0u64;
+            current_root = current_root_node.hash;
+            current_total_count = computed_total_count;
+            current_total_power = computed_total_power;
+            current_version = 1u64;
+        }
+        "J2" => {
+            let victim_idx = selected.normal;
+            let prefer_selected_idx = selected.dense;
+            let position_seed = 1_000_000_000u64 + scale as u64;
+            let result = select_theft_target(
+                owner_tree,
+                owners,
+                Some(victim_idx),
+                prefer_selected_idx,
+                total_bull_count,
+                total_buck_power,
+                position_seed,
+            )
+            .expect("no valid theft target found");
+            let (
+                random_output_val,
+                position_val,
+                action_nonce_val,
+                selected_idx,
+                selected_owner_prefix,
+                selected_owner_power,
+                selected_bull,
+                selected_bull_prefix,
+                selected_bull_power,
+                external_count_val,
+                external_power_val,
+            ) = result;
+
+            let victim_owner = &owners[victim_idx];
+            let selected_owner = &owners[selected_idx];
+
+            // Historical proofs.
+            let vproof = owner_proof_with_leaf(
+                owner_tree,
+                &victim_owner.owner,
+                victim_owner.owner_leaf.clone(),
+            );
+            let oproof = owner_proof_with_leaf(
+                owner_tree,
+                &selected_owner.owner,
+                selected_owner.owner_leaf.clone(),
+            );
+            let bproof = bull_proof(selected_owner, &selected_bull.position);
+
+            // Current registry with the final owner removed.
+            let mut current_owners = owners.to_vec();
+            current_owners.retain(|od| od.owner != selected_owner.owner);
+            let mut current_owner_tree =
+                SparseTree::new(&OwnerLeaf::empty().to_node(), PREFIX_BULL_OWNER_NODE);
+            let mut computed_total_count = 0u64;
+            let mut computed_total_power = 0u64;
+            for od in &current_owners {
+                current_owner_tree.insert(&od.owner.to_bytes(), od.owner_leaf.to_node());
+                computed_total_count += od.owner_leaf.active_bull_count;
+                computed_total_power += od.owner_leaf.total_buck_power;
+            }
+            let current_root_node = *current_owner_tree.root();
+
+            let new_bull_owner_index = 1_000_000_000u64 + scale as u64;
+            let new_bull_bull_index = 1_000_000u64;
+            let new_bull_position = deterministic_bull(new_bull_owner_index, new_bull_bull_index);
+            let new_bull_power =
+                POWERS[((new_bull_owner_index + new_bull_bull_index) as usize) % POWERS.len()];
+            let new_bull_leaf = BullLeaf {
+                position: new_bull_position,
+                position_id: computed_total_count + 1,
+                owner: selected_owner.owner,
+                buck_power: new_bull_power,
+                reveal_config_version: 1,
+            };
+            new_bull = Some(new_bull_leaf);
+
+            let current_owner_proof = owner_proof_with_leaf(
+                &current_owner_tree,
+                &selected_owner.owner,
+                OwnerLeaf::empty(),
+            );
+            let empty_selected = OwnerData {
+                owner: selected_owner.owner,
+                owner_leaf: OwnerLeaf::empty(),
+                bull_tree: Some(build_bull_tree(&[])),
+                bulls: Vec::new(),
+            };
+            let current_bull_proof = bull_proof(&empty_selected, &new_bull_position);
+
+            owner_siblings = siblings_hex(&oproof.proof);
+            bull_siblings = siblings_hex(&bproof.proof);
+            owner_non_default = oproof.proof.siblings.len();
+            bull_non_default = bproof.proof.siblings.len();
+            bulls_in_selected = selected_owner.owner_leaf.active_bull_count;
+            victim = Some(victim_owner.owner);
+            payload.section_bitmap = SECTION_VICTIM_OWNER
+                | SECTION_SELECTED_OWNER
+                | SECTION_SELECTED_BULL
+                | SECTION_CURRENT_OWNER
+                | SECTION_CURRENT_BULL;
+            payload.victim_owner = Some(vproof);
+            payload.selected_owner = Some(oproof);
+            payload.selected_bull = Some(bproof);
+            payload.current_owner = Some(current_owner_proof);
+            payload.current_bull = Some(current_bull_proof);
+
+            random_output = random_output_val;
+            position = position_val;
+            action_nonce = action_nonce_val;
+            selected_owner_interval_start = selected_owner_prefix;
+            selected_owner_interval_end = selected_owner_interval_start + selected_owner_power;
+            selected_bull_interval_start = selected_bull_prefix;
+            selected_bull_interval_end = selected_bull_interval_start + selected_bull_power;
+            external_count = external_count_val;
+            external_power = external_power_val;
+
+            snapshot_root = *owner_tree_root;
+            snapshot_total_count = total_bull_count;
+            snapshot_total_power = total_buck_power;
+            snapshot_version = 0u64;
+            current_root = current_root_node.hash;
+            current_total_count = computed_total_count;
+            current_total_power = computed_total_power;
+            current_version = 1u64;
+        }
+        "J_NEG" => {
+            let victim_idx = selected.normal;
+            let prefer_selected_idx = selected.dense;
+            let position_seed = 1_000_000_000u64 + scale as u64;
+            let result = select_theft_target(
+                owner_tree,
+                owners,
+                Some(victim_idx),
+                prefer_selected_idx,
+                total_bull_count,
+                total_buck_power,
+                position_seed,
+            )
+            .expect("no valid theft target found");
+            let (
+                random_output_val,
+                position_val,
+                action_nonce_val,
+                selected_idx,
+                selected_owner_prefix,
+                selected_owner_power,
+                selected_bull,
+                selected_bull_prefix,
+                selected_bull_power,
+                external_count_val,
+                external_power_val,
+            ) = result;
+
+            let victim_owner = &owners[victim_idx];
+            let selected_owner = &owners[selected_idx];
+
+            // Historical proofs.
+            let vproof = owner_proof_with_leaf(
+                owner_tree,
+                &victim_owner.owner,
+                victim_owner.owner_leaf.clone(),
+            );
+            let oproof = owner_proof_with_leaf(
+                owner_tree,
+                &selected_owner.owner,
+                selected_owner.owner_leaf.clone(),
+            );
+            let bproof = bull_proof(selected_owner, &selected_bull.position);
+
+            // Current registry with extra bull like J1.
+            let mut current_owners = owners.to_vec();
+            let extra_owner_idx = selected.normal;
+            let new_bull_owner_index = 1_000_000_000u64 + scale as u64;
+            let new_bull_bull_index = 1_000_000u64;
+            let new_bull_position = deterministic_bull(new_bull_owner_index, new_bull_bull_index);
+            let new_bull_power =
+                POWERS[((new_bull_owner_index + new_bull_bull_index) as usize) % POWERS.len()];
+            let extra_bull = BullLeaf {
+                position: new_bull_position,
+                position_id: total_bull_count + 1,
+                owner: current_owners[extra_owner_idx].owner,
+                buck_power: new_bull_power,
+                reveal_config_version: 1,
+            };
+            current_owners[extra_owner_idx].bulls.push(extra_bull);
+            current_owners[extra_owner_idx].owner_leaf = owner_leaf_from_bulls(
+                current_owners[extra_owner_idx].owner,
+                &current_owners[extra_owner_idx].bulls,
+            );
+            current_owners[extra_owner_idx].bull_tree =
+                Some(build_bull_tree(&current_owners[extra_owner_idx].bulls));
+
+            let mut current_owner_tree =
+                SparseTree::new(&OwnerLeaf::empty().to_node(), PREFIX_BULL_OWNER_NODE);
+            let mut computed_total_count = 0u64;
+            let mut computed_total_power = 0u64;
+            for od in &current_owners {
+                current_owner_tree.insert(&od.owner.to_bytes(), od.owner_leaf.to_node());
+                computed_total_count += od.owner_leaf.active_bull_count;
+                computed_total_power += od.owner_leaf.total_buck_power;
+            }
+            let current_root_node = *current_owner_tree.root();
+
+            let new_bull_leaf = BullLeaf {
+                position: new_bull_position,
+                position_id: computed_total_count + 1,
+                owner: selected_owner.owner,
+                buck_power: new_bull_power,
+                reveal_config_version: 1,
+            };
+            new_bull = Some(new_bull_leaf);
+
+            // Intentionally use the historical selected-owner proof as current-owner.
+            let current_bull_proof = bull_proof(selected_owner, &new_bull_position);
+
+            owner_siblings = siblings_hex(&oproof.proof);
+            bull_siblings = siblings_hex(&bproof.proof);
+            owner_non_default = oproof.proof.siblings.len();
+            bull_non_default = bproof.proof.siblings.len();
+            bulls_in_selected = selected_owner.owner_leaf.active_bull_count;
+            victim = Some(victim_owner.owner);
+            payload.section_bitmap = SECTION_VICTIM_OWNER
+                | SECTION_SELECTED_OWNER
+                | SECTION_SELECTED_BULL
+                | SECTION_CURRENT_OWNER
+                | SECTION_CURRENT_BULL;
+            payload.victim_owner = Some(vproof);
+            payload.selected_owner = Some(oproof.clone());
+            payload.selected_bull = Some(bproof);
+            payload.current_owner = Some(oproof);
+            payload.current_bull = Some(current_bull_proof);
+
+            random_output = random_output_val;
+            position = position_val;
+            action_nonce = action_nonce_val;
+            selected_owner_interval_start = selected_owner_prefix;
+            selected_owner_interval_end = selected_owner_interval_start + selected_owner_power;
+            selected_bull_interval_start = selected_bull_prefix;
+            selected_bull_interval_end = selected_bull_interval_start + selected_bull_power;
+            external_count = external_count_val;
+            external_power = external_power_val;
+
+            snapshot_root = *owner_tree_root;
+            snapshot_total_count = total_bull_count;
+            snapshot_total_power = total_buck_power;
+            snapshot_version = 0u64;
+            current_root = current_root_node.hash;
+            current_total_count = computed_total_count;
+            current_total_power = computed_total_power;
+            current_version = 1u64;
+            expected_success = false;
         }
         _ => {}
     }
 
     let payload_bytes = payload.try_to_vec().unwrap();
+    let section_bytes = compute_section_bytes(&payload);
+    let random_output_json = if action_nonce == 0 {
+        serde_json::Value::Null
+    } else {
+        json!(random_output.to_vec())
+    };
+    let position_json = if action_nonce == 0 {
+        serde_json::Value::Null
+    } else {
+        json!(position.to_string())
+    };
 
     json!({
         "case": name,
@@ -694,7 +1409,7 @@ fn generate_case(
         "ownerTreeRoot": hash_array(owner_tree_root),
         "totalBullCount": total_bull_count,
         "totalBuckPower": total_buck_power,
-        "registryVersion": 0u64,
+        "registryVersion": snapshot_version,
         "victim": victim.map(|p| p.to_string()),
         "newBull": new_bull.as_ref().map(bull_leaf_json),
         "payloadHex": hex::encode(&payload_bytes),
@@ -704,6 +1419,24 @@ fn generate_case(
         "ownerSiblings": owner_siblings,
         "bullSiblings": bull_siblings,
         "expectedSuccess": expected_success,
+        "sectionBytes": section_bytes,
+        "randomOutput": random_output_json,
+        "position": position_json,
+        "actionNonce": action_nonce,
+        "externalCount": external_count,
+        "externalPower": external_power,
+        "selectedOwnerIntervalStart": selected_owner_interval_start,
+        "selectedOwnerIntervalEnd": selected_owner_interval_end,
+        "selectedBullIntervalStart": selected_bull_interval_start,
+        "selectedBullIntervalEnd": selected_bull_interval_end,
+        "snapshotRoot": hash_array(&snapshot_root),
+        "snapshotTotalCount": snapshot_total_count,
+        "snapshotTotalPower": snapshot_total_power,
+        "snapshotVersion": snapshot_version,
+        "currentOwnerTreeRoot": hash_array(&current_root),
+        "currentTotalBullCount": current_total_count,
+        "currentTotalBuckPower": current_total_power,
+        "currentRegistryVersion": current_version,
     })
 }
 
@@ -726,6 +1459,7 @@ fn make_bull_subtree_case(bull_count: usize) -> serde_json::Value {
         remove_bull: None,
     };
     let payload_bytes = payload.try_to_vec().unwrap();
+    let section_bytes = compute_section_bytes(&payload);
 
     json!({
         "case": format!("BULL_{}", bull_count),
@@ -745,6 +1479,24 @@ fn make_bull_subtree_case(bull_count: usize) -> serde_json::Value {
         "ownerSiblings": siblings_hex(&payload.selected_owner.as_ref().unwrap().proof),
         "bullSiblings": siblings_hex(&payload.selected_bull.as_ref().unwrap().proof),
         "expectedSuccess": true,
+        "sectionBytes": section_bytes,
+        "randomOutput": serde_json::Value::Null,
+        "position": serde_json::Value::Null,
+        "actionNonce": 0u64,
+        "externalCount": 0u64,
+        "externalPower": 0u64,
+        "selectedOwnerIntervalStart": 0u64,
+        "selectedOwnerIntervalEnd": 0u64,
+        "selectedBullIntervalStart": 0u64,
+        "selectedBullIntervalEnd": 0u64,
+        "snapshotRoot": hash_array(&owner_tree_root),
+        "snapshotTotalCount": total_count,
+        "snapshotTotalPower": total_power,
+        "snapshotVersion": 0u64,
+        "currentOwnerTreeRoot": hash_array(&owner_tree_root),
+        "currentTotalBullCount": total_count,
+        "currentTotalBuckPower": total_power,
+        "currentRegistryVersion": 0u64,
     })
 }
 
@@ -767,6 +1519,7 @@ fn make_remove_one_case() -> serde_json::Value {
         remove_bull: Some(bproof),
     };
     let payload_bytes = payload.try_to_vec().unwrap();
+    let section_bytes = compute_section_bytes(&payload);
 
     json!({
         "case": "REMOVE_1",
@@ -786,6 +1539,58 @@ fn make_remove_one_case() -> serde_json::Value {
         "ownerSiblings": siblings_hex(&payload.current_owner.as_ref().unwrap().proof),
         "bullSiblings": siblings_hex(&payload.remove_bull.as_ref().unwrap().proof),
         "expectedSuccess": true,
+        "sectionBytes": section_bytes,
+        "randomOutput": serde_json::Value::Null,
+        "position": serde_json::Value::Null,
+        "actionNonce": 0u64,
+        "externalCount": 0u64,
+        "externalPower": 0u64,
+        "selectedOwnerIntervalStart": 0u64,
+        "selectedOwnerIntervalEnd": 0u64,
+        "selectedBullIntervalStart": 0u64,
+        "selectedBullIntervalEnd": 0u64,
+        "snapshotRoot": hash_array(&owner_tree_root),
+        "snapshotTotalCount": total_count,
+        "snapshotTotalPower": total_power,
+        "snapshotVersion": 0u64,
+        "currentOwnerTreeRoot": hash_array(&owner_tree_root),
+        "currentTotalBullCount": total_count,
+        "currentTotalBuckPower": total_power,
+        "currentRegistryVersion": 0u64,
+    })
+}
+
+fn section_len<T: AnchorSerialize>(opt: &Option<T>) -> usize {
+    match opt {
+        None => 0,
+        Some(v) => v.try_to_vec().unwrap().len(),
+    }
+}
+
+fn compute_section_bytes(payload: &BullProofPayloadV1) -> serde_json::Value {
+    let header = 8usize;
+    let victim = section_len(&payload.victim_owner);
+    let selected_owner = section_len(&payload.selected_owner);
+    let selected_bull = section_len(&payload.selected_bull);
+    let current_owner = section_len(&payload.current_owner);
+    let current_bull = section_len(&payload.current_bull);
+    let remove_bull = section_len(&payload.remove_bull);
+    let total = header
+        + victim
+        + selected_owner
+        + selected_bull
+        + current_owner
+        + current_bull
+        + remove_bull;
+    json!({
+        "header": header,
+        "victim_owner": victim,
+        "selected_owner": selected_owner,
+        "selected_bull": selected_bull,
+        "current_owner": current_owner,
+        "current_bull": current_bull,
+        "remove_bull": remove_bull,
+        "total": total,
     })
 }
 
@@ -822,7 +1627,7 @@ fn generate_sparse_scale_fixtures() {
     let scales: Vec<usize> = if full {
         vec![100, 1_000, 10_000, 100_000, 1_000_000]
     } else {
-        vec![100, 1_000, 10_000]
+        vec![100, 1_000, 10_000, 100_000]
     };
 
     let mut all_scales: Vec<serde_json::Value> = Vec::new();
@@ -911,7 +1716,8 @@ fn generate_sparse_scale_fixtures() {
         }));
 
         for case_name in [
-            "A", "B", "B_NEG", "C", "D", "E", "F", "G", "H", "I", "no-proof",
+            "A", "B", "B_NEG", "C", "D", "E", "F", "G", "H", "I", "I_NEG", "J1", "J2", "J_NEG",
+            "no-proof",
         ] {
             let case = generate_case(
                 case_name,
