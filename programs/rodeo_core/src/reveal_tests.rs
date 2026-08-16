@@ -1758,3 +1758,75 @@ fn historical_and_current_roots_are_distinct_domains() {
     assert!(hist_result.is_err());
     assert!(curr_result.is_err());
 }
+
+#[test]
+fn dense_five_section_payload_parses_and_verifies_without_panic() {
+    // Adversarial structural-bound test: each compressed sparse proof carries
+    // the maximum 256 non-default siblings. This is not a realistic population
+    // benchmark; it proves the borrowed parser/verifier remains bounded and
+    // does not panic or allocate unboundedly at the legal wire maximum.
+    let default_node = SparseMerkleNode { hash: [0u8; 32], count: 0, power: 0 };
+    let mut dense_siblings = Vec::with_capacity(256);
+    for i in 0..256u64 {
+        let mut hash = [0u8; 32];
+        hash[0..8].copy_from_slice(&i.to_le_bytes());
+        dense_siblings.push(SparseMerkleNode { hash, count: i + 1, power: i + 1 });
+    }
+    let dense_proof = CompressedSparseProof {
+        bitmap: [0xffu8; 32],
+        siblings: dense_siblings,
+        leaf: default_node,
+    };
+    let owner = pk(1);
+    let owner_leaf = OwnerLeaf {
+        owner,
+        active_bull_count: 1,
+        total_buck_power: 4,
+        bull_tree_root: empty_bull_tree_root(),
+    };
+    let owner_section = CompressedOwnerProof {
+        leaf: owner_leaf,
+        proof: dense_proof.clone(),
+    };
+    let bull_leaf = BullLeaf {
+        position: pk(2),
+        position_id: 1,
+        owner,
+        buck_power: 4,
+        reveal_config_version: 1,
+    };
+    let bull_section = CompressedBullProof {
+        leaf: bull_leaf,
+        proof: dense_proof,
+    };
+    let payload = BullProofPayloadV1 {
+        schema_version: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+        section_bitmap: SECTION_VICTIM_OWNER
+            | SECTION_SELECTED_OWNER
+            | SECTION_SELECTED_BULL
+            | SECTION_CURRENT_OWNER
+            | SECTION_CURRENT_BULL,
+        victim_owner: Some(owner_section.clone()),
+        selected_owner: Some(owner_section.clone()),
+        selected_bull: Some(bull_section.clone()),
+        current_owner: Some(owner_section),
+        current_bull: Some(bull_section),
+        remove_bull: None,
+    };
+    let bytes = payload.try_to_vec().unwrap();
+    let parsed = BullProofPayloadRef::new(&bytes).unwrap();
+    assert_eq!(parsed.schema_version, BULL_PROOF_PAYLOAD_SCHEMA_VERSION);
+    assert!(parsed.victim_owner().unwrap().is_some());
+    assert!(parsed.selected_owner().unwrap().is_some());
+    assert!(parsed.selected_bull().unwrap().is_some());
+    assert!(parsed.current_owner().unwrap().is_some());
+    assert!(parsed.current_bull().unwrap().is_some());
+
+    // Exercises the full 256-level hash loop for every section. The proofs are
+    // not valid against an arbitrary root, so verification is expected to fail.
+    let wrong_root = [0u8; 32];
+    let victim = parsed.victim_owner().unwrap().unwrap();
+    let selected_bull = parsed.selected_bull().unwrap().unwrap();
+    assert!(borrowed_proof::verify_owner_ref(&wrong_root, &owner, victim).is_err());
+    assert!(borrowed_proof::verify_bull_ref(&wrong_root, &bull_leaf.position, selected_bull).is_err());
+}
