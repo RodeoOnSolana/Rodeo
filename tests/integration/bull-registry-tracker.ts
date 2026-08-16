@@ -141,6 +141,7 @@ export async function stageBullProofBuffer(
     nonce,
   );
 
+  const [bullRegistry] = deriveBullRegistryPda(program.programId, globalConfig);
   await program.methods
     .initializeBullProof(actionType, payloadBytes.length, nonce)
     .accounts({
@@ -149,6 +150,7 @@ export async function stageBullProofBuffer(
       position,
       pendingRandomness,
       bullProofBuffer: bufferPda,
+      bullRegistry,
       systemProgram: web3.SystemProgram.programId,
       rent: web3.SYSVAR_RENT_PUBKEY,
     })

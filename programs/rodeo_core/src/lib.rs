@@ -1177,6 +1177,9 @@ pub mod rodeo_core {
         pending_randomness.timeout_timestamp = now
             .checked_add(RANDOMNESS_TIMEOUT_SECONDS)
             .ok_or(RodeoError::ArithmeticOverflow)?;
+        // Unstake operates on the CURRENT BullRegistry, so the action does not
+        // freeze a historical registry snapshot. The committed proof buffer
+        // captures the live registry root at initialization time.
         pending_randomness.registry_root_snapshot = [0u8; 32];
         pending_randomness.registry_version_snapshot = 0;
         pending_randomness.registry_total_count_snapshot = 0;
@@ -1400,10 +1403,20 @@ pub mod rodeo_core {
         buffer.action_type = action_type;
         buffer.pending_randomness = pending_randomness.key();
         buffer.position = position.key();
-        buffer.snapshot_root = pending_randomness.registry_root_snapshot;
-        buffer.snapshot_version = pending_randomness.registry_version_snapshot;
-        buffer.snapshot_total_count = pending_randomness.registry_total_count_snapshot;
-        buffer.snapshot_total_power = pending_randomness.registry_total_power_snapshot;
+        // Unstake removal proofs prove against the CURRENT BullRegistry at the
+        // time of proof staging. Reveal proofs prove against the historical
+        // registry snapshot committed at request_reveal time.
+        if action_type == ActionType::Unstake {
+            buffer.snapshot_root = ctx.accounts.bull_registry.owner_tree_root;
+            buffer.snapshot_version = ctx.accounts.bull_registry.registry_version;
+            buffer.snapshot_total_count = ctx.accounts.bull_registry.total_bull_count;
+            buffer.snapshot_total_power = ctx.accounts.bull_registry.total_buck_power;
+        } else {
+            buffer.snapshot_root = pending_randomness.registry_root_snapshot;
+            buffer.snapshot_version = pending_randomness.registry_version_snapshot;
+            buffer.snapshot_total_count = pending_randomness.registry_total_count_snapshot;
+            buffer.snapshot_total_power = pending_randomness.registry_total_power_snapshot;
+        }
         buffer.refund_recipient = ctx.accounts.prover.key();
         buffer.expiry_timestamp = pending_randomness.timeout_timestamp;
         buffer.nonce = nonce;
@@ -4077,6 +4090,12 @@ pub struct InitializeBullProof<'info> {
         bump,
     )]
     pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+
+    #[account(
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump = bull_registry.bump,
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
 
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,

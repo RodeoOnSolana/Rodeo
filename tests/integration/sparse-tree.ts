@@ -298,6 +298,79 @@ class SparseTree {
 }
 
 // ---------------------------------------------------------------------------
+// Proof verification — must match SparseTree::proof layout
+// ---------------------------------------------------------------------------
+
+function verifyCompressedSparseProof(
+  key: Uint8Array,
+  leaf: SparseMerkleNode,
+  proof: CompressedSparseProof,
+  prefix: Buffer,
+): SparseMerkleNode {
+  const defaults = emptyNodesForPrefix(prefix);
+  let current = leaf;
+  let siblingIdx = 0;
+  for (let h = 1; h <= SPARSE_TREE_DEPTH; h++) {
+    const bitIndex = h - 1;
+    const byteIndex = Math.floor(bitIndex / 8);
+    const bitInByte = bitIndex % 8;
+    const bit = ((key[byteIndex] >> bitInByte) & 1) === 1;
+    const siblingIsNonDefault = (proof.bitmap[byteIndex] & (1 << bitInByte)) !== 0;
+    const sibling = siblingIsNonDefault ? proof.siblings[siblingIdx++] : defaults[h - 1];
+    const [left, right] = bit ? [sibling, current] : [current, sibling];
+    current = hashNode(prefix, left, right);
+  }
+  if (siblingIdx !== proof.siblings.length) {
+    throw new Error("proof sibling count does not match bitmap");
+  }
+  return current;
+}
+
+export function verifyOwnerProof(
+  owner: PublicKey,
+  proof: CompressedOwnerProof,
+  expectedRoot?: SparseMerkleNode,
+): SparseMerkleNode {
+  const root = verifyCompressedSparseProof(
+    owner.toBuffer(),
+    proof.proof.leaf,
+    proof.proof,
+    PREFIX_BULL_OWNER_NODE,
+  );
+  if (expectedRoot) {
+    if (!Buffer.from(root.hash).equals(Buffer.from(expectedRoot.hash))) {
+      throw new Error("owner proof root hash mismatch");
+    }
+    if (root.count !== expectedRoot.count || root.power !== expectedRoot.power) {
+      throw new Error("owner proof root count/power mismatch");
+    }
+  }
+  return root;
+}
+
+export function verifyBullProof(
+  position: PublicKey,
+  proof: CompressedBullProof,
+  expectedRoot?: SparseMerkleNode,
+): SparseMerkleNode {
+  const root = verifyCompressedSparseProof(
+    position.toBuffer(),
+    proof.proof.leaf,
+    proof.proof,
+    PREFIX_BULL_NODE,
+  );
+  if (expectedRoot) {
+    if (!Buffer.from(root.hash).equals(Buffer.from(expectedRoot.hash))) {
+      throw new Error("bull proof root hash mismatch");
+    }
+    if (root.count !== expectedRoot.count || root.power !== expectedRoot.power) {
+      throw new Error("bull proof root count/power mismatch");
+    }
+  }
+  return root;
+}
+
+// ---------------------------------------------------------------------------
 // Compressed proof types — must match Rust borsh serialization
 // ---------------------------------------------------------------------------
 
