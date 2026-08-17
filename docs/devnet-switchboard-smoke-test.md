@@ -135,6 +135,8 @@ mapping is the same single implementation used in local mock tests.
 
 * Starting balance before this test run: ~1.65 SOL
 * Ending balance after all security tests: **1.436011679 SOL**
+* Temporary devnet program closed and **8.10381336 SOL reclaimed**
+* Final devnet wallet balance: **9.539820039 SOL**
 
 ## Files
 
