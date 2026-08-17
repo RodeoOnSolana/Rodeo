@@ -54,7 +54,7 @@ if ! pnpm program-keys:localnet >/dev/null 2>&1; then
   echo "ERROR: program-keys:localnet failed" >&2
   exit 1
 fi
-if ! scripts/check-sbf-stack-safety.sh anchor build --no-idl -p rodeo_core -- --features "${BUILD_FEATURES}"; then
+if ! scripts/check-sbf-stack-safety.sh anchor build -p rodeo_core -- --features "${BUILD_FEATURES}"; then
   echo "ERROR: SBF build failed for ${SUITE} with features ${BUILD_FEATURES}" >&2
   exit 1
 fi

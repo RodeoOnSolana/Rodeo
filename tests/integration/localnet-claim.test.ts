@@ -27,9 +27,11 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   BullRegistryTracker,
   deriveBullRegistryPda,
+  deriveBullProofBufferPda,
   getLamportBalance,
   accountExists,
   stageRevealProofForBull,
+  closeBullProofBuffer,
   stageBullProofBuffer,
   type StagedBullProof,
 } from "./bull-registry-tracker.js";
@@ -80,6 +82,7 @@ interface BullProofBufferAccount {
   snapshotTotalCount: BN;
   snapshotTotalPower: BN;
   refundRecipient: web3.PublicKey;
+  expiryTimestamp: BN;
   expectedPayloadLength: number;
   finalized: boolean;
   consumed: boolean;
@@ -4763,5 +4766,315 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       registryCountAfterSuccess: registryAfterSuccess.totalBullCount.toString(),
     });
   }, 180_000);
+
+  // === BullProofBuffer TTL / cleanup regression tests ===
+
+  it("recover_reveal_timeout with a staged BullProofBuffer closes pending randomness and refunds the buffer to prover B", async () => {
+    const prover = web3.Keypair.generate();
+
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: prover.publicKey,
+          lamports: 100_000_000,
+        }),
+      ),
+      [payer],
+    );
+
+    await syncTrackerWithChain();
+    const { positionId, position } = await findBullPosition();
+
+    await stakeAndCommit(positionId, stakeAmountAtomic, payerRodeoAccount, payer);
+
+    const { pendingRandomness } = await deriveStakeAccounts(positionId);
+    const bullLeaf: BullLeaf = {
+      position,
+      positionId: BigInt(positionId.toString()),
+      owner: payer.publicKey,
+      buckPower: 0,
+      revealConfigVersion: 1n,
+    };
+
+    const nonce = new BN(1);
+    const staged = await stageRevealProofForBull(
+      rodeoCoreProgram,
+      globalConfig,
+      position,
+      pendingRandomness,
+      prover,
+      nonce,
+      bullRegistryTracker,
+      bullLeaf,
+    );
+
+    const bufferLamportsBefore = await getLamportBalance(provider, staged.bufferPda);
+    const proverBalanceBefore = await getLamportBalance(provider, prover.publicKey);
+
+    // The action reaches its timeout; recovery is available but the buffer is not consumed.
+    await sleep(2_500);
+    await recoverRevealTimeout(positionId, payer, payer);
+
+    const pendingInfo = await provider.connection.getAccountInfo(pendingRandomness);
+    expect(pendingInfo).toBeNull();
+
+    // Settlement must fail because the pending randomness is gone.
+    await expect(
+      settleReveal(positionId, payer, {
+        bufferPda: staged.bufferPda,
+        refundRecipient: staged.refundRecipient,
+      }),
+    ).rejects.toThrow();
+
+    // The buffer is not consumed, so close is only allowed once it has expired.
+    // Wait out the remaining TTL; the committed refund_recipient cannot be changed.
+    const bufferAccount = await rodeoAccounts(rodeoCoreProgram).bullProofBuffer.fetch(staged.bufferPda);
+    const now = Math.floor(Date.now() / 1000);
+    const waitMs = Math.max(0, (Number(bufferAccount.expiryTimestamp) - now) * 1000 + 2_000);
+    await sleep(waitMs);
+
+    // A third party (payer) can close the now-expired buffer; the program
+    // enforces the refund goes to the committed refund_recipient (prover B).
+    await closeBullProofBuffer(
+      rodeoCoreProgram,
+      staged.bufferPda,
+      prover.publicKey,
+      staged.refundRecipient,
+      nonce,
+    );
+
+    const bufferInfoAfter = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoAfter).toBeNull();
+
+    const proverBalanceAfter = await getLamportBalance(provider, prover.publicKey);
+    const proverRefund = proverBalanceAfter - proverBalanceBefore;
+    expect(proverRefund).toBe(bufferLamportsBefore);
+
+    console.log("recover+close buffer evidence:", {
+      positionId: positionId.toString(),
+      bufferPda: staged.bufferPda.toBase58(),
+      bufferLamportsBefore,
+      proverRefund,
+    });
+  }, 180_000);
+
+  it("expired BullProofBuffer rejects settlement and refunds prover B on close", async () => {
+    const prover = web3.Keypair.generate();
+
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: prover.publicKey,
+          lamports: 100_000_000,
+        }),
+      ),
+      [payer],
+    );
+
+    await syncTrackerWithChain();
+    const { positionId, position } = await findBullPosition();
+
+    await stakeAndCommit(positionId, stakeAmountAtomic, payerRodeoAccount, payer);
+
+    const { pendingRandomness } = await deriveStakeAccounts(positionId);
+    const bullLeaf: BullLeaf = {
+      position,
+      positionId: BigInt(positionId.toString()),
+      owner: payer.publicKey,
+      buckPower: 0,
+      revealConfigVersion: 1n,
+    };
+
+    const nonce = new BN(1);
+    const staged = await stageRevealProofForBull(
+      rodeoCoreProgram,
+      globalConfig,
+      position,
+      pendingRandomness,
+      prover,
+      nonce,
+      bullRegistryTracker,
+      bullLeaf,
+    );
+
+    const bufferLamportsBefore = await getLamportBalance(provider, staged.bufferPda);
+    const proverBalanceBefore = await getLamportBalance(provider, prover.publicKey);
+
+    // Advance time until the buffer expiry has passed.
+    const bufferAccount = await rodeoAccounts(rodeoCoreProgram).bullProofBuffer.fetch(staged.bufferPda);
+    const now = Math.floor(Date.now() / 1000);
+    const waitMs = Math.max(0, (Number(bufferAccount.expiryTimestamp) - now) * 1000 + 2_000);
+    await sleep(waitMs);
+
+    // Settlement must be rejected because the buffer has expired.
+    await expect(
+      settleReveal(positionId, payer, {
+        bufferPda: staged.bufferPda,
+        refundRecipient: staged.refundRecipient,
+      }),
+    ).rejects.toThrow();
+
+    // A third party closes the expired buffer and the refund goes to prover B.
+    await closeBullProofBuffer(
+      rodeoCoreProgram,
+      staged.bufferPda,
+      prover.publicKey,
+      staged.refundRecipient,
+      nonce,
+    );
+
+    const bufferInfoAfter = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoAfter).toBeNull();
+
+    const proverBalanceAfter = await getLamportBalance(provider, prover.publicKey);
+    expect(proverBalanceAfter - proverBalanceBefore).toBe(bufferLamportsBefore);
+  }, 120_000);
+
+  it("initialize_bull_proof is allowed after the action timeout and can still settle before recovery", async () => {
+    const prover = web3.Keypair.generate();
+
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: prover.publicKey,
+          lamports: 100_000_000,
+        }),
+      ),
+      [payer],
+    );
+
+    await syncTrackerWithChain();
+
+    // Reset the completed-reveals counter so the simple current-owner/bull
+    // reveal payload can settle a Bull without requiring a full historical
+    // mint-theft proof.  This fixture isolates the action-timeout behavior
+    // under test from unrelated post-threshold payload requirements.
+    const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    await rodeoCoreProgram.methods
+      .testFixtureSetGlobalGameState(
+        new BN(0),
+        gameBefore.nextPositionId,
+        gameBefore.activeBullCount,
+        gameBefore.totalActiveBullPower,
+      )
+      .accounts({
+        authority: payer.publicKey,
+        globalConfig,
+        globalGameState,
+      })
+      .signers([payer])
+      .rpc();
+
+    const { positionId, position } = await findBullPosition();
+
+    await stakeAndCommit(positionId, stakeAmountAtomic, payerRodeoAccount, payer);
+
+    const { pendingRandomness } = await deriveStakeAccounts(positionId);
+
+    // Wait for the action timeout to elapse.  The pending action is still active.
+    await sleep(2_500);
+
+    // Initialization after timeout is allowed: the pending action has not been
+    // recovered, so settlement can still occur once the timeout is reached.
+    const bullLeaf: BullLeaf = {
+      position,
+      positionId: BigInt(positionId.toString()),
+      owner: payer.publicKey,
+      buckPower: 0,
+      revealConfigVersion: 1n,
+    };
+
+    const nonce = new BN(1);
+    const staged = await stageRevealProofForBull(
+      rodeoCoreProgram,
+      globalConfig,
+      position,
+      pendingRandomness,
+      prover,
+      nonce,
+      bullRegistryTracker,
+      bullLeaf,
+    );
+
+    // Settlement succeeds because the timeout has passed and the buffer has not expired.
+    await settleReveal(positionId, payer, {
+      bufferPda: staged.bufferPda,
+      refundRecipient: staged.refundRecipient,
+    });
+
+    const bufferInfoAfter = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoAfter).toBeNull();
+
+    // Register the newly revealed Bull so the global tracker stays in sync
+    // with the on-chain registry for the remaining tests in this suite.
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const actualBull: BullLeaf = {
+      position,
+      positionId: BigInt(positionId.toString()),
+      owner: payer.publicKey,
+      buckPower: pos.buckPower,
+      revealConfigVersion: BigInt(pos.revealConfigVersion.toString()),
+    };
+    bullRegistryTracker.registerBull(payer.publicKey, actualBull);
+    await assertTrackerMatchesChain();
+  }, 120_000);
+
+  it("initialize_bull_proof is rejected once the pending action has been recovered", async () => {
+    const prover = web3.Keypair.generate();
+
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: prover.publicKey,
+          lamports: 100_000_000,
+        }),
+      ),
+      [payer],
+    );
+
+    const { positionId, position } = await findBullPosition();
+
+    await stakeAndCommit(positionId, stakeAmountAtomic, payerRodeoAccount, payer);
+
+    const { pendingRandomness } = await deriveStakeAccounts(positionId);
+
+    // Wait for timeout, then recover the action.  The pending randomness account is closed.
+    await sleep(2_500);
+    await recoverRevealTimeout(positionId, payer, payer);
+
+    const pendingInfo = await provider.connection.getAccountInfo(pendingRandomness);
+    expect(pendingInfo).toBeNull();
+
+    const [bullRegistry] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+    const [bufferPda] = deriveBullProofBufferPda(
+      rodeoCoreProgram.programId,
+      pendingRandomness,
+      prover.publicKey,
+      new BN(2),
+    );
+
+    // Trying to initialize a buffer against the closed pending randomness
+    // (and now-inactive position) must fail.
+    await expect(
+      rodeoCoreProgram.methods
+        .initializeBullProof({ reveal: {} }, 0, new BN(2))
+        .accounts({
+          prover: prover.publicKey,
+          globalConfig,
+          position,
+          pendingRandomness,
+          bullProofBuffer: bufferPda,
+          bullRegistry,
+          systemProgram: web3.SystemProgram.programId,
+          rent: web3.SYSVAR_RENT_PUBKEY,
+        })
+        .signers([prover])
+        .rpc(),
+    ).rejects.toThrow();
+  }, 120_000);
 
 });
