@@ -172,6 +172,17 @@ for idx in "${!CASES[@]}"; do
     continue
   fi
 
+  # Fund the test wallet from the localnet faucet so the suite can pay for
+  # mint creation, program accounts, and transaction fees.
+  PAYER_PUBKEY="$(solana-keygen pubkey "${WALLET}")"
+  if ! solana airdrop 1000 "${PAYER_PUBKEY}" --url "${rpc_url}" >/dev/null 2>&1; then
+    echo "ERROR: failed to airdrop localnet funds to ${PAYER_PUBKEY}" >&2
+    cat "${ledger}/validator.log" >&2 || true
+    kill_validator
+    SUITE_EXIT=1
+    continue
+  fi
+
   if ! wait_for_ws "${ws_port}"; then
     echo "ERROR: validator WebSocket not ready on port ${ws_port}" >&2
     cat "${ledger}/validator.log" >&2 || true

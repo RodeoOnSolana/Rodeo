@@ -88,6 +88,11 @@ if ! pnpm program-keys:localnet >/dev/null 2>&1; then
   exit 1
 fi
 
+# Make the test wallet the upgrade authority (and mint) for this fresh localnet.
+# The production initialize_protocol instruction checks that the signer is the
+# program's upgrade authority, so this must match the ANCHOR_WALLET used below.
+PAYER_PUBKEY="$(solana-keygen pubkey "${WALLET}")"
+
 echo "===> Building production SBF with MAX_PAYLOAD=16,384 (features: ${BUILD_FEATURES})"
 if ! scripts/check-sbf-stack-safety.sh anchor build -p rodeo_core -- --features "${BUILD_FEATURES}"; then
   echo "ERROR: production buffer SBF build failed" >&2
@@ -100,10 +105,10 @@ nohup solana-test-validator \
   --faucet-port "${FAUCET_PORT}" \
   --bind-address 127.0.0.1 \
   --limit-ledger-size 100000 \
-  --mint 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \
-  --upgradeable-program EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z target/deploy/rodeo_core.so 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \
-  --upgradeable-program 9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n target/deploy/rodeo_market.so 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \
-  --upgradeable-program CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD target/deploy/rodeo_router.so 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \
+  --mint "${PAYER_PUBKEY}" \
+  --upgradeable-program EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z target/deploy/rodeo_core.so "${PAYER_PUBKEY}" \
+  --upgradeable-program 9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n target/deploy/rodeo_market.so "${PAYER_PUBKEY}" \
+  --upgradeable-program CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD target/deploy/rodeo_router.so "${PAYER_PUBKEY}" \
   --bpf-program CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d vendor/mpl-core/mpl_core_program.so \
   > "${LEDGER}/validator.log" 2>&1 &
 disown
@@ -127,6 +132,14 @@ fi
 
 if ! wait_for_rpc_ready "${RPC_URL}"; then
   echo "ERROR: validator RPC not ready on port ${BASE_PORT}" >&2
+  cat "${LEDGER}/validator.log" >&2 || true
+  kill_validator
+  exit 1
+fi
+
+# Fund the test wallet from the localnet faucet so it can pay for accounts.
+if ! solana airdrop 1000 "${PAYER_PUBKEY}" --url "${RPC_URL}" >/dev/null 2>&1; then
+  echo "ERROR: failed to airdrop localnet funds to ${PAYER_PUBKEY}" >&2
   cat "${LEDGER}/validator.log" >&2 || true
   kill_validator
   exit 1

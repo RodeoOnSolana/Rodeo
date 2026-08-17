@@ -167,6 +167,16 @@ if ! wait_for_rpc_ready "${RPC_URL}"; then
   exit 1
 fi
 
+# Fund the test wallet from the localnet faucet. The wallet file is created on
+# demand above; the fresh ledger starts with no balance for it.
+PAYER_PUBKEY="$(solana-keygen pubkey "${WALLET}")"
+if ! solana airdrop 1000 "${PAYER_PUBKEY}" --url "${RPC_URL}" >/dev/null 2>&1; then
+  echo "ERROR: failed to airdrop localnet funds to ${PAYER_PUBKEY}" >&2
+  cat "${LEDGER}/validator.log" >&2 || true
+  kill_validator
+  exit 1
+fi
+
 if ! wait_for_ws "${WS_PORT}"; then
   echo "ERROR: validator WebSocket not ready on port ${WS_PORT}" >&2
   cat "${LEDGER}/validator.log" >&2 || true

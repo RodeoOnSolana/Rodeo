@@ -1,0 +1,11 @@
+Prep Switchboard devnet harness and fix localnet runner funding.
+
+- Add @switchboard-xyz/common and on-demand to integration tests.
+- Regenerate stale settle-reveal fixtures so SBF benchmarks pass.
+- Airdrop localnet funds in each runner so a fresh id.json works.
+- Make production buffer runner use the test wallet as upgrade authority,
+  satisfying initialize_protocol under the production (no test-fixtures) build.
+
+Generated with [Devin](https://devin.ai)
+
+Co-Authored-By: Devin <devin-ai-integration[bot]@users.noreply.github.com>
