@@ -1,0 +1,6 @@
+Fix benchmark runner to stop silently testing the wrong scale.
+
+The settle-reveal fixture generator only emits 1M-bull cases when
+RODEO_BENCH_FULL=1. The default runner included J1/J2_1000000, so
+when the fixtures were missing the test fell back to scale 4. Cap the
+default runner at 100000-bull cases and document how to run 1M.

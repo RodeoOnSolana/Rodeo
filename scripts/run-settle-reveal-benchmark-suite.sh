@@ -25,9 +25,11 @@ CASES=(
   J2_10000
   J1_100000
   J2_100000
-  J1_1000000
-  J2_1000000
 )
+# The 1,000,000-bull cases require regenerating fixtures with
+# RODEO_BENCH_FULL=1 (the default generator omits them because the build is
+# very slow). They are left out of the default runner so the suite does not
+# silently fall back to the smallest case when the fixture is missing.
 
 wait_for_health() {
   local rpc_url="$1"
