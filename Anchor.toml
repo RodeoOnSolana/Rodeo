@@ -8,7 +8,7 @@ skip-lint = false
 
 # Canonical rodeo_core program id for this repository/branch (PR #19).
 [programs.localnet]
-rodeo_core = "EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z"
+rodeo_core = "CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA"
 rodeo_market = "9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n"
 rodeo_router = "CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD"
 

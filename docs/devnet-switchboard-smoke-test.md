@@ -15,7 +15,7 @@ paths succeeded.
 
 | Item | Value |
 |------|-------|
-| Canonical production `rodeo_core` program ID | `EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z` |
+| Canonical production `rodeo_core` program ID | `CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA` |
 | Temporary devnet `rodeo_core` program ID | `EHaQcMmf9AtbCSLYct9ZoGwoLfGkb9B64nYCqRpM86ks` |
 | Devnet payer/deployer wallet (public key only) | `FFZwNMcRoMBu75kP8fpQJKPMubtQSPepPyKfFTvzkSQ6` |
 | Switchboard On-Demand Rust crate | `switchboard-on-demand` `0.13.0` |

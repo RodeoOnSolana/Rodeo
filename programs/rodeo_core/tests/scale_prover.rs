@@ -1840,7 +1840,7 @@ fn generate_sparse_scale_fixtures() {
 // SettleReveal full-path fixture generator.
 // ---------------------------------------------------------------------------
 
-const LOCALNET_PROGRAM_ID: &str = "EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z";
+const LOCALNET_PROGRAM_ID: &str = "CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA";
 
 fn derive_commitment_position(
     position: Pubkey,

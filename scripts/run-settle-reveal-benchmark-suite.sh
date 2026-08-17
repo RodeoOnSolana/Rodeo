@@ -11,6 +11,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LEDGER_BASE="/tmp/rodeo-test-ledger"
 WALLET="${HOME}/.config/solana/id.json"
+PAYER_PUBKEY="$(solana-keygen pubkey "${WALLET}")"
 
 export PATH="/home/rodeosolana/.cargo/bin:/home/rodeosolana/.local/bin:/home/rodeosolana/.local/share/solana/install/active_release/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"
 
@@ -112,6 +113,14 @@ if ! scripts/check-sbf-stack-safety.sh anchor build -p rodeo_core -- --features 
   echo "ERROR: benchmark SBF build failed with features ${BUILD_FEATURES}" >&2
   exit 1
 fi
+# Anchor's SBF step does not consistently apply --features, so rebuild the .so
+# explicitly with cargo-build-sbf and overwrite the deploy artifact.
+SBF_FEATURES="${BUILD_FEATURES//,/ }"
+if ! cargo build-sbf --manifest-path "${ROOT}/programs/rodeo_core/Cargo.toml" --features "${SBF_FEATURES}"; then
+  echo "ERROR: cargo build-sbf failed for benchmark with features ${BUILD_FEATURES}" >&2
+  exit 1
+fi
+cp "${ROOT}/target/sbpfv2-solana-solana/release/rodeo_core.so" "${ROOT}/target/deploy/rodeo_core.so"
 
 for idx in "${!CASES[@]}"; do
   case="${CASES[$idx]}"
@@ -139,7 +148,7 @@ for idx in "${!CASES[@]}"; do
     --bind-address 127.0.0.1 \
     --limit-ledger-size 100000 \
     --mint 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \
-    --upgradeable-program EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z target/deploy/rodeo_core.so 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \
+    --upgradeable-program CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA target/deploy/rodeo_core.so "${PAYER_PUBKEY}" \
     --upgradeable-program 9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n target/deploy/rodeo_market.so 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \
     --upgradeable-program CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD target/deploy/rodeo_router.so 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \
     --bpf-program CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d vendor/mpl-core/mpl_core_program.so \

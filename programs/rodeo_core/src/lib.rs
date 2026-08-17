@@ -1,7 +1,11 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{Burn, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z");
+// Canonical rodeo_core program id for this repository/branch (PR #19).
+// Local tests load the compiled .so at this address via solana-test-validator
+// --bpf-program; the target/deploy keypair is only a build artifact and must not
+// override canonical program id.
+declare_id!("CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA");
 
 pub mod borrowed_proof;
 pub mod bull_registry;

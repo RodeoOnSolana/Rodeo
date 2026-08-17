@@ -279,7 +279,7 @@ function loadIdl(name: string): Idl {
 }
 
 const expectedProgramIds = {
-  RodeoCore: "EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z",
+  RodeoCore: "CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA",
   RodeoMarket: "9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n",
   RodeoRouter: "CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD",
 } as const;

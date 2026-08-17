@@ -98,6 +98,14 @@ if ! scripts/check-sbf-stack-safety.sh anchor build -p rodeo_core -- --features 
   echo "ERROR: production buffer SBF build failed" >&2
   exit 1
 fi
+# Anchor's SBF step does not consistently apply --features, so rebuild the .so
+# explicitly with cargo-build-sbf and overwrite the deploy artifact.
+SBF_FEATURES="${BUILD_FEATURES//,/ }"
+if ! cargo build-sbf --manifest-path "${ROOT}/programs/rodeo_core/Cargo.toml" --features "${SBF_FEATURES}"; then
+  echo "ERROR: cargo build-sbf failed for ${SUITE} with features ${BUILD_FEATURES}" >&2
+  exit 1
+fi
+cp "${ROOT}/target/sbpfv2-solana-solana/release/rodeo_core.so" "${ROOT}/target/deploy/rodeo_core.so"
 
 nohup solana-test-validator \
   --ledger "${LEDGER}" \
@@ -106,7 +114,7 @@ nohup solana-test-validator \
   --bind-address 127.0.0.1 \
   --limit-ledger-size 100000 \
   --mint "${PAYER_PUBKEY}" \
-  --upgradeable-program EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z target/deploy/rodeo_core.so "${PAYER_PUBKEY}" \
+  --upgradeable-program CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA target/deploy/rodeo_core.so "${PAYER_PUBKEY}" \
   --upgradeable-program 9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n target/deploy/rodeo_market.so "${PAYER_PUBKEY}" \
   --upgradeable-program CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD target/deploy/rodeo_router.so "${PAYER_PUBKEY}" \
   --bpf-program CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d vendor/mpl-core/mpl_core_program.so \

@@ -1,7 +1,7 @@
 import type { Idl } from "@coral-xyz/anchor";
 
 export const rodeoCoreIdl = {
-  "address": "EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z",
+  "address": "CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA",
   "metadata": {
     "name": "rodeo_core",
     "version": "0.1.0",
