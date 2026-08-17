@@ -10,6 +10,7 @@ import {
   createMint,
   createTransferInstruction,
   getAccount,
+  getAssociatedTokenAddressSync,
   getMint,
   mintTo,
   setAuthority,
@@ -22,11 +23,51 @@ import {
   RandomnessDomain,
   mapBullTier,
   mapCowboyKind,
+  mapMintTheftFlag,
   mapRole,
   mapSuit,
   mapUnstakeTheftFlag,
+  rejectionSampleDraw,
 } from "@rodeo/protocol-definition";
 import { beforeAll, describe, expect, it } from "vitest";
+import {
+  BullRegistryTracker,
+  deriveBullProofBufferPda,
+  deriveBullRegistryPda,
+  stageBullProofBuffer,
+  getLamportBalance,
+  accountExists,
+  type StagedBullProof,
+} from "./bull-registry-tracker.js";
+import {
+  BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+  SECTION_CURRENT_OWNER,
+  SECTION_CURRENT_BULL,
+  SECTION_REMOVE_BULL,
+  SECTION_SELECTED_BULL,
+  SECTION_SELECTED_OWNER,
+  SECTION_VICTIM_OWNER,
+  buildFullTheftRevealPayload,
+  buildRegistry,
+  buildRevealPayload,
+  buildRevealWithVictimPayload,
+  buildTheftRevealPayload,
+  buildUnstakePayload,
+  bullProof,
+  emptyOwnerTreeRoot,
+  findBullByTarget,
+  findOwnerByTarget,
+  leafContainsTarget,
+  ownerProof,
+  serializeBullProofPayload,
+  skipVictimInterval,
+  sparseProofPrefix,
+  type BullLeaf,
+  type BullProofPayloadV1,
+  type BuiltRegistry,
+  type RegistryEntry,
+  PREFIX_BULL_OWNER_NODE,
+} from "./sparse-tree.js";
 
 const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
   "BPFLoaderUpgradeab1e11111111111111111111111",
@@ -46,6 +87,8 @@ interface RodeoCoreAccountNamespace {
   rewardState: AccountFetcher<RewardStateAccount>;
   globalGameState: AccountFetcher<GlobalGameStateAccount>;
   bullAccumulator: AccountFetcher<BullAccumulatorAccount>;
+  bullRegistry: AccountFetcher<BullRegistryAccount>;
+  bullProofBuffer: AccountFetcher<BullProofBufferAccount>;
   position: AccountFetcher<PositionAccount>;
   pendingRandomness: AccountFetcher<PendingRandomnessAccount>;
   protocolConfig: AccountFetcher<ProtocolConfigAccount>;
@@ -115,9 +158,42 @@ interface PendingRandomnessAccount {
   timeoutTimestamp: BN;
   registryRootSnapshot: number[];
   registryVersionSnapshot: BN;
+  registryTotalCountSnapshot: BN;
+  registryTotalPowerSnapshot: BN;
   configVersionSnapshot: BN;
   settled: boolean;
   bump: number;
+}
+
+interface BullRegistryAccount {
+  version: number;
+  globalConfig: web3.PublicKey;
+  ownerTreeRoot: number[];
+  totalBullCount: BN;
+  totalBuckPower: BN;
+  registryVersion: BN;
+  bump: number;
+}
+
+interface BullProofBufferAccount {
+  version: number;
+  schemaVersion: number;
+  actionType: { reveal?: {}; unstake?: {} };
+  expectedPayloadLength: number;
+  pendingRandomness: web3.PublicKey;
+  position: web3.PublicKey;
+  prover: web3.PublicKey;
+  refundRecipient: web3.PublicKey;
+  snapshotRoot: number[];
+  snapshotVersion: BN;
+  snapshotTotalCount: BN;
+  snapshotTotalPower: BN;
+  nonce: BN;
+  finalized: boolean;
+  consumed: boolean;
+  filled: boolean;
+  bump: number;
+  payload: Buffer;
 }
 
 interface GlobalConfigAccount {
@@ -349,6 +425,52 @@ const skipEpochSuite =
   !localnetAvailable ||
   process.env.RODEO_TEST_SUITE === "claim" ||
   process.env.RODEO_TEST_SUITE === "mplcore";
+// Work around solana-test-validator WebSocket flakiness in long suites by
+// polling signature status over HTTP instead of relying on ws://<port+1>.
+function patchProviderForHttpConfirmation(provider: AnchorProvider) {
+  const connection = provider.connection;
+  const COMMITMENT_ORDER: Record<string, number> = {
+    processed: 0,
+    confirmed: 1,
+    finalized: 2,
+  };
+  connection.confirmTransaction = async (
+    signatureOrStrategy: web3.TransactionSignature | web3.TransactionConfirmationStrategy,
+    commitment?: web3.Commitment,
+  ): Promise<web3.RpcResponseAndContext<web3.SignatureStatus>> => {
+    const signature =
+      typeof signatureOrStrategy === "string" ? signatureOrStrategy : signatureOrStrategy.signature;
+    const desired = commitment ?? connection.commitment ?? "confirmed";
+    const desiredOrder = COMMITMENT_ORDER[desired] ?? 0;
+    const start = Date.now();
+    while (Date.now() - start < 60_000) {
+      const { context, value } = await connection.getSignatureStatus(signature);
+      if (value) {
+        if (value.err) {
+          throw new Error(`Transaction ${signature} failed: ${JSON.stringify(value.err)}`);
+        }
+        const status = value.confirmationStatus;
+        let isConfirmed = false;
+        if (status) {
+          isConfirmed = (COMMITMENT_ORDER[status] ?? -1) >= desiredOrder;
+        } else if (value.confirmations !== undefined && value.confirmations !== null) {
+          if (value.confirmations === 0) {
+            isConfirmed = desired === "processed";
+          } else {
+            isConfirmed = desired !== "finalized";
+          }
+        } else if (value.confirmations === null) {
+          isConfirmed = true;
+        }
+        if (isConfirmed) {
+          return { context, value };
+        }
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    throw new Error(`Transaction was not confirmed in 60s: ${signature}`);
+  };
+}
 
 describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () => {
   let provider: AnchorProvider;
@@ -369,6 +491,11 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   let payerRodeoAccount: web3.PublicKey;
   let payerAnsemAccount: web3.PublicKey;
 
+  let bullRegistry: web3.PublicKey;
+  let bullRegistryTracker: BullRegistryTracker;
+  let offChainRegistryVersion = 0n;
+  const positionRevealSnapshots = new Map<string, RegistryEntry[]>();
+
   const upgradeCouncil = web3.Keypair.generate();
   const treasuryCouncil = web3.Keypair.generate();
   const emergencyGuardians = web3.Keypair.generate();
@@ -376,6 +503,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   beforeAll(async () => {
     provider = AnchorProvider.env();
     setProvider(provider);
+    patchProviderForHttpConfirmation(provider);
     payer = (provider.wallet as unknown as { payer: web3.Keypair }).payer;
 
     rodeoCoreProgram = new Program<Idl>(loadIdl("rodeo_core"), provider);
@@ -411,6 +539,9 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       [Buffer.from("bull-accumulator"), globalConfig.toBuffer()],
       rodeoCoreProgram.programId,
     );
+    [bullRegistry] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+    bullRegistryTracker = new BullRegistryTracker();
+
     [receiptCollection] = web3.PublicKey.findProgramAddressSync(
       [Buffer.from("receipt-collection"), globalConfig.toBuffer()],
       rodeoCoreProgram.programId,
@@ -1077,6 +1208,8 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       nextPositionId = gameAfter.nextPositionId.toNumber();
     }
 
+    positionRevealSnapshots.set(position.toBase58(), cloneRegistryEntries(bullRegistryTracker.getEntries()));
+
     return { position, pendingRandomness, protocolConfig };
   }
 
@@ -1100,7 +1233,27 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       [Buffer.from("receipt-funder"), positionAddr.toBuffer()],
       rodeoCoreProgram.programId,
     );
-    await rodeoCoreProgram.methods
+
+    const proof = await buildRevealProof(positionAddr, pos, pendingRandomnessAccount);
+    const payloadBytes = serializeBullProofPayload(proof.payload);
+
+    let staged: StagedBullProof | null = null;
+    const ixs: web3.TransactionInstruction[] = [];
+    if (proof.payload.sectionBitmap !== 0) {
+      ixs.push(web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }));
+      staged = await stageBullProofBuffer(
+        rodeoCoreProgram,
+        globalConfig,
+        positionAddr,
+        pendingRandomness,
+        settler,
+        new BN(1),
+        { reveal: {} },
+        payloadBytes,
+      );
+    }
+
+    const settleBuilder = rodeoCoreProgram.methods
       .settleReveal()
       .accounts({
         settler: settler.publicKey,
@@ -1108,11 +1261,12 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         globalGameState,
         rewardState,
         bullAccumulator,
+        bullRegistry,
         position: positionAddr,
         pendingRandomness,
         protocolConfig,
         owner: pos.owner,
-        receiptOwner: pos.owner,
+        receiptOwner: proof.finalOwner,
         receiptAsset,
         receiptCollection,
         receiptAuthority,
@@ -1121,11 +1275,62 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         mplCoreProgram: MPL_CORE_PROGRAM_ID,
         systemProgram: web3.SystemProgram.programId,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
-        bullProofBuffer: null,
-        refundRecipient: null,
+        bullProofBuffer: staged ? staged.bufferPda : null,
+        refundRecipient: staged ? staged.refundRecipient : null,
       } as any)
-      .signers([settler])
-      .rpc();
+      .preInstructions(ixs)
+      .signers([settler]);
+
+    const settleIxs: web3.TransactionInstruction[] = [];
+    settleIxs.push(...ixs, await settleBuilder.instruction());
+    const settleTx = new web3.Transaction().add(...settleIxs);
+    settleTx.feePayer = provider.wallet.publicKey;
+    const { blockhash: settleBh } = await provider.connection.getLatestBlockhash();
+    settleTx.recentBlockhash = settleBh;
+    settleTx.sign(payer, settler);
+    let settleSig: string;
+    try {
+      settleSig = await provider.connection.sendRawTransaction(settleTx.serialize());
+    } catch (err) {
+      console.error("settleReveal send error", err);
+      try {
+        const sim = await provider.connection.simulateTransaction(settleTx);
+        console.error("settleReveal simulation err", sim.value.err);
+        console.error("settleReveal simulation logs", sim.value.logs);
+      } catch (simErr) {
+        console.error("settleReveal simulation failed", simErr);
+      }
+      throw err;
+    }
+    const confirmResult = await provider.connection.confirmTransaction(settleSig, "confirmed");
+    if (confirmResult.value.err) {
+      console.error("settleReveal confirm error", confirmResult.value.err);
+      const txDetails = await provider.connection.getTransaction(settleSig, { commitment: "confirmed" });
+      console.error("settleReveal tx logs", txDetails?.meta?.logMessages);
+      throw new Error(`settleReveal tx ${settleSig} confirmed but failed: ${JSON.stringify(confirmResult.value.err)}`);
+    }
+
+    const posAfter = await (async () => {
+      for (let i = 0; i < 20; i++) {
+        const p = await rodeoAccounts(rodeoCoreProgram).position.fetch(positionAddr);
+        if (!!p.status.active) {
+          return p;
+        }
+        await sleep(100);
+      }
+      throw new Error(`settleReveal: position ${positionAddr.toBase58()} never became active/unstakePending after reveal`);
+    })();
+    if (posAfter.role.bull) {
+      bullRegistryTracker.registerBull(posAfter.owner, {
+        position: positionAddr,
+        positionId: BigInt(posAfter.positionId.toString()),
+        owner: posAfter.owner,
+        buckPower: posAfter.buckPower,
+        revealConfigVersion: BigInt(posAfter.revealConfigVersion.toString()),
+      });
+      offChainRegistryVersion += 1n;
+    }
+    await assertTrackerMatchesChain();
   }
 
   async function recoverRevealTimeout(positionId: BN, caller = payer) {
@@ -1433,6 +1638,21 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     return new Promise((r) => setTimeout(r, ms));
   }
 
+  async function waitForRandomnessTimeout(positionId: BN, bufferSeconds = 2) {
+    const { pendingRandomness } = await deriveStakeAccounts(positionId);
+    const pr = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
+    const target = pr.timeoutTimestamp.toNumber() + bufferSeconds;
+    for (let i = 0; i < 100; i++) {
+      const slot = await provider.connection.getSlot("finalized");
+      const blockTime = slot !== null ? await provider.connection.getBlockTime(slot) : null;
+      if (blockTime !== null && blockTime >= target) {
+        return;
+      }
+      await sleep(500);
+    }
+    throw new Error(`Randomness timeout not reached after polling for position ${positionId}`);
+  }
+
   function collectEvents<T>(eventName: string, expectedCount: number, timeoutMs = 10_000): Promise<T[]> {
     return new Promise((resolve) => {
       const events: T[] = [];
@@ -1580,6 +1800,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       new BN(999),
     );
     const { position } = await deriveStakeAccounts(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
       [Buffer.from("receipt"), position.toBuffer()],
       rodeoCoreProgram.programId,
@@ -1597,11 +1818,12 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           globalGameState,
           rewardState,
           bullAccumulator,
+          bullRegistry,
           position,
           pendingRandomness: wrongRandomness,
           protocolConfig: deriveProtocolConfig(rodeoCoreProgram.programId, globalConfig, new BN(1))[0],
-          owner: payer.publicKey,
-          receiptOwner: payer.publicKey,
+          owner: pos.owner,
+          receiptOwner: pos.owner,
           receiptAsset,
           receiptCollection,
           receiptAuthority,
@@ -1848,8 +2070,21 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     return { position, pendingRandomness, actionNonce };
   }
 
+  async function getOwnerTokenAccounts(owner: web3.PublicKey) {
+    const ownerRodeoAccount = getAssociatedTokenAddressSync(rodeoMint, owner);
+    const ownerAnsemAccount = getAssociatedTokenAddressSync(ansemMint, owner);
+    if ((await provider.connection.getAccountInfo(ownerRodeoAccount)) === null) {
+      await createAssociatedTokenAccount(provider.connection, payer, rodeoMint, owner);
+    }
+    if ((await provider.connection.getAccountInfo(ownerAnsemAccount)) === null) {
+      await createAssociatedTokenAccount(provider.connection, payer, ansemMint, owner);
+    }
+    return { ownerRodeoAccount, ownerAnsemAccount };
+  }
+
   async function settleUnstake(positionId: BN, actionNonce: BN, settler = payer) {
     const { position } = await deriveStakeAccounts(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     const [pendingRandomness] = deriveRandomness(
       rodeoCoreProgram.programId,
       position,
@@ -1871,7 +2106,29 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       [Buffer.from("receipt-funder"), position.toBuffer()],
       rodeoCoreProgram.programId,
     );
-    const builder = rodeoCoreProgram.methods
+    const { ownerRodeoAccount, ownerAnsemAccount } = await getOwnerTokenAccounts(pos.owner);
+
+    let bullProof: { bufferPda: web3.PublicKey; refundRecipient: web3.PublicKey } | null = null;
+    const ixs: web3.TransactionInstruction[] = [];
+    if (pos.role.bull) {
+      const registry = bullRegistryTracker.buildRegistry();
+      const payload = buildUnstakePayload(registry, pos.owner, position);
+      const payloadBytes = serializeBullProofPayload(payload);
+      ixs.push(web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }));
+      const staged = await stageBullProofBuffer(
+        rodeoCoreProgram,
+        globalConfig,
+        position,
+        pendingRandomness,
+        settler,
+        new BN(1),
+        { unstake: {} },
+        payloadBytes,
+      );
+      bullProof = { bufferPda: staged.bufferPda, refundRecipient: staged.refundRecipient };
+    }
+
+    await rodeoCoreProgram.methods
       .settleUnstake()
       .accounts({
         settler: settler.publicKey,
@@ -1879,30 +2136,42 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         globalGameState,
         rewardState,
         bullAccumulator,
+        bullRegistry,
         position,
         pendingRandomness,
         protocolConfig,
         principalVault,
         rodeoMint,
-        ownerRodeoAccount: payerRodeoAccount,
+        ownerRodeoAccount,
         rewardVault,
-        ownerAnsemAccount: payerAnsemAccount,
-        owner: payer.publicKey,
+        ownerAnsemAccount,
+        owner: pos.owner,
         receiptAsset,
         receiptCollection,
         receiptAuthority,
         receiptFunder,
+        bullProofBuffer: bullProof ? bullProof.bufferPda : null,
+        refundRecipient: bullProof ? bullProof.refundRecipient : null,
         mplCoreProgram: MPL_CORE_PROGRAM_ID,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: web3.SystemProgram.programId,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
-      .signers([settler]);
-    await builder.rpc();
+        providerRandomnessAccount: settler.publicKey,
+      } as any)
+      .preInstructions(ixs)
+      .signers([settler])
+      .rpc();
+
+    if (pos.role.bull) {
+      bullRegistryTracker.unregisterBull(pos.owner, position);
+      offChainRegistryVersion += 1n;
+    }
+    await assertTrackerMatchesChain();
   }
 
   async function recoverUnstakeTimeout(positionId: BN, actionNonce: BN, caller = payer) {
     const { position } = await deriveStakeAccounts(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     const [pendingRandomness] = deriveRandomness(
       rodeoCoreProgram.programId,
       position,
@@ -1916,7 +2185,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         globalConfig,
         position,
         pendingRandomness,
-        owner: payer.publicKey,
+        owner: pos.owner,
         systemProgram: web3.SystemProgram.programId,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
       })
@@ -1940,6 +2209,261 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     offset += 8;
     Buffer.from(protocolEpoch.toArrayLike(Buffer, "le", 8)).copy(preimage, offset);
     return new Uint8Array(createHash("sha256").update(preimage).digest());
+  }
+
+  function cloneRegistryEntries(entries: RegistryEntry[]): RegistryEntry[] {
+    return entries.map((e) => ({ owner: e.owner, bulls: e.bulls.map((b) => ({ ...b })) }));
+  }
+
+  function buildHistoricalRegistry(positionAddr: web3.PublicKey): BuiltRegistry {
+    const snapshot = positionRevealSnapshots.get(positionAddr.toBase58());
+    if (!snapshot) throw new Error(`No reveal snapshot for position ${positionAddr.toBase58()}`);
+    return buildRegistry(snapshot);
+  }
+
+  async function assertTrackerMatchesChain(): Promise<void> {
+    const chain = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(bullRegistry);
+    const built = bullRegistryTracker.buildRegistry();
+    expect(Buffer.from(new Uint8Array(chain.ownerTreeRoot))).toEqual(Buffer.from(built.rootNode.hash));
+    expect(built.rootNode.count).toBe(BigInt(chain.totalBullCount.toString()));
+    expect(built.rootNode.power).toBe(BigInt(chain.totalBuckPower.toString()));
+    expect(BigInt(chain.registryVersion.toString())).toBe(offChainRegistryVersion);
+  }
+
+  function configAtStake(configVersion: BN): typeof PROTOCOL_CONFIG_V1 {
+    if (configVersion.eqn(1)) return PROTOCOL_CONFIG_V1;
+    if (configVersion.eqn(2)) return PROTOCOL_CONFIG_V2;
+    throw new Error(`Unsupported protocol config version ${configVersion.toString()}`);
+  }
+
+  function predictReveal(
+    randomOutput: Uint8Array,
+    position: web3.PublicKey,
+    actionNonce: BN,
+    config: typeof PROTOCOL_CONFIG_V1,
+  ) {
+    const posBytes = position.toBuffer();
+    const nonce = BigInt(actionNonce.toString());
+    const role = mapRole(
+      { randomOutput, domain: RandomnessDomain.Role, position: posBytes, actionNonce: nonce },
+      config,
+    );
+    const suit = mapSuit(
+      { randomOutput, domain: RandomnessDomain.Suit, position: posBytes, actionNonce: nonce },
+      config,
+    );
+    if (role === "cowboy") {
+      const cowboyKind = mapCowboyKind(
+        { randomOutput, domain: RandomnessDomain.CowboyKind, position: posBytes, actionNonce: nonce },
+        config,
+      );
+      return { role, suit, cowboyKind };
+    }
+    const tier = mapBullTier(
+      { randomOutput, domain: RandomnessDomain.BullTier, position: posBytes, actionNonce: nonce },
+      config,
+    );
+    const power = config.bullBuckPowers[Number(tier.replace("tier", "")) - 1];
+    return { role, suit, bullTier: Number(tier.replace("tier", "")), buckPower: power };
+  }
+
+  async function buildRevealProof(
+    positionAddr: web3.PublicKey,
+    pos: PositionAccount,
+    pending: PendingRandomnessAccount,
+  ): Promise<{ payload: BullProofPayloadV1; finalOwner: web3.PublicKey; stolen: boolean; selectedBull: BullLeaf | null }> {
+    const randomOutput = deriveMockCommitment(
+      positionAddr,
+      0,
+      pending.actionNonce,
+      pending.committedProtocolEpoch,
+    );
+    const protocolConfig = configAtStake(pending.configVersionSnapshot);
+    const predicted = predictReveal(randomOutput, positionAddr, pending.actionNonce, protocolConfig);
+
+    const historicalRegistry = buildHistoricalRegistry(positionAddr);
+    const currentRegistry = bullRegistryTracker.buildRegistry();
+
+    const completedReveals = (await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState))
+      .totalCompletedReveals.toNumber();
+    const minRevealsForTheft = Number(protocolConfig.minRevealsForTheft);
+    const minBullsForTheft = Number(protocolConfig.minBullsForTheft);
+
+    let finalOwner = pos.owner;
+    let stolen = false;
+    let selectedBull: BullLeaf | null = null;
+
+    let currentOwnerProof: ReturnType<typeof ownerProof> | null = null;
+    let currentBullProof: ReturnType<typeof bullProof> | null = null;
+    if (predicted.role === "bull") {
+      const newBull: BullLeaf = {
+        position: positionAddr,
+        positionId: BigInt(pos.positionId.toString()),
+        owner: finalOwner,
+        buckPower: predicted.buckPower,
+        revealConfigVersion: BigInt(pending.configVersionSnapshot.toString()),
+      };
+      currentOwnerProof = ownerProof(currentRegistry, finalOwner);
+      currentBullProof = bullProof(currentRegistry, finalOwner, positionAddr);
+    }
+
+    if (completedReveals >= minRevealsForTheft) {
+      const vproof = ownerProof(historicalRegistry, pos.owner);
+      const victimPrefix = sparseProofPrefix(
+        pos.owner.toBuffer(),
+        vproof.proof,
+        PREFIX_BULL_OWNER_NODE,
+      );
+      const victimCount = vproof.proof.leaf.count;
+      const victimPower = vproof.proof.leaf.power;
+      const externalCount = BigInt(pending.registryTotalCountSnapshot.toString()) - victimCount;
+      const externalPower = BigInt(pending.registryTotalPowerSnapshot.toString()) - victimPower;
+
+      if (externalCount >= BigInt(minBullsForTheft) && externalPower > 0n) {
+        const theft = mapMintTheftFlag(
+          {
+            randomOutput,
+            domain: RandomnessDomain.MintTheft,
+            position: positionAddr.toBuffer(),
+            actionNonce: BigInt(pending.actionNonce.toString()),
+          },
+          protocolConfig,
+        );
+        if (theft) {
+          const ownerTarget = rejectionSampleDraw(
+            { denominator: externalPower, entries: [{ outcome: "only", weight: externalPower }] },
+            {
+              randomOutput,
+              domain: RandomnessDomain.OwnerSelection,
+              position: positionAddr.toBuffer(),
+              actionNonce: BigInt(pending.actionNonce.toString()),
+            },
+          );
+          const safeOwnerTarget = skipVictimInterval(ownerTarget, victimPrefix, victimPower);
+          const selectedOwner = findOwnerByTarget(historicalRegistry, safeOwnerTarget);
+
+          const oproof = ownerProof(historicalRegistry, selectedOwner);
+          const selectedOwnerPower = oproof.proof.leaf.power;
+          const bullTarget = rejectionSampleDraw(
+            { denominator: selectedOwnerPower, entries: [{ outcome: "only", weight: selectedOwnerPower }] },
+            {
+              randomOutput,
+              domain: RandomnessDomain.BullSelection,
+              position: positionAddr.toBuffer(),
+              actionNonce: BigInt(pending.actionNonce.toString()),
+            },
+          );
+          selectedBull = findBullByTarget(historicalRegistry, selectedOwner, bullTarget);
+          finalOwner = selectedBull.owner;
+          stolen = true;
+
+          if (predicted.role === "bull") {
+            const newBull: BullLeaf = {
+              position: positionAddr,
+              positionId: BigInt(pos.positionId.toString()),
+              owner: finalOwner,
+              buckPower: predicted.buckPower,
+              revealConfigVersion: BigInt(pending.configVersionSnapshot.toString()),
+            };
+            return {
+              payload: buildFullTheftRevealPayload(
+                historicalRegistry,
+                currentRegistry,
+                pos.owner,
+                selectedBull.owner,
+                selectedBull.position,
+                newBull,
+              ),
+              finalOwner,
+              stolen,
+              selectedBull,
+            };
+          }
+
+          return {
+            payload: buildTheftRevealPayload(
+              historicalRegistry,
+              pos.owner,
+              selectedBull.owner,
+              selectedBull.position,
+            ),
+            finalOwner,
+            stolen,
+            selectedBull,
+          };
+        } else {
+          const vproof2 = ownerProof(historicalRegistry, pos.owner);
+          return {
+            payload: {
+              schemaVersion: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+              sectionBitmap:
+                SECTION_VICTIM_OWNER |
+                (predicted.role === "bull" ? SECTION_CURRENT_OWNER | SECTION_CURRENT_BULL : 0),
+              victimOwner: vproof2,
+              selectedOwner: null,
+              selectedBull: null,
+              currentOwner: currentOwnerProof,
+              currentBull: currentBullProof,
+              removeBull: null,
+            },
+            finalOwner,
+            stolen,
+            selectedBull,
+          };
+        }
+      } else {
+        const vproof2 = ownerProof(historicalRegistry, pos.owner);
+        return {
+          payload: {
+            schemaVersion: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+            sectionBitmap:
+              SECTION_VICTIM_OWNER |
+              (predicted.role === "bull" ? SECTION_CURRENT_OWNER | SECTION_CURRENT_BULL : 0),
+            victimOwner: vproof2,
+            selectedOwner: null,
+            selectedBull: null,
+            currentOwner: currentOwnerProof,
+            currentBull: currentBullProof,
+            removeBull: null,
+          },
+          finalOwner,
+          stolen,
+          selectedBull,
+        };
+      }
+    }
+
+    if (predicted.role === "bull") {
+      const newBull: BullLeaf = {
+        position: positionAddr,
+        positionId: BigInt(pos.positionId.toString()),
+        owner: finalOwner,
+        buckPower: predicted.buckPower,
+        revealConfigVersion: BigInt(pending.configVersionSnapshot.toString()),
+      };
+      return {
+        payload: buildRevealPayload(currentRegistry, newBull),
+        finalOwner,
+        stolen,
+        selectedBull,
+      };
+    }
+
+    return {
+      payload: {
+        schemaVersion: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+        sectionBitmap: 0,
+        victimOwner: null,
+        selectedOwner: null,
+        selectedBull: null,
+        currentOwner: null,
+        currentBull: null,
+        removeBull: null,
+      },
+      finalOwner,
+      stolen,
+      selectedBull,
+    };
   }
 
   async function findUnstakePositionId(
@@ -2014,7 +2538,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
 
     // The test build uses a short randomness timeout for local verification.
-    await new Promise((r) => setTimeout(r, 2_500));
+    await waitForRandomnessTimeout(positionId);
     await recoverRevealTimeout(positionId);
 
     const vaultAfter = await getAccount(provider.connection, principalVault);
@@ -2610,7 +3134,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       await assertSimulatedEpochsNotClosed(requestUnstakeBuilder);
       await ensureEpochsClosed();
 
-      const requestInfo = await requestUnstakeBuilder().rpc();
+      const requestInfo = await runWhenEpochsClosed(() => requestUnstakeBuilder().rpc());
       expect(requestInfo).toBeDefined();
 
       const positionAfter = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
@@ -2944,7 +3468,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     expect(after.nextPositionId.toString()).toBe(n.addn(2).toString());
 
     // H. close/un-stake the original Position
-    await sleep(3_000);
+    await waitForRandomnessTimeout(n);
     await recoverRevealTimeout(n);
     const positionInfo = await provider.connection.getAccountInfo(
       derivePosition(rodeoCoreProgram.programId, globalConfig, n)[0],
@@ -3023,6 +3547,7 @@ describe.skipIf(!localnetAvailable)("initialize_protocol validation failures", (
   beforeAll(async () => {
     provider = AnchorProvider.env();
     setProvider(provider);
+    patchProviderForHttpConfirmation(provider);
     payer = (provider.wallet as unknown as { payer: web3.Keypair }).payer;
     program = new Program<Idl>(loadIdl("rodeo_core"), provider);
   });

@@ -1414,7 +1414,10 @@ pub mod rodeo_core {
             buffer.snapshot_total_power = pending_randomness.registry_total_power_snapshot;
         }
         buffer.refund_recipient = ctx.accounts.prover.key();
-        buffer.expiry_timestamp = pending_randomness.timeout_timestamp;
+        buffer.expiry_timestamp = pending_randomness
+            .timeout_timestamp
+            .checked_add(BULL_PROOF_BUFFER_TTL_SECONDS)
+            .ok_or(RodeoError::ArithmeticOverflow)?;
         buffer.nonce = nonce;
         buffer.expected_payload_length = expected_payload_length;
         buffer.finalized = false;

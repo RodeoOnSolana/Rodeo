@@ -11,7 +11,7 @@ const { PublicKey } = web3;
 export const SPARSE_TREE_DEPTH = 256;
 export const SPARSE_TREE_BITMAP_BYTES = 32;
 
-const PREFIX_BULL_OWNER_NODE = Buffer.from("rodeo_v2_bull_owner_node", "utf8");
+export const PREFIX_BULL_OWNER_NODE = Buffer.from("rodeo_v2_bull_owner_node", "utf8");
 const PREFIX_BULL_NODE = Buffer.from("rodeo_v2_bull_node", "utf8");
 const PREFIX_BULL_OWNER_LEAF = Buffer.from("rodeo_v2_bull_owner_leaf", "utf8");
 const PREFIX_BULL_LEAF = Buffer.from("rodeo_v2_bull_leaf", "utf8");
@@ -678,4 +678,155 @@ export function buildTheftRevealPayload(
     currentBull: null,
     removeBull: null,
   };
+}
+
+/**
+ * Build a full five-section mint-theft SettleReveal payload.
+ * Sections: VICTIM_OWNER + SELECTED_OWNER + SELECTED_BULL + CURRENT_OWNER + CURRENT_BULL
+ *
+ * For J1 the selected owner is expected to exist in the current registry.
+ * For J2 the selected owner may be absent and `currentRegistry` should omit it,
+ * causing the helper to produce canonical empty owner/bull proofs.
+ */
+export function buildFullTheftRevealPayload(
+  historicalRegistry: BuiltRegistry,
+  currentRegistry: BuiltRegistry,
+  victimOwner: PublicKey,
+  selectedOwner: PublicKey,
+  selectedBullPosition: PublicKey,
+  newBull: BullLeaf,
+): BullProofPayloadV1 {
+  const vproof = ownerProof(historicalRegistry, victimOwner);
+  const oproof = ownerProof(historicalRegistry, selectedOwner);
+  const bproof = bullProof(historicalRegistry, selectedOwner, selectedBullPosition);
+  const cOwnerProof = ownerProof(currentRegistry, newBull.owner);
+  const cBullProof = bullProof(currentRegistry, newBull.owner, newBull.position);
+  return {
+    schemaVersion: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+    sectionBitmap:
+      SECTION_VICTIM_OWNER |
+      SECTION_SELECTED_OWNER |
+      SECTION_SELECTED_BULL |
+      SECTION_CURRENT_OWNER |
+      SECTION_CURRENT_BULL,
+    victimOwner: vproof,
+    selectedOwner: oproof,
+    selectedBull: bproof,
+    currentOwner: cOwnerProof,
+    currentBull: cBullProof,
+    removeBull: null,
+  };
+}
+
+/**
+ * Build a Reveal payload that carries a victim section but no selected owner,
+ * because the random draw did NOT trigger a mint-theft.
+ * Sections: VICTIM_OWNER + CURRENT_OWNER + CURRENT_BULL
+ */
+export function buildRevealWithVictimPayload(
+  historicalRegistry: BuiltRegistry,
+  currentRegistry: BuiltRegistry,
+  victimOwner: PublicKey,
+  newBull: BullLeaf,
+): BullProofPayloadV1 {
+  const vproof = ownerProof(historicalRegistry, victimOwner);
+  const oproof = ownerProof(currentRegistry, newBull.owner);
+  const bproof = bullProof(currentRegistry, newBull.owner, newBull.position);
+  return {
+    schemaVersion: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+    sectionBitmap: SECTION_VICTIM_OWNER | SECTION_CURRENT_OWNER | SECTION_CURRENT_BULL,
+    victimOwner: vproof,
+    selectedOwner: null,
+    selectedBull: null,
+    currentOwner: oproof,
+    currentBull: bproof,
+    removeBull: null,
+  };
+}
+
+export function leafContainsTarget(prefix: bigint, leafPower: bigint, target: bigint): boolean {
+  return target >= prefix && target < prefix + leafPower;
+}
+
+export function skipVictimInterval(externalTarget: bigint, victimPrefix: bigint, victimPower: bigint): bigint {
+  return externalTarget < victimPrefix ? externalTarget : externalTarget + victimPower;
+}
+
+/**
+ * Recompute the cumulative prefix (power of all lexicographically smaller leaves)
+ * for a given key from its compressed sparse proof.  The verification logic must
+ * exactly mirror `verify_with_prefix` in `programs/rodeo_core/src/sparse_tree.rs`.
+ */
+export function sparseProofPrefix(
+  key: Uint8Array,
+  proof: CompressedSparseProof,
+  prefixConstant: Buffer,
+): bigint {
+  const defaults = emptyNodesForPrefix(prefixConstant);
+  let current = proof.leaf;
+  let currentDefault = defaults[0];
+  let prefix = 0n;
+  let siblingIdx = 0;
+
+  for (let h = 1; h <= SPARSE_TREE_DEPTH; h++) {
+    const bitIndex = h - 1;
+    const byteIndex = Math.floor(bitIndex / 8);
+    const bitInByte = bitIndex % 8;
+    const bit = ((key[byteIndex] >> bitInByte) & 1) === 1;
+    const siblingIsNonDefault = (proof.bitmap[byteIndex] & (1 << bitInByte)) !== 0;
+    const sibling = siblingIsNonDefault ? proof.siblings[siblingIdx++] : currentDefault;
+
+    if (bit) {
+      prefix += sibling.power;
+    }
+
+    const [left, right] = bit ? [sibling, current] : [current, sibling];
+    current = hashNode(prefixConstant, left, right);
+    currentDefault = defaults[h];
+  }
+
+  return prefix;
+}
+
+/**
+ * Locate the owner whose power interval contains the given target.
+ * The caller is responsible for ensuring `target` lies inside [0, totalPower).
+ */
+export function findOwnerByTarget(
+  registry: BuiltRegistry,
+  target: bigint,
+  excludeOwner?: PublicKey,
+): PublicKey {
+  for (const entry of registry.entries) {
+    if (excludeOwner && entry.owner.equals(excludeOwner)) continue;
+    const oproof = ownerProof(registry, entry.owner);
+    const prefix = sparseProofPrefix(entry.owner.toBuffer(), oproof.proof, PREFIX_BULL_OWNER_NODE);
+    const power = oproof.proof.leaf.power;
+    if (leafContainsTarget(prefix, power, target)) {
+      return entry.owner;
+    }
+  }
+  throw new Error(`No owner interval contains target ${target}`);
+}
+
+/**
+ * Locate the bull whose power interval contains the given target inside an
+ * owner's bull tree.
+ */
+export function findBullByTarget(
+  registry: BuiltRegistry,
+  owner: PublicKey,
+  target: bigint,
+): BullLeaf {
+  const entry = registry.entries.find((e) => e.owner.equals(owner));
+  if (!entry) throw new Error(`Owner ${owner.toBase58()} not in registry`);
+  for (const bull of entry.bulls) {
+    const bproof = bullProof(registry, owner, bull.position);
+    const prefix = sparseProofPrefix(bull.position.toBuffer(), bproof.proof, PREFIX_BULL_NODE);
+    const power = bproof.proof.leaf.power;
+    if (leafContainsTarget(prefix, power, target)) {
+      return bull;
+    }
+  }
+  throw new Error(`No bull interval contains target ${target} for owner ${owner.toBase58()}`);
 }

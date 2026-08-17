@@ -28,6 +28,11 @@ pub const RANDOMNESS_TIMEOUT_SECONDS: i64 = 2;
 #[cfg(not(feature = "test-short-timeout"))]
 pub const RANDOMNESS_TIMEOUT_SECONDS: i64 = 30 * 60;
 
+#[cfg(feature = "test-short-timeout")]
+pub const BULL_PROOF_BUFFER_TTL_SECONDS: i64 = 60;
+#[cfg(not(feature = "test-short-timeout"))]
+pub const BULL_PROOF_BUFFER_TTL_SECONDS: i64 = 30 * 60;
+
 #[cfg(feature = "mock-randomness")]
 pub const USE_MOCK_RANDOMNESS: bool = true;
 #[cfg(not(feature = "mock-randomness"))]
@@ -140,6 +145,11 @@ pub const BULL_PROOF_BUFFER_MAX_PAYLOAD: usize = 5_000;
 const _: () = assert!(RANDOMNESS_TIMEOUT_SECONDS == 30 * 60);
 #[cfg(feature = "test-short-timeout")]
 const _: () = assert!(RANDOMNESS_TIMEOUT_SECONDS == 2);
+
+#[cfg(not(feature = "test-short-timeout"))]
+const _: () = assert!(BULL_PROOF_BUFFER_TTL_SECONDS == 30 * 60);
+#[cfg(feature = "test-short-timeout")]
+const _: () = assert!(BULL_PROOF_BUFFER_TTL_SECONDS == 60);
 
 #[cfg(not(feature = "mock-randomness"))]
 const _: () = assert!(!USE_MOCK_RANDOMNESS);
