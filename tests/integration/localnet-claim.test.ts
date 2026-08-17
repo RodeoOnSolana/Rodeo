@@ -6,9 +6,13 @@ import {
   PROTOCOL_CONFIG_V1,
   PROTOCOL_CONFIG_V2,
   RandomnessDomain,
+  mapBullTier,
   mapCowboyKind,
+  mapMintTheftFlag,
   mapRole,
+  mapSuit,
   mapUnstakeTheftFlag,
+  rejectionSampleDraw,
 } from "@rodeo/protocol-definition";
 import { AnchorProvider, BN, Program, setProvider, web3 } from "@coral-xyz/anchor";
 import {
@@ -40,10 +44,27 @@ import {
   ownerProof,
   bullProof,
   buildUnstakePayload,
+  buildRevealPayload,
+  buildRevealWithVictimPayload,
+  buildTheftRevealPayload,
+  buildFullTheftRevealPayload,
+  buildRegistry,
+  BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+  SECTION_VICTIM_OWNER,
+  SECTION_CURRENT_OWNER,
+  SECTION_CURRENT_BULL,
   serializeBullProofPayload,
   verifyOwnerProof,
   verifyBullProof,
+  findOwnerByTarget,
+  findBullByTarget,
+  sparseProofPrefix,
+  skipVictimInterval,
+  leafContainsTarget,
+  PREFIX_BULL_OWNER_NODE,
   type BullLeaf,
+  type RegistryEntry,
+  type BuiltRegistry,
 } from "./sparse-tree.js";
 
 
@@ -491,6 +512,11 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
   const REWARD_PER_WEIGHT_SCALE = new BN("1000000000000000000");
   let nextPositionId = 0;
   const bullRegistryTracker = new BullRegistryTracker();
+  const positionRevealSnapshots = new Map<string, RegistryEntry[]>();
+
+  function cloneRegistryEntries(entries: RegistryEntry[]): RegistryEntry[] {
+    return entries.map((e) => ({ owner: e.owner, bulls: e.bulls.map((b) => ({ ...b })) }));
+  }
 
 
   async function syncTrackerWithChain(): Promise<void> {
@@ -524,30 +550,26 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     await syncTrackerWithChain();
 
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
 
-    // The new Bull leaf is built from proof-provided values, but the actual
-    // buck_power will be computed by the protocol from randomness. For the
-    // non-membership proof, the current_bull leaf is the canonical empty leaf.
-    const bullLeaf: BullLeaf = {
-      position,
-      positionId: BigInt(positionId.toString()),
-      owner: player.publicKey,
-      buckPower: 0,
-      revealConfigVersion: 1n,
-    };
+    // Build the canonical reveal payload deterministically before settlement.
+    // This covers pre-theft Bull insertion, historical mint-theft, and the
+    // combined five-section payload when both are required.
+    const { payload } = await buildRevealPayloadForPosition(position, pos, pending);
+    const payloadBytes = serializeBullProofPayload(payload);
 
     const nonce = new BN(1);
-    const staged = await stageRevealProofForBull(
+    const staged = await stageBullProofBuffer(
       rodeoCoreProgram,
       globalConfig,
       position,
       pendingRandomness,
       prover,
       nonce,
-      bullRegistryTracker,
-      bullLeaf,
+      { reveal: {} },
+      payloadBytes,
     );
-
 
     // Verify staged buffer exists and is finalized but not consumed
     const bufferInfo = await provider.connection.getAccountInfo(staged.bufferPda);
@@ -570,17 +592,17 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       refundRecipient: staged.refundRecipient,
     });
 
-    // Fetch settled position and update tracker with the actual buck power the
-    // protocol assigned from randomness.
-    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    // Fetch settled position and update tracker with the actual buck power and
+    // final owner the protocol assigned from randomness.
+    const posAfter = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     const actualBull: BullLeaf = {
       position,
       positionId: BigInt(positionId.toString()),
-      owner: player.publicKey,
-      buckPower: pos.buckPower,
-      revealConfigVersion: BigInt(pos.revealConfigVersion.toString()),
+      owner: posAfter.owner,
+      buckPower: posAfter.buckPower,
+      revealConfigVersion: BigInt(posAfter.revealConfigVersion.toString()),
     };
-    bullRegistryTracker.registerBull(player.publicKey, actualBull);
+    bullRegistryTracker.registerBull(posAfter.owner, actualBull);
     await assertTrackerMatchesChain();
 
     return {
@@ -845,6 +867,8 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       globalConfigAccount.currentConfigVersion,
     );
 
+    await syncTrackerWithChain();
+
     try {
       await rodeoCoreProgram.methods
         .stakeAndCommit(positionId, amount)
@@ -871,6 +895,10 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       const gameAfter = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
       nextPositionId = gameAfter.nextPositionId.toNumber();
     }
+
+    // Snapshot the BullRegistry state at stake time so that later reveals can
+    // build historical proofs for mint-theft even if the tracker has advanced.
+    positionRevealSnapshots.set(position.toBase58(), cloneRegistryEntries(bullRegistryTracker.getEntries()));
 
     return { position, pendingRandomness, protocolConfig };
   }
@@ -899,6 +927,31 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       rodeoCoreProgram.programId,
     );
     const [bullRegistryPda] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+
+    // The canonical helper must stage the exact proof payload production needs:
+    // simple current-only before theft eligibility, historical-victim after the
+    // threshold, and the full five-section payload when mint theft is selected.
+    let effectiveBullProof = bullProof;
+    let autoStagedBullProof = false;
+    if (!effectiveBullProof && expectedRevealRole(position) === "bull") {
+      await syncTrackerWithChain();
+      const { payload } = await buildRevealPayloadForPosition(position, pos, pendingRandomnessAccount);
+      const payloadBytes = serializeBullProofPayload(payload);
+      const nonce = new BN(1);
+      const staged = await stageBullProofBuffer(
+        rodeoCoreProgram,
+        globalConfig,
+        position,
+        pendingRandomness,
+        settler,
+        nonce,
+        { reveal: {} },
+        payloadBytes,
+      );
+      effectiveBullProof = { bufferPda: staged.bufferPda, refundRecipient: staged.refundRecipient };
+      autoStagedBullProof = true;
+    }
+
     const accounts: Record<string, web3.PublicKey | null> = {
       settler: settler.publicKey,
       globalConfig,
@@ -923,10 +976,10 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       // program id, which the instruction builder treats as omitted.  This lets
       // proofless reveals omit the buffer/refund pair, while Bull reveals supply
       // both accounts.
-      bullProofBuffer: bullProof ? bullProof.bufferPda : null,
-      refundRecipient: bullProof ? bullProof.refundRecipient : null,
+      bullProofBuffer: effectiveBullProof ? effectiveBullProof.bufferPda : null,
+      refundRecipient: effectiveBullProof ? effectiveBullProof.refundRecipient : null,
     };
-    const preInstructions = bullProof
+    const preInstructions = effectiveBullProof
       ? [web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 })]
       : [];
     await rodeoCoreProgram.methods
@@ -935,6 +988,24 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       .preInstructions(preInstructions)
       .signers([settler])
       .rpc();
+
+    // If this helper auto-staged and settled a Bull proof, update the
+    // off-chain tracker so later proof generation stays in sync with the
+    // canonical chain state.  Callers that supplied their own proof are
+    // responsible for updating the tracker themselves.
+    if (autoStagedBullProof) {
+      const settledPos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+      if (settledPos.role.bull) {
+      const actualBull: BullLeaf = {
+        position,
+        positionId: BigInt(positionId.toString()),
+        owner: settledPos.owner,
+        buckPower: settledPos.buckPower,
+        revealConfigVersion: BigInt(settledPos.revealConfigVersion.toString()),
+      };
+      bullRegistryTracker.registerBull(settledPos.owner, actualBull);
+    }
+  }
   }
 
   async function recoverRevealTimeout(positionId: BN, caller = payer, owner = payer) {
@@ -1389,6 +1460,246 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       },
       config,
     );
+  }
+
+  function configAtStake(configVersion: BN): typeof PROTOCOL_CONFIG_V1 {
+    if (configVersion.eqn(1)) return PROTOCOL_CONFIG_V1;
+    if (configVersion.eqn(2)) return PROTOCOL_CONFIG_V2;
+    throw new Error(`Unsupported protocol config version ${configVersion.toString()}`);
+  }
+
+  function buildHistoricalRegistry(position: web3.PublicKey): BuiltRegistry {
+    const snapshot = positionRevealSnapshots.get(position.toBase58());
+    if (!snapshot) {
+      throw new Error(`No reveal snapshot for position ${position.toBase58()}`);
+    }
+    return buildRegistry(snapshot);
+  }
+
+  function predictReveal(
+    randomOutput: Uint8Array,
+    position: web3.PublicKey,
+    actionNonce: BN,
+    config: typeof PROTOCOL_CONFIG_V1,
+  ) {
+    const posBytes = position.toBuffer();
+    const nonce = BigInt(actionNonce.toString());
+    const role = mapRole(
+      { randomOutput, domain: RandomnessDomain.Role, position: posBytes, actionNonce: nonce },
+      config,
+    );
+    const suit = mapSuit(
+      { randomOutput, domain: RandomnessDomain.Suit, position: posBytes, actionNonce: nonce },
+      config,
+    );
+    if (role === "cowboy") {
+      const cowboyKind = mapCowboyKind(
+        { randomOutput, domain: RandomnessDomain.CowboyKind, position: posBytes, actionNonce: nonce },
+        config,
+      );
+      return { role, suit, cowboyKind };
+    }
+    const tier = mapBullTier(
+      { randomOutput, domain: RandomnessDomain.BullTier, position: posBytes, actionNonce: nonce },
+      config,
+    );
+    const power = config.bullBuckPowers[Number(tier.replace("tier", "")) - 1];
+    return { role, suit, bullTier: Number(tier.replace("tier", "")), buckPower: power };
+  }
+
+  async function buildRevealPayloadForPosition(
+    positionAddr: web3.PublicKey,
+    pos: PositionAccount,
+    pending: PendingRandomnessAccount,
+  ): Promise<{ payload: any; finalOwner: web3.PublicKey; stolen: boolean; selectedBull: BullLeaf | null }> {
+    const randomOutput = deriveMockCommitment(
+      positionAddr,
+      0,
+      pending.actionNonce,
+      pending.committedProtocolEpoch,
+    );
+    const protocolConfig = configAtStake(pending.configVersionSnapshot);
+    const predicted = predictReveal(randomOutput, positionAddr, pending.actionNonce, protocolConfig);
+
+    const historicalRegistry = buildHistoricalRegistry(positionAddr);
+    const currentRegistry = bullRegistryTracker.buildRegistry();
+
+    const completedReveals = (await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState))
+      .totalCompletedReveals.toNumber();
+    const minRevealsForTheft = Number(protocolConfig.minRevealsForTheft);
+    const minBullsForTheft = Number(protocolConfig.minBullsForTheft);
+
+    let finalOwner = pos.owner;
+    let stolen = false;
+    let selectedBull: BullLeaf | null = null;
+
+    let currentOwnerProof: any = null;
+    let currentBullProof: any = null;
+    if (predicted.role === "bull") {
+      const newBull: BullLeaf = {
+        position: positionAddr,
+        positionId: BigInt(pos.positionId.toString()),
+        owner: finalOwner,
+        buckPower: predicted.buckPower,
+        revealConfigVersion: BigInt(pending.configVersionSnapshot.toString()),
+      };
+      currentOwnerProof = ownerProof(currentRegistry, finalOwner);
+      currentBullProof = bullProof(currentRegistry, finalOwner, positionAddr);
+    }
+
+    if (completedReveals >= minRevealsForTheft) {
+      const vproof = ownerProof(historicalRegistry, pos.owner);
+      const victimPrefix = sparseProofPrefix(pos.owner.toBuffer(), vproof.proof, PREFIX_BULL_OWNER_NODE);
+      const victimCount = vproof.proof.leaf.count;
+      const victimPower = vproof.proof.leaf.power;
+      const externalCount = historicalRegistry.rootNode.count - victimCount;
+      const externalPower = historicalRegistry.rootNode.power - victimPower;
+
+      if (externalCount >= BigInt(minBullsForTheft) && externalPower > 0n) {
+        const theft = mapMintTheftFlag(
+          {
+            randomOutput,
+            domain: RandomnessDomain.MintTheft,
+            position: positionAddr.toBuffer(),
+            actionNonce: BigInt(pending.actionNonce.toString()),
+          },
+          protocolConfig,
+        );
+        if (theft) {
+          const ownerTarget = rejectionSampleDraw(
+            { denominator: externalPower, entries: [{ outcome: "only", weight: externalPower }] },
+            {
+              randomOutput,
+              domain: RandomnessDomain.OwnerSelection,
+              position: positionAddr.toBuffer(),
+              actionNonce: BigInt(pending.actionNonce.toString()),
+            },
+          );
+          const safeOwnerTarget = skipVictimInterval(ownerTarget, victimPrefix, victimPower);
+          const selectedOwner = findOwnerByTarget(historicalRegistry, safeOwnerTarget);
+
+          const oproof = ownerProof(historicalRegistry, selectedOwner);
+          const selectedOwnerPower = oproof.proof.leaf.power;
+          const bullTarget = rejectionSampleDraw(
+            { denominator: selectedOwnerPower, entries: [{ outcome: "only", weight: selectedOwnerPower }] },
+            {
+              randomOutput,
+              domain: RandomnessDomain.BullSelection,
+              position: positionAddr.toBuffer(),
+              actionNonce: BigInt(pending.actionNonce.toString()),
+            },
+          );
+          selectedBull = findBullByTarget(historicalRegistry, selectedOwner, bullTarget);
+          finalOwner = selectedBull.owner;
+          stolen = true;
+
+          if (predicted.role === "bull") {
+            const newBull: BullLeaf = {
+              position: positionAddr,
+              positionId: BigInt(pos.positionId.toString()),
+              owner: finalOwner,
+              buckPower: predicted.buckPower,
+              revealConfigVersion: BigInt(pending.configVersionSnapshot.toString()),
+            };
+            return {
+              payload: buildFullTheftRevealPayload(
+                historicalRegistry,
+                currentRegistry,
+                pos.owner,
+                selectedBull.owner,
+                selectedBull.position,
+                newBull,
+              ),
+              finalOwner,
+              stolen,
+              selectedBull,
+            };
+          }
+
+          return {
+            payload: buildTheftRevealPayload(
+              historicalRegistry,
+              pos.owner,
+              selectedBull.owner,
+              selectedBull.position,
+            ),
+            finalOwner,
+            stolen,
+            selectedBull,
+          };
+        } else {
+          const vproof2 = ownerProof(historicalRegistry, pos.owner);
+          return {
+            payload: {
+              schemaVersion: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+              sectionBitmap:
+                SECTION_VICTIM_OWNER |
+                (predicted.role === "bull" ? SECTION_CURRENT_OWNER | SECTION_CURRENT_BULL : 0),
+              victimOwner: vproof2,
+              selectedOwner: null,
+              selectedBull: null,
+              currentOwner: currentOwnerProof,
+              currentBull: currentBullProof,
+              removeBull: null,
+            },
+            finalOwner,
+            stolen,
+            selectedBull,
+          };
+        }
+      } else {
+        const vproof2 = ownerProof(historicalRegistry, pos.owner);
+        return {
+          payload: {
+            schemaVersion: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+            sectionBitmap:
+              SECTION_VICTIM_OWNER |
+              (predicted.role === "bull" ? SECTION_CURRENT_OWNER | SECTION_CURRENT_BULL : 0),
+            victimOwner: vproof2,
+            selectedOwner: null,
+            selectedBull: null,
+            currentOwner: currentOwnerProof,
+            currentBull: currentBullProof,
+            removeBull: null,
+          },
+          finalOwner,
+          stolen,
+          selectedBull,
+        };
+      }
+    }
+
+    if (predicted.role === "bull") {
+      const newBull: BullLeaf = {
+        position: positionAddr,
+        positionId: BigInt(pos.positionId.toString()),
+        owner: finalOwner,
+        buckPower: predicted.buckPower,
+        revealConfigVersion: BigInt(pending.configVersionSnapshot.toString()),
+      };
+      return {
+        payload: buildRevealPayload(currentRegistry, newBull),
+        finalOwner,
+        stolen,
+        selectedBull,
+      };
+    }
+
+    return {
+      payload: {
+        schemaVersion: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+        sectionBitmap: 0,
+        victimOwner: null,
+        selectedOwner: null,
+        selectedBull: null,
+        currentOwner: null,
+        currentBull: null,
+        removeBull: null,
+      },
+      finalOwner,
+      stolen,
+      selectedBull,
+    };
   }
 
   async function prepareUnstakeReadyPositionById(

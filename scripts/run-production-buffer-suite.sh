@@ -105,7 +105,11 @@ if ! cargo build-sbf --manifest-path "${ROOT}/programs/rodeo_core/Cargo.toml" --
   echo "ERROR: cargo build-sbf failed for ${SUITE} with features ${BUILD_FEATURES}" >&2
   exit 1
 fi
-cp "${ROOT}/target/sbpfv2-solana-solana/release/rodeo_core.so" "${ROOT}/target/deploy/rodeo_core.so"
+SBF_OUT_DIR="${ROOT}/target/sbpf-solana-solana/release"
+if [ ! -f "${SBF_OUT_DIR}/rodeo_core.so" ]; then
+    SBF_OUT_DIR="${ROOT}/target/sbpfv2-solana-solana/release"
+fi
+cp "${SBF_OUT_DIR}/rodeo_core.so" "${ROOT}/target/deploy/rodeo_core.so"
 
 nohup solana-test-validator \
   --ledger "${LEDGER}" \
