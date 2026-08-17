@@ -98,6 +98,19 @@ kill_validator() {
 # end instead of stopping on the first failure, so cleanup still runs.
 SUITE_EXIT=0
 
+# Build the benchmark-appropriate SBF binary once (mock randomness, short
+# timeouts, test fixtures).  Reused by every case below.
+BUILD_FEATURES="mock-randomness,test-short-timeout,test-fixtures"
+cd "${ROOT}"
+if ! pnpm program-keys:localnet >/dev/null 2>&1; then
+  echo "ERROR: program-keys:localnet failed" >&2
+  exit 1
+fi
+if ! scripts/check-sbf-stack-safety.sh anchor build -p rodeo_core -- --features "${BUILD_FEATURES}"; then
+  echo "ERROR: benchmark SBF build failed with features ${BUILD_FEATURES}" >&2
+  exit 1
+fi
+
 for idx in "${!CASES[@]}"; do
   case="${CASES[$idx]}"
   port=$((BASE_PORT + idx * 2))
@@ -122,6 +135,7 @@ for idx in "${!CASES[@]}"; do
     --rpc-port "${port}" \
     --faucet-port "${faucet_port}" \
     --bind-address 127.0.0.1 \
+    --limit-ledger-size 100000 \
     --mint 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \
     --upgradeable-program EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z target/deploy/rodeo_core.so 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \
     --upgradeable-program 9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n target/deploy/rodeo_market.so 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \

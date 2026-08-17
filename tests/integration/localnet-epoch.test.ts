@@ -2035,6 +2035,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   }
 
   async function requestUnstake(positionId: BN, owner = payer) {
+    await ensureEpochsClosed();
     const { position } = await deriveStakeAccounts(positionId);
     const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     const actionNonce = pos.nextActionNonce;
@@ -2083,6 +2084,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   }
 
   async function settleUnstake(positionId: BN, actionNonce: BN, settler = payer) {
+    await ensureEpochsClosed();
     const { position } = await deriveStakeAccounts(positionId);
     const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     const [pendingRandomness] = deriveRandomness(

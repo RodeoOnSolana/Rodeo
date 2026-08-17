@@ -895,12 +895,14 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       [Buffer.from("receipt-funder"), position.toBuffer()],
       rodeoCoreProgram.programId,
     );
+    const [bullRegistryPda] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
     const accounts: Record<string, web3.PublicKey | null> = {
       settler: settler.publicKey,
       globalConfig,
       globalGameState,
       rewardState,
       bullAccumulator,
+      bullRegistry: bullRegistryPda,
       position,
       pendingRandomness,
       protocolConfig,
@@ -1212,7 +1214,13 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       await fixtureAdvanceNextPositionId(positionId);
     }
     await stakeAndCommit(positionId);
-    await settleReveal(positionId);
+    if (expectedRevealRole(position) === "bull") {
+      // Production Bull reveals require a staged BullProofBuffer. Stage it and
+      // let revealBullWithProof update the off-chain tracker.
+      await revealBullWithProof(positionId, payer, payer);
+    } else {
+      await settleReveal(positionId);
+    }
   }
 
   /**
@@ -1526,6 +1534,30 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       1,
       actionNonce,
     );
+
+    // Auto-stage a Bull unstake proof when the caller did not supply one and
+    // the position is a Bull. This keeps generic helpers like
+    // prepareUnstakeReadyPosition working with the production proof-buffer path.
+    if (!bullProof && pos.role.bull) {
+      await syncTrackerWithChain();
+      const payload = buildUnstakePayload(bullRegistryTracker.buildRegistry(), pos.owner, position);
+      const payloadBytes = serializeBullProofPayload(payload);
+      const staged = await stageBullProofBuffer(
+        rodeoCoreProgram,
+        globalConfig,
+        position,
+        pendingRandomness,
+        payer,
+        new BN(2),
+        { unstake: {} },
+        payloadBytes,
+      );
+      bullProof = {
+        bufferPda: staged.bufferPda,
+        refundRecipient: staged.refundRecipient,
+      };
+    }
+
     const pendingRandomnessAccount =
       await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
     const [protocolConfig] = deriveProtocolConfig(
@@ -1585,6 +1617,11 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       .preInstructions(preInstructions)
       .signers([settler])
       .rpc();
+
+    if (pos.role.bull) {
+      bullRegistryTracker.unregisterBull(pos.owner, position);
+      await assertTrackerMatchesChain();
+    }
   }
 
   async function recoverUnstakeTimeout(positionId: BN, actionNonce: BN, caller = payer) {
