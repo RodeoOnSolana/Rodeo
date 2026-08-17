@@ -1462,7 +1462,8 @@ pub mod rodeo_core {
         );
 
         let account_data_len = buffer.to_account_info().data_len();
-        let required_len = BULL_PROOF_BUFFER_PAYLOAD_OFFSET + (buffer.expected_payload_length as usize);
+        let required_len =
+            BULL_PROOF_BUFFER_PAYLOAD_OFFSET + (buffer.expected_payload_length as usize);
         require_gte!(
             account_data_len,
             required_len,
@@ -1514,11 +1515,7 @@ pub mod rodeo_core {
             ctx.accounts.prover.key(),
             RodeoError::BullProofBufferWrongProver
         );
-        require_eq!(
-            buffer.nonce,
-            nonce,
-            RodeoError::InvalidBullProofBufferPda
-        );
+        require_eq!(buffer.nonce, nonce, RodeoError::InvalidBullProofBufferPda);
 
         let expected_payload_length = buffer.expected_payload_length as usize;
         require!(
@@ -1530,7 +1527,10 @@ pub mod rodeo_core {
         let current_len = buffer_info.data_len();
         let target_len = BULL_PROOF_BUFFER_PAYLOAD_OFFSET + expected_payload_length;
 
-        require!(target_len >= current_len, RodeoError::BullProofBufferInvalidExpansion);
+        require!(
+            target_len >= current_len,
+            RodeoError::BullProofBufferInvalidExpansion
+        );
         if target_len == current_len {
             return Ok(());
         }
