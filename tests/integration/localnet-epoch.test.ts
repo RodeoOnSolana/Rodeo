@@ -651,6 +651,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const allowedExtraInstructions = [
       "append_bull_proof",
       "close_bull_proof",
+      "expand_bull_proof_buffer",
       "finalize_bull_proof",
       "initialize_bull_proof",
       "set_current_config_version_fixture",

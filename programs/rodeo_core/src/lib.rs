@@ -1461,6 +1461,14 @@ pub mod rodeo_core {
             RodeoError::BullProofBufferOversized
         );
 
+        let account_data_len = buffer.to_account_info().data_len();
+        let required_len = BULL_PROOF_BUFFER_PAYLOAD_OFFSET + (buffer.expected_payload_length as usize);
+        require_gte!(
+            account_data_len,
+            required_len,
+            RodeoError::BullProofBufferNotExpanded
+        );
+
         buffer.payload.extend_from_slice(&chunk);
         Ok(())
     }
@@ -1490,6 +1498,69 @@ pub mod rodeo_core {
             buffer.consumed || now >= buffer.expiry_timestamp,
             RodeoError::BullProofBufferNotAbandoned
         );
+        Ok(())
+    }
+
+    /// Expand a BullProofBuffer that was initialized with a one-shot account size
+    /// up to its full `expected_payload_length`. The runtime limits account-data
+    /// growth to `MAX_PERMITTED_DATA_INCREASE` bytes per instruction, so this may
+    /// need to be called multiple times for payloads far beyond the one-shot cap.
+    /// The prover is the refund recipient and must fund the additional rent.
+    pub fn expand_bull_proof_buffer(ctx: Context<ExpandBullProofBuffer>, nonce: u64) -> Result<()> {
+        let buffer = &ctx.accounts.bull_proof_buffer;
+        require!(!buffer.finalized, RodeoError::BullProofBufferFinalized);
+        require_keys_eq!(
+            buffer.refund_recipient,
+            ctx.accounts.prover.key(),
+            RodeoError::BullProofBufferWrongProver
+        );
+        require_eq!(
+            buffer.nonce,
+            nonce,
+            RodeoError::InvalidBullProofBufferPda
+        );
+
+        let expected_payload_length = buffer.expected_payload_length as usize;
+        require!(
+            expected_payload_length <= BULL_PROOF_BUFFER_MAX_PAYLOAD,
+            RodeoError::BullProofBufferOversized
+        );
+
+        let buffer_info = ctx.accounts.bull_proof_buffer.to_account_info();
+        let current_len = buffer_info.data_len();
+        let target_len = BULL_PROOF_BUFFER_PAYLOAD_OFFSET + expected_payload_length;
+
+        require!(target_len >= current_len, RodeoError::BullProofBufferInvalidExpansion);
+        if target_len == current_len {
+            return Ok(());
+        }
+
+        let delta = target_len - current_len;
+        require!(
+            delta <= BULL_PROOF_BUFFER_EXPAND_MAX_DELTA,
+            RodeoError::BullProofBufferExpansionTooLarge
+        );
+
+        let rent = Rent::get()?;
+        let new_rent = rent.minimum_balance(target_len);
+        let current_lamports = buffer_info.lamports();
+        if new_rent > current_lamports {
+            let diff = new_rent - current_lamports;
+            require!(
+                ctx.accounts.prover.lamports() >= diff,
+                RodeoError::InvalidProgramAccount
+            );
+            let cpi_ctx = CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.prover.to_account_info(),
+                    to: buffer_info.clone(),
+                },
+            );
+            anchor_lang::system_program::transfer(cpi_ctx, diff)?;
+        }
+
+        buffer_info.resize(target_len)?;
         Ok(())
     }
 
@@ -4200,7 +4271,7 @@ pub struct InitializeBullProof<'info> {
     #[account(
         init,
         payer = prover,
-        space = 8 + BullProofBuffer::INIT_SPACE,
+        space = bull_proof_buffer_init_space(expected_payload_length),
         seeds = [
             SEED_BULL_PROOF_BUFFER,
             pending_randomness.key().as_ref(),
@@ -4219,6 +4290,35 @@ pub struct InitializeBullProof<'info> {
 
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+#[instruction(nonce: u64)]
+pub struct ExpandBullProofBuffer<'info> {
+    #[account(mut)]
+    pub prover: Signer<'info>,
+
+    /// CHECK: Only used to re-derive the buffer PDA; the binding is checked
+    /// against the value stored in the buffer after deserialization.
+    pub pending_randomness: AccountInfo<'info>,
+
+    #[account(
+        mut,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            pending_randomness.key().as_ref(),
+            prover.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+        constraint = !bull_proof_buffer.finalized @ RodeoError::BullProofBufferFinalized,
+        constraint = bull_proof_buffer.refund_recipient == prover.key() @ RodeoError::BullProofBufferWrongProver,
+        constraint = bull_proof_buffer.pending_randomness == pending_randomness.key() @ RodeoError::InvalidBullProofBufferPda,
+        constraint = bull_proof_buffer.nonce == nonce @ RodeoError::InvalidBullProofBufferPda,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -4816,6 +4916,12 @@ pub enum RodeoError {
     BullProofBufferIncomplete,
     #[msg("BullProofBuffer cannot be closed before expiry or consumption")]
     BullProofBufferNotAbandoned,
+    #[msg("BullProofBuffer has not been expanded to the expected payload size")]
+    BullProofBufferNotExpanded,
+    #[msg("BullProofBuffer expansion target is invalid")]
+    BullProofBufferInvalidExpansion,
+    #[msg("BullProofBuffer expansion exceeds the per-instruction account data limit")]
+    BullProofBufferExpansionTooLarge,
     #[msg("No eligible external Bull exists for this theft")]
     NoEligibleExternalBull,
     #[msg("The provided randomness account is not a valid Switchboard randomness account")]
