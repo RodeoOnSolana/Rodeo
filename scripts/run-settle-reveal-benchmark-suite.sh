@@ -54,12 +54,18 @@ wait_for_rpc_ready() {
 wait_for_ws() {
   local ws_port="$1"
   for _ in $(seq 1 60); do
-    if curl -sS --max-time 2 -i -N \
+    # Capture the upgrade response and grep it; ignore curl's timeout exit
+    # status because set -o pipefail would otherwise turn the WebSocket
+    # handshake timeout (28) into a pipeline failure even when the upgrade
+    # succeeds.
+    local ws_out
+    ws_out=$(curl -sS --max-time 1 -i -N \
       -H 'Upgrade: websocket' \
       -H 'Connection: Upgrade' \
       -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
       -H 'Sec-WebSocket-Version: 13' \
-      "http://127.0.0.1:${ws_port}" 2>/dev/null | grep -q '101 Switching'; then
+      "http://127.0.0.1:${ws_port}" 2>/dev/null || true)
+    if grep -q '101 Switching' <<< "$ws_out"; then
       return 0
     fi
     sleep 1
