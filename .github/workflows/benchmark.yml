@@ -85,7 +85,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build Rodeo SBF with test-fixtures
-        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_core -- --features test-fixtures
+        run: scripts/check-sbf-stack-safety.sh anchor build -- --features test-fixtures
 
       - name: Generate SDK from test-fixtures IDLs
         run: pnpm sdk:generate
