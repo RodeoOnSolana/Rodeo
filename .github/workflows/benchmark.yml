@@ -84,8 +84,8 @@ jobs:
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build rodeo_core SBF with test-fixtures
-        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_core -- --features test-fixtures
+      - name: Build rodeo_core SBF with test-fixtures and mock-randomness
+        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_core -- --features mock-randomness,test-fixtures
 
       - name: Build rodeo_market SBF
         run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_market
