@@ -96,14 +96,13 @@ the on-chain program directly from its live mainnet-beta deployment via
 - **Verifiable independently**: the program ID
   `CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d` and its current executable
   hash can be cross-checked against any public Solana explorer.
-- **Not yet pinned**: `scripts/fetch-mpl-core-program.sh` supports an
-  optional `MPL_CORE_EXPECTED_SHA256` environment variable that, if set,
-  fails the fetch step when the observed hash differs. This PR does not set
-  it yet, because the first real hash is only known after this PR's CI run
-  completes. **Follow-up action**: once CI has run once, pin the resulting
-  hash as a required workflow input/secret (or a checked-in constant) so any
-  future unannounced mainnet upgrade fails CI loudly instead of silently
-  changing test behavior.
+- **Pinned and verified**: `scripts/fetch-mpl-core-program.sh` retries over
+  multiple public mainnet RPCs with bounded exponential backoff and checks
+  the downloaded binary against a pinned `MPL_CORE_EXPECTED_SHA256`. The
+  default pin is `f03e75373ae9cae07b5875f7818c55147b73c5607ca0f96968bab93cd583dc6e`.
+  If the live deployment no longer matches this hash, CI fails loudly so any
+  unannounced upgrade must be deliberately reviewed before the pin is
+  updated.
 
 **License note**: `mpl-core`'s crates.io metadata lists a `non-standard`
 license. The on-chain binary is fetched into an ephemeral CI environment for

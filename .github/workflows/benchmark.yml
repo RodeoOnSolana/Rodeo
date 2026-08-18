@@ -96,8 +96,54 @@ jobs:
       - name: TypeScript typecheck
         run: pnpm typecheck
 
+      - name: Configure local validator wallet
+        run: |
+          mkdir -p "$HOME/.config/solana"
+          solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
+          solana config set --url localhost
+
+      - name: Fetch Metaplex Core program binary
+        run: |
+          chmod +x scripts/fetch-mpl-core-program.sh
+          scripts/fetch-mpl-core-program.sh
+
+      - name: Start solana-test-validator
+        run: |
+          mkdir -p .anchor/test-ledger
+          pkill -f solana-test-validator || true
+          sleep 1
+          nohup solana-test-validator \
+            --ledger .anchor/test-ledger \
+            --reset \
+            --quiet \
+            --bpf-program CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d vendor/mpl-core/mpl_core_program.so \
+            > .anchor/test-ledger/test-ledger-log.txt 2>&1 &
+          echo "solana-test-validator PID: $!"
+          echo "TEST_VALIDATOR_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 60); do
+            if solana block-height > /dev/null 2>&1; then
+              echo "Validator ready after ${i}s"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "Validator failed to start" >&2
+              tail -n 50 .anchor/test-ledger/test-ledger-log.txt >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+
       - name: Run focused sparse-tree SBF benchmark
         run: RODEO_TEST_SUITE=benchmark anchor test --skip-build --skip-local-validator
+
+      - name: Stop solana-test-validator
+        if: always()
+        run: |
+          if [ -n "${TEST_VALIDATOR_PID:-}" ]; then
+            kill "${TEST_VALIDATOR_PID}" 2>/dev/null || true
+            wait "${TEST_VALIDATOR_PID}" 2>/dev/null || true
+          fi
+          pkill -f solana-test-validator || true
 
       - name: Upload benchmark log
         if: always()
