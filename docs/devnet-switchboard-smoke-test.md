@@ -232,7 +232,7 @@ This run used a fresh temporary deployment `AqV3NnU4GhCWreAnmqnyRaXjjii9DcmrqWjf
 
 || Step | Signature | Notes |
 |------|-----------|-------|
-|| stakeAndCommit | `5i6NR2PEi2ZQhFYw94YNueNqFH4VQxf2TnzgoXReYJaZnPsqy3EUnijaNaxyxhpMLy46xEeT1jPcKQxSdgbhKEXL` | Created Position with 100 RODEO principal |
+|| stakeAndCommit | `5i6NR2PEi2ZQhFYw94YNueNqFH4VQxf2TnzgoXReYJaZnPsqy3EUnijaNaxyxhpMLy46xEeT1jPcKQxSdgbhKEXL` | Created Position with 100,000 whole RODEO (100,000,000,000 atomic, 6 decimals) principal |
 || reveal+settle | `1LTdCENyxGWBpcaBCQk9uBXz1KqiS6KRbWDfuPTHbodCUZ7RcTJ5JEZVDVYAVbUwsrts2vrKPRC2LPV3vij3FKj` | Settled as Cowboy; CU: 128,338 |
 || request_unstake | `33vaDUMsdK7N1bmN5E9mX4sRNRihf7Tx74qufpkPjJznEiyoTyF3bDFxDCkZ7euFY24QTCfoeedSkEm2ZYrjYAJC` | Opened Unstake PendingRandomness |
 || settle_unstake | `Ak4Ysk3Yn5LKyehTS2mmabHL8xpmpdymppH4owjsRsrhRLcrQLxhT86rg4UnbGaoKHPWzRyjQmExiNJkev5TnoS` | Real Switchboard reveal + settle; CU: 114,630 |
@@ -249,11 +249,14 @@ This run used a fresh temporary deployment `AqV3NnU4GhCWreAnmqnyRaXjjii9DcmrqWjf
 
 ### Economics
 
-Using the historical `unstake_return_bps = 9_500` and `unstake_tax_bps = 500`:
+Using the historical `unstake_return_bps = 9_500` and `unstake_tax_bps = 500` on RODEO with 6 decimals (`1` whole = `1_000_000` atomic):
 
-* Principal staked: `100,000,000,000` atomic (`100` RODEO)
-* RODEO returned to owner: `95,000,000,000` atomic (`95` RODEO)
-* RODEO burned: `5,000,000,000` atomic (`5` RODEO)
+* Principal staked (raw/atomic): `100,000,000,000`
+* Principal staked (whole RODEO): `100,000`
+* RODEO returned to owner (raw/atomic): `95,000,000,000`
+* RODEO returned to owner (whole RODEO): `95,000`
+* RODEO burned (raw/atomic): `5,000,000,000`
+* RODEO burned (whole RODEO): `5,000`
 * ANSEM paid to owner: `0` (no accrued rewards in this isolated run)
 * ANSEM routed to Bull pool: `0`
 * BullRegistry: unchanged
