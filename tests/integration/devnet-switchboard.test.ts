@@ -20,6 +20,7 @@ import {
   mapCowboyKind,
   mapRole,
   mapSuit,
+  mapUnstakeTheftFlag,
 } from "@rodeo/protocol-definition";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -102,6 +103,7 @@ describe.skipIf(skipSuite)("Rodeo devnet Switchboard On-Demand randomness", () =
   let rodeoMint: web3.PublicKey;
   let ansemMint: web3.PublicKey;
   let payerRodeoAccount: web3.PublicKey;
+  let payerAnsemAccount: web3.PublicKey;
 
   let globalConfig: web3.PublicKey;
   let principalVault: web3.PublicKey;
@@ -122,6 +124,79 @@ describe.skipIf(skipSuite)("Rodeo devnet Switchboard On-Demand randomness", () =
 
   function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function sendVersionedWithLut(
+    ixs: web3.TransactionInstruction[],
+    signers: web3.Keypair[],
+  ): Promise<{ signature: string; logs: string[]; err: any }> {
+    const accounts = new Set<string>();
+    for (const ix of ixs) {
+      for (const key of ix.keys) {
+        accounts.add(key.pubkey.toBase58());
+      }
+    }
+    const accountList = Array.from(accounts).map((a) => new web3.PublicKey(a));
+
+    const slot = await provider.connection.getSlot("confirmed");
+    const [createLutIx, lookupTableAddress] = web3.AddressLookupTableProgram.createLookupTable({
+      authority: signers[0].publicKey,
+      payer: signers[0].publicKey,
+      recentSlot: slot,
+    });
+
+    // 1. Create the lookup table.
+    const { blockhash } = await provider.connection.getLatestBlockhash("confirmed");
+    const createTx = new web3.Transaction().add(createLutIx);
+    createTx.feePayer = signers[0].publicKey;
+    createTx.recentBlockhash = blockhash;
+    createTx.sign(...signers);
+    const createSig = await provider.connection.sendRawTransaction(createTx.serialize(), { skipPreflight: true, maxRetries: 3 });
+    await provider.connection.confirmTransaction(createSig, "confirmed");
+
+    // 2. Extend in small chunks to keep each transaction under 1232 bytes.
+    const chunkSize = 10;
+    for (let i = 0; i < accountList.length; i += chunkSize) {
+      const chunk = accountList.slice(i, i + chunkSize);
+      const { blockhash: extendBlockhash } = await provider.connection.getLatestBlockhash("confirmed");
+      const extendTx = new web3.Transaction().add(
+        web3.AddressLookupTableProgram.extendLookupTable({
+          authority: signers[0].publicKey,
+          payer: signers[0].publicKey,
+          lookupTable: lookupTableAddress,
+          addresses: chunk,
+        }),
+      );
+      extendTx.feePayer = signers[0].publicKey;
+      extendTx.recentBlockhash = extendBlockhash;
+      extendTx.sign(...signers);
+      const extendSig = await provider.connection.sendRawTransaction(extendTx.serialize(), { skipPreflight: true, maxRetries: 3 });
+      await provider.connection.confirmTransaction(extendSig, "confirmed");
+    }
+
+    // LUT is active in the slot following creation; wait several devnet slots.
+    await sleep(5_000);
+
+    const lut = await provider.connection.getAddressLookupTable(lookupTableAddress).then((r) => r.value);
+    if (!lut) throw new Error("Failed to load address lookup table");
+
+    const { blockhash: v0Blockhash } = await provider.connection.getLatestBlockhash("confirmed");
+    const messageV0 = new web3.TransactionMessage({
+      payerKey: signers[0].publicKey,
+      recentBlockhash: v0Blockhash,
+      instructions: ixs,
+    }).compileToV0Message([lut]);
+    const v0Tx = new web3.VersionedTransaction(messageV0);
+    v0Tx.sign(signers);
+
+    const sig = await provider.connection.sendRawTransaction(v0Tx.serialize(), { skipPreflight: true, maxRetries: 3 });
+    await provider.connection.confirmTransaction(sig, "confirmed");
+    const status = await provider.connection.getSignatureStatus(sig);
+    const txInfo = await provider.connection.getTransaction(sig, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+    });
+    return { signature: sig, logs: txInfo?.meta?.logMessages ?? [], err: status.value?.err ?? null };
   }
 
   async function fetchBalance(): Promise<string> {
@@ -330,7 +405,7 @@ describe.skipIf(skipSuite)("Rodeo devnet Switchboard On-Demand randomness", () =
       rodeoMint = await createMint(provider.connection, payer, payer.publicKey, null, 6);
       ansemMint = await createMint(provider.connection, payer, payer.publicKey, null, 6);
 
-      const payerAnsemAccount = await createAssociatedTokenAccount(
+      payerAnsemAccount = await createAssociatedTokenAccount(
         provider.connection,
         payer,
         ansemMint,
@@ -393,6 +468,7 @@ describe.skipIf(skipSuite)("Rodeo devnet Switchboard On-Demand randomness", () =
       rodeoMint = gc.rodeoMint;
       ansemMint = gc.ansemMint;
       payerRodeoAccount = getAssociatedTokenAddressSync(rodeoMint, payer.publicKey);
+      payerAnsemAccount = getAssociatedTokenAddressSync(ansemMint, payer.publicKey);
     }
   }, 120_000);
 
@@ -598,7 +674,11 @@ describe.skipIf(skipSuite)("Rodeo devnet Switchboard On-Demand randomness", () =
       });
       const { signature: combinedSig, logs, err } = await sendTransactionWithLogs(combinedTx, [payer]);
       if (err) {
-        if (logs.some((m: string) => m.includes("BullProofBufferIncomplete"))) {
+        const isBull =
+          logs.some((m: string) => m.includes("BullProofBufferIncomplete")) ||
+          (err.InstructionError && err.InstructionError[1]?.Custom === 6091) ||
+          JSON.stringify(err).includes("6091");
+        if (isBull) {
           bullCount++;
           console.log(`Attempt ${attempt + 1}: Bull outcome requires proof buffer (sig ${combinedSig})`);
           continue;
@@ -1064,4 +1144,441 @@ describe.skipIf(skipSuite)("Rodeo devnet Switchboard On-Demand randomness", () =
       console.log("post late-fulfillment balance:", await fetchBalance(), "SOL");
     }, 120_000);
   });
+
+  it("real-provider Unstake with short-min-stake demonstrates production lifecycle, mapping, and replay", async () => {
+    console.log("pre real-unstake balance:", await fetchBalance(), "SOL");
+
+    const ggsBefore = await (rodeoCoreProgram.account as any).globalGameState.fetch(globalGameState);
+    const bullsBefore = (ggsBefore.totalActiveBullPower as BN).toNumber();
+    const rodeoPrincipalBefore = (await provider.connection.getTokenAccountBalance(principalVault)).value.uiAmount ?? 0;
+    const ownerRodeoBefore = (await provider.connection.getTokenAccountBalance(payerRodeoAccount)).value.uiAmount ?? 0;
+    const ownerAnsemBefore = (await provider.connection.getTokenAccountBalance(payerAnsemAccount)).value.uiAmount ?? 0;
+
+    // 1. Create and settle a Reveal into an Active Position (prefer first non-Bull).
+    let action: Awaited<ReturnType<typeof deriveNextPositionAccounts>> | undefined;
+    let stakeSig: string | undefined;
+    let revealSig: string | undefined;
+    let revealCu: number | undefined;
+    let activePos: any;
+
+    const maxRevealAttempts = 5;
+    for (let attempt = 0; attempt < maxRevealAttempts; attempt++) {
+      const randomnessReveal = await createAndCommitRandomness();
+      const attemptAction = await deriveNextPositionAccounts();
+
+      const stakeIx = await rodeoCoreProgram.methods
+        .stakeAndCommit(attemptAction.positionId, new BN(100_000_000_000))
+        .accounts({
+          owner: payer.publicKey,
+          ownerRodeoTokenAccount: payerRodeoAccount,
+          globalConfig,
+          protocolConfig,
+          principalVault,
+          position: attemptAction.position,
+          pendingRandomness: attemptAction.pendingRandomness,
+          rewardState,
+          globalGameState,
+          bullRegistry,
+          receiptFunder: attemptAction.receiptFunder,
+          providerRandomnessAccount: randomnessReveal.pubkey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        } as any)
+        .instruction();
+      stakeSig = await sendIx(provider, stakeIx, [payer]);
+      console.log(`unstake-reveal attempt ${attempt + 1} stakeAndCommit sig:`, stakeSig);
+
+      const revealIx = await randomnessReveal.revealIx(payer.publicKey);
+      const settleRevealIx = await rodeoCoreProgram.methods
+        .settleReveal()
+        .accounts({
+          ...settleRevealAccounts({
+            position: attemptAction.position,
+            pendingRandomness: attemptAction.pendingRandomness,
+            receiptAsset: attemptAction.receiptAsset,
+            receiptFunder: attemptAction.receiptFunder,
+            providerRandomnessAccount: randomnessReveal.pubkey,
+          }),
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        } as any)
+        .instruction();
+      const revealTx = await sb.asV0Tx({
+        connection: provider.connection,
+        ixs: [revealIx, settleRevealIx],
+        signers: [payer],
+        computeUnitPrice: 10_000,
+        computeUnitLimitMultiple: 1.3,
+      });
+      const { signature, err, logs } = await sendTransactionWithLogs(revealTx, [payer]);
+
+      if (err) {
+        const isBull =
+          logs.some((m: string) => m.includes("BullProofBufferIncomplete")) ||
+          (err.InstructionError && err.InstructionError[1]?.Custom === 6091) ||
+          JSON.stringify(err).includes("6091");
+        if (isBull) {
+          console.log(`attempt ${attempt + 1}: Bull outcome; recovering reveal timeout...`);
+          await sleep(3_000);
+          const recoverIx = await rodeoCoreProgram.methods
+            .recoverRevealTimeout()
+            .accounts({
+              caller: payer.publicKey,
+              position: attemptAction.position,
+              pendingRandomness: attemptAction.pendingRandomness,
+              globalConfig,
+              principalVault,
+              ownerRodeoAccount: payerRodeoAccount,
+              owner: payer.publicKey,
+              globalGameState,
+              receiptFunder: attemptAction.receiptFunder,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              systemProgram: web3.SystemProgram.programId,
+              clock: web3.SYSVAR_CLOCK_PUBKEY,
+            } as any)
+            .instruction();
+          await sendIx(provider, recoverIx, [payer]);
+          continue;
+        }
+        throw new Error(`reveal+settle failed: ${JSON.stringify(err)}`);
+      }
+
+      revealSig = signature;
+      action = attemptAction;
+      console.log(`unstake-reveal attempt ${attempt + 1} reveal+settle sig:`, revealSig);
+      const revealTxInfo = await provider.connection.getTransaction(revealSig, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0,
+      });
+      revealCu = revealTxInfo?.meta?.computeUnitsConsumed ?? 0;
+      console.log("reveal+settle CU consumed:", revealCu);
+      activePos = await (rodeoCoreProgram.account as any).position.fetch(action.position);
+      break;
+    }
+
+    if (!action) throw new Error("failed to create a non-Bull active position");
+    expect(activePos.status).toMatchObject({ active: {} });
+    console.log("activeSince:", activePos.activeSince.toNumber(), "unstakeEligibleAt:", activePos.unstakeEligibleAt.toNumber(), "principalAmount:", activePos.principalAmount.toString());
+
+    // 2. Wait for the shortened minimum stake age.
+    await sleep(12_000);
+
+    // 3. Request real-provider Unstake.
+    const actionNonce = new BN(activePos.nextActionNonce.toNumber());
+    const [pendingRandomnessUnstake] = web3.PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("randomness"),
+        action.position.toBuffer(),
+        Buffer.from([1]),
+        actionNonce.toArrayLike(Buffer, "le", 8),
+      ],
+      rodeoCoreProgram.programId,
+    );
+    const randomnessUnstake = await createAndCommitRandomness();
+
+    const requestIx = await rodeoCoreProgram.methods
+      .requestUnstake()
+      .accounts({
+        owner: payer.publicKey,
+        globalConfig,
+        protocolConfig,
+        position: action.position,
+        pendingRandomness: pendingRandomnessUnstake,
+        rewardState,
+        bullAccumulator,
+        providerRandomnessAccount: randomnessUnstake.pubkey,
+        systemProgram: web3.SystemProgram.programId,
+        rent: web3.SYSVAR_RENT_PUBKEY,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      } as any)
+      .instruction();
+    const requestSig = await sendIx(provider, requestIx, [payer]);
+    console.log("requestUnstake sig:", requestSig);
+
+    const afterRequestPos = await (rodeoCoreProgram.account as any).position.fetch(action.position);
+    expect(afterRequestPos.pendingActionActive).toBe(true);
+    expect(afterRequestPos.pendingActionType).toMatchObject({ unstake: {} });
+
+    // 4. Reveal Switchboard randomness and settle Unstake in the same transaction.
+    const unstakeRevealIx = await randomnessUnstake.revealIx(payer.publicKey);
+    const settleUnstakeIx = await rodeoCoreProgram.methods
+      .settleUnstake()
+      .accounts({
+        settler: payer.publicKey,
+        globalConfig,
+        globalGameState,
+        rewardState,
+        bullAccumulator,
+        bullRegistry,
+        position: action.position,
+        pendingRandomness: pendingRandomnessUnstake,
+        protocolConfig,
+        principalVault,
+        rodeoMint,
+        ownerRodeoAccount: payerRodeoAccount,
+        rewardVault,
+        ownerAnsemAccount: payerAnsemAccount,
+        owner: payer.publicKey,
+        receiptAsset: action.receiptAsset,
+        receiptCollection,
+        receiptAuthority,
+        receiptFunder: action.receiptFunder,
+        mplCoreProgram: MPL_CORE_PROGRAM_ID,
+        bullProofBuffer: null,
+        refundRecipient: null,
+        providerRandomnessAccount: randomnessUnstake.pubkey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: web3.SystemProgram.programId,
+        clock: web3.SYSVAR_CLOCK_PUBKEY,
+      } as any)
+      .instruction();
+    const { signature: settleSig, logs: settleLogs, err: settleErr } = await sendVersionedWithLut(
+      [unstakeRevealIx, settleUnstakeIx],
+      [payer],
+    );
+    if (settleErr) {
+      console.error("settle_unstake logs:", settleLogs.slice(-10));
+      throw new Error(`unstake reveal+settle failed: ${JSON.stringify(settleErr)}`);
+    }
+    if (settleErr) throw new Error(`unstake reveal+settle failed: ${JSON.stringify(settleErr)}`);
+    console.log("settle_unstake sig:", settleSig);
+
+    const settleTxInfo = await provider.connection.getTransaction(settleSig, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+    });
+    console.log("settle_unstake CU consumed:", settleTxInfo?.meta?.computeUnitsConsumed);
+    console.log("settle preTokenBalances:", JSON.stringify(settleTxInfo?.meta?.preTokenBalances));
+    console.log("settle postTokenBalances:", JSON.stringify(settleTxInfo?.meta?.postTokenBalances));
+
+    // 5. Capture randomness and assert common mapping parity.
+    const unstakeData = await randomnessUnstake.loadData();
+    const randomOutput = unstakeData.value as Uint8Array;
+    const unstakeNonce = afterRequestPos.pendingActionNonce.toNumber();
+    const unstakeCtx = {
+      randomOutput,
+      domain: RandomnessDomain.UnstakeTheft,
+      position: action.position.toBytes(),
+      actionNonce: BigInt(unstakeNonce),
+    };
+    const expectedStolen = mapUnstakeTheftFlag(unstakeCtx);
+    console.log("Unstake randomOutput:", Buffer.from(randomOutput).toString("hex"));
+    console.log("expected stolen:", expectedStolen);
+
+    const finalPos = await (rodeoCoreProgram.account as any).position.fetchNullable(action.position);
+    expect(finalPos).toBeNull();
+
+    const ggsAfter = await (rodeoCoreProgram.account as any).globalGameState.fetch(globalGameState);
+    const bullsAfter = (ggsAfter.totalActiveBullPower as BN).toNumber();
+    expect(bullsAfter).toBe(bullsBefore);
+
+    // 6. Assert RODEO economics using settle tx token balances (RPC caches can lag).
+    const settleMeta = settleTxInfo?.meta;
+    if (!settleMeta) throw new Error("settle_unstake transaction meta missing");
+    const findRodeoBalance = (balances: any[]) =>
+      BigInt(balances.find((b: any) => b.mint === rodeoMint.toBase58() && b.owner === payer.publicKey.toBase58())?.uiTokenAmount.amount ?? "0");
+    const findPrincipalBalance = (balances: any[]) =>
+      BigInt(balances.find((b: any) => b.mint === rodeoMint.toBase58() && b.owner === globalConfig.toBase58())?.uiTokenAmount.amount ?? "0");
+    const preRodeo = findRodeoBalance(settleMeta.preTokenBalances ?? []);
+    const postRodeo = findRodeoBalance(settleMeta.postTokenBalances ?? []);
+    const prePrincipal = findPrincipalBalance(settleMeta.preTokenBalances ?? []);
+    const postPrincipal = findPrincipalBalance(settleMeta.postTokenBalances ?? []);
+    const stakeAmountAtomic = prePrincipal - postPrincipal;
+    const returned = postRodeo - preRodeo;
+    const burned = stakeAmountAtomic - returned;
+    console.log("pre  owner RODEO:", preRodeo.toString(), "principal:", prePrincipal.toString());
+    console.log("post owner RODEO:", postRodeo.toString(), "principal:", postPrincipal.toString());
+    console.log("stake:", stakeAmountAtomic.toString(), "returned:", returned.toString(), "burned:", burned.toString());
+
+    expect(stakeAmountAtomic).toBe(100_000_000_000n);
+    expect(returned).toBe(95_000_000_000n);
+    expect(burned).toBe(5_000_000_000n);
+
+    // 7. Assert ANSEM destination: owner should receive ALL synchronized ANSEM.
+    //    The position had no accrued ANSEM in this isolated devnet run, so the
+    //    owner ANSEM balance is unchanged and bull pool liability is untouched.
+    const ownerAnsemAfter = (await provider.connection.getTokenAccountBalance(payerAnsemAccount)).value.uiAmount ?? 0;
+    console.log("owner ANSEM before:", ownerAnsemBefore, "after:", ownerAnsemAfter);
+    expect(ownerAnsemAfter).toBeCloseTo(ownerAnsemBefore, 4);
+
+    // 8. Verify receipt and proof state are cleaned up.
+    const receiptAfter = await provider.connection.getAccountInfo(action.receiptAsset);
+    // MPL Core burn/tombstone leaves a small tombstone account (space 1, ~2.4M lamports), not null.
+    expect(receiptAfter).toBeTruthy();
+    expect(receiptAfter!.data?.length ?? 0).toBe(1);
+    expect(receiptAfter!.lamports).toBeLessThan(3_000_000);
+    const pendingAfter = await provider.connection.getAccountInfo(pendingRandomnessUnstake);
+    expect(pendingAfter).toBeNull();
+
+    // 9. Replay: attempt the same settleUnstake again.
+    const { logs: replayLogs, err: replayErr } = await sendVersionedWithLut([unstakeRevealIx, settleUnstakeIx], [payer]);
+    console.log("replay rejection logs:", replayLogs.slice(-6));
+    expect(replayErr).toBeTruthy();
+
+    console.log("post real-unstake balance:", await fetchBalance(), "SOL");
+  }, 300_000);
+
+  it("creates a real active position and records 24-hour Unstake eligibility", async () => {
+    console.log("pre active-position balance:", await fetchBalance(), "SOL");
+
+    const ggsBefore = await (rodeoCoreProgram.account as any).globalGameState.fetch(globalGameState);
+    const startingNextPositionId = (ggsBefore.nextPositionId as BN).toNumber();
+
+    let activePosition: {
+      position: web3.PublicKey;
+      positionId: BN;
+      pendingRandomness: web3.PublicKey;
+      receiptAsset: web3.PublicKey;
+      receiptFunder: web3.PublicKey;
+      stakeSig: string;
+      revealSettleSig: string;
+      randomness: sb.Randomness;
+    } | undefined;
+
+    const maxAttempts = 5;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const randomness = await createAndCommitRandomness();
+      const action = await deriveNextPositionAccounts();
+
+      const stakeIx = await rodeoCoreProgram.methods
+        .stakeAndCommit(action.positionId, new BN(100_000_000_000))
+        .accounts({
+          owner: payer.publicKey,
+          ownerRodeoTokenAccount: payerRodeoAccount,
+          globalConfig,
+          protocolConfig,
+          principalVault,
+          position: action.position,
+          pendingRandomness: action.pendingRandomness,
+          rewardState,
+          globalGameState,
+          bullRegistry,
+          receiptFunder: action.receiptFunder,
+          providerRandomnessAccount: randomness.pubkey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        } as any)
+        .instruction();
+      const stakeSig = await sendIx(provider, stakeIx, [payer]);
+
+      const revealIx = await randomness.revealIx(payer.publicKey);
+      const settleIx = await rodeoCoreProgram.methods
+        .settleReveal()
+        .accounts({
+          ...settleRevealAccounts({
+            position: action.position,
+            pendingRandomness: action.pendingRandomness,
+            receiptAsset: action.receiptAsset,
+            receiptFunder: action.receiptFunder,
+            providerRandomnessAccount: randomness.pubkey,
+          }),
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        } as any)
+        .instruction();
+
+      const combinedTx = await sb.asV0Tx({
+        connection: provider.connection,
+        ixs: [revealIx, settleIx],
+        signers: [payer],
+        computeUnitPrice: 10_000,
+        computeUnitLimitMultiple: 1.3,
+      });
+      const { signature: combinedSig, logs, err } = await sendTransactionWithLogs(combinedTx, [payer]);
+
+      if (err) {
+        const isBull =
+          logs.some((m: string) => m.includes("BullProofBufferIncomplete")) ||
+          (err.InstructionError && err.InstructionError[1]?.Custom === 6091) ||
+          JSON.stringify(err).includes("6091");
+        if (isBull) {
+          console.log(`Attempt ${attempt + 1}: Bull outcome requires proof buffer; recovering...`);
+          await sleep(3_000);
+          const recoverIx = await rodeoCoreProgram.methods
+            .recoverRevealTimeout()
+            .accounts({
+              caller: payer.publicKey,
+              position: action.position,
+              pendingRandomness: action.pendingRandomness,
+              globalConfig,
+              principalVault,
+              ownerRodeoAccount: payerRodeoAccount,
+              owner: payer.publicKey,
+              globalGameState,
+              receiptFunder: action.receiptFunder,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              systemProgram: web3.SystemProgram.programId,
+              clock: web3.SYSVAR_CLOCK_PUBKEY,
+            } as any)
+            .instruction();
+          const recoverSig = await sendIx(provider, recoverIx, [payer]);
+          console.log(`Attempt ${attempt + 1}: recovered via`, recoverSig);
+          continue;
+        }
+        throw new Error(`reveal+settle failed: ${JSON.stringify(err)}\nlogs: ${JSON.stringify(logs)}`);
+      }
+
+      console.log(`Attempt ${attempt + 1}: settled position ${action.position.toBase58()} as active`);
+      console.log("reveal+settle sig:", combinedSig);
+      activePosition = {
+        position: action.position,
+        positionId: action.positionId,
+        pendingRandomness: action.pendingRandomness,
+        receiptAsset: action.receiptAsset,
+        receiptFunder: action.receiptFunder,
+        stakeSig,
+        revealSettleSig: combinedSig,
+        randomness,
+      };
+      break;
+    }
+
+    expect(activePosition).toBeDefined();
+
+    const pos = await (rodeoCoreProgram.account as any).position.fetch(activePosition!.position);
+    expect(pos.status).toMatchObject({ active: {} });
+    expect(pos.pendingActionActive).toBe(false);
+    expect(pos.unstakeEligibleAt.toNumber()).toBe(pos.activeSince.toNumber() + 86_400);
+
+    const pending = await provider.connection.getAccountInfo(activePosition!.pendingRandomness);
+    expect(pending).toBeNull();
+
+    const receiptInfo = await provider.connection.getAccountInfo(activePosition!.receiptAsset);
+    expect(receiptInfo).not.toBeNull();
+
+    const randomnessData = await activePosition!.randomness.loadData();
+    const randomOutput = randomnessData.value as Uint8Array;
+    const actionNonce = 0n;
+    const role = mapRole({ randomOutput, domain: RandomnessDomain.Role, position: activePosition!.position.toBytes(), actionNonce });
+    const rank = mapCowboyKind({ randomOutput, domain: RandomnessDomain.CowboyKind, position: activePosition!.position.toBytes(), actionNonce });
+    const suit = mapSuit({ randomOutput, domain: RandomnessDomain.Suit, position: activePosition!.position.toBytes(), actionNonce });
+
+    const activeSince = new Date(pos.activeSince.toNumber() * 1000).toISOString();
+    const unstakeEligibleAt = new Date(pos.unstakeEligibleAt.toNumber() * 1000).toISOString();
+
+    console.log("=== ACTIVE POSITION RECORD ===");
+    console.log("positionId:", activePosition!.positionId.toString());
+    console.log("position:", activePosition!.position.toBase58());
+    console.log("owner:", pos.owner.toBase58());
+    console.log("role:", role);
+    console.log("rank:", rank);
+    console.log("suit:", suit);
+    console.log("stakeAndCommit sig:", activePosition!.stakeSig);
+    console.log("reveal+settle sig:", activePosition!.revealSettleSig);
+    console.log("randomOutput:", Buffer.from(randomOutput).toString("hex"));
+    console.log("activeSince:", activeSince);
+    console.log("unstakeEligibleAt:", unstakeEligibleAt);
+    console.log("receiptAsset:", activePosition!.receiptAsset.toBase58());
+    console.log("receiptFunder:", activePosition!.receiptFunder.toBase58());
+    console.log("==============================");
+
+    lastPosition = activePosition!.position;
+    lastRandomness = activePosition!.randomness;
+    lastReceiptAsset = activePosition!.receiptAsset;
+
+    const ggsAfter = await (rodeoCoreProgram.account as any).globalGameState.fetch(globalGameState);
+    const endingNextPositionId = (ggsAfter.nextPositionId as BN).toNumber();
+    console.log("nextPositionId before:", startingNextPositionId, "after:", endingNextPositionId);
+    console.log("post active-position balance:", await fetchBalance(), "SOL");
+  }, 300_000);
 });

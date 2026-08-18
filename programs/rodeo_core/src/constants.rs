@@ -17,6 +17,9 @@ pub const POT_FILL_SECONDS: i64 = 12 * 60 * 60;
 pub const SUIT_EPOCH_DAYS: u64 = 7;
 pub const SUIT_EPOCHS: u64 = SUIT_EPOCH_DAYS * 24 * 60 * 60 / (EPOCH_DURATION_SECONDS as u64);
 
+#[cfg(feature = "test-short-min-stake")]
+pub const MIN_STAKE_SECONDS: i64 = 10;
+#[cfg(not(feature = "test-short-min-stake"))]
 pub const MIN_STAKE_SECONDS: i64 = 24 * 60 * 60;
 
 #[cfg(feature = "test-short-claim-cooldown")]
@@ -209,3 +212,8 @@ const _: () = assert!(POT_FILL_SECONDS == 2);
 const _: () = assert!(CLAIM_COOLDOWN_SECONDS == 60 * 60);
 #[cfg(feature = "test-short-claim-cooldown")]
 const _: () = assert!(CLAIM_COOLDOWN_SECONDS == 2);
+
+#[cfg(not(feature = "test-short-min-stake"))]
+const _: () = assert!(MIN_STAKE_SECONDS == 24 * 60 * 60);
+#[cfg(feature = "test-short-min-stake")]
+const _: () = assert!(MIN_STAKE_SECONDS == 10);

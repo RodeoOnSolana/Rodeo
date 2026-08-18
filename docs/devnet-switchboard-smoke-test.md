@@ -15,7 +15,7 @@ paths succeeded.
 
 | Item | Value |
 |------|-------|
-| Canonical production `rodeo_core` program ID | `EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z` |
+| Canonical production `rodeo_core` program ID | `CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA` |
 | Temporary devnet `rodeo_core` program ID | `EHaQcMmf9AtbCSLYct9ZoGwoLfGkb9B64nYCqRpM86ks` |
 | Devnet payer/deployer wallet (public key only) | `FFZwNMcRoMBu75kP8fpQJKPMubtQSPepPyKfFTvzkSQ6` |
 | Switchboard On-Demand Rust crate | `switchboard-on-demand` `0.13.0` |
@@ -193,17 +193,9 @@ After the timeout recovery closed the action, a separate, freshly fulfilled Swit
 
 Security property: **no valid Switchboard result can resurrect a recovered Rodeo action** — the old action remains dead.
 
-### Real-provider Unstake gate: blocked by build configuration
+### Real-provider Unstake gate: completed on a new short-min-stake deployment
 
-The `FRuP...` binary was built with `test-short-timeout` only. `MIN_STAKE_SECONDS` remains the production `86_400` (24 hours). `request_unstake` therefore rejects new positions with `MinimumStakePeriodNotMet` immediately after reveal. A real-provider Unstake cannot be completed on this deployment without waiting a full day (or adding a `test-short-unstake-age` feature and redeploying).
-
-Cheapest safe approach to complete the Unstake gate:
-
-1. Add a new feature (e.g. `test-short-min-stake`) that lowers `MIN_STAKE_SECONDS` to a few seconds in `constants.rs`.
-2. Build and deploy a fresh temp binary (costs ~8.1 devnet SOL).
-3. Re-run the Unstake and replay tests against the new deployment.
-
-Because the user explicitly prohibited redeploying the current `FRuP...` binary and the remaining wallet balance is insufficient for another full program deploy, the Unstake gate is not exercised in this run.
+The `FRuP...` binary was built with `test-short-timeout` only and `MIN_STAKE_SECONDS = 86_400` (24 hours). To complete the real-provider Unstake gate without waiting a full day, a new isolated temporary deployment was created with an additional `test-short-min-stake` feature that lowers `MIN_STAKE_SECONDS` to 10 seconds. The `FRuP...` program was closed after the new deployment produced the Unstake evidence. See the Third run below for the complete Unstake chronology.
 
 ### Devnet SOL balance (this run)
 
@@ -216,8 +208,82 @@ Because the user explicitly prohibited redeploying the current `FRuP...` binary 
 ### Net cost summary (second run only)
 
 * Transaction/oracle rent fees consumed: ~0.04943 SOL
-* Program deployment rent still locked: ~8.13577368 SOL
-* Program not yet closed because the Unstake gate is incomplete
+* `FRuP...` deployment rent reclaimed: **8.13577368 SOL** (closed after Unstake evidence was captured)
+
+## Third run: real-provider Unstake with short-min-stake
+
+This run used a fresh temporary deployment `AqV3NnU4GhCWreAnmqnyRaXjjii9DcmrqWjf4vcZEqM7` with the `test-short-min-stake` compile-time feature enabled. It exercised the complete real-provider Reveal → Active → `request_unstake` → Switchboard reveal → `settle_unstake` lifecycle.
+
+### Deployment preflight
+
+|| Item | Value |
+|------|-------|
+|| Temp `rodeo_core` program ID | `AqV3NnU4GhCWreAnmqnyRaXjjii9DcmrqWjf4vcZEqM7` |
+|| ProgramData address | `3EDih58fQVdYDgi76Cy8DaY9zBWGmtveJ8F4P1Re57ai` |
+|| Devnet payer/deployer | `FFZwNMcRoMBu75kP8fpQJKPMubtQSPepPyKfFTvzkSQ6` |
+|| Deployed binary SHA256 | `7524e81d0c320afe83dbf80cb1be6086dea074b7b62c83a0a0166f8935378f39` |
+|| Build features | `test-short-timeout`, `test-short-min-stake` |
+|| `mock-randomness` | disabled |
+|| `test-fixtures` | disabled |
+|| Production `MIN_STAKE_SECONDS` | `86_400` (unchanged in default build) |
+|| Shortened `MIN_STAKE_SECONDS` | `10` seconds (test feature only) |
+
+### Unstake chronology
+
+|| Step | Signature | Notes |
+|------|-----------|-------|
+|| stakeAndCommit | `5i6NR2PEi2ZQhFYw94YNueNqFH4VQxf2TnzgoXReYJaZnPsqy3EUnijaNaxyxhpMLy46xEeT1jPcKQxSdgbhKEXL` | Created Position with 100 RODEO principal |
+|| reveal+settle | `1LTdCENyxGWBpcaBCQk9uBXz1KqiS6KRbWDfuPTHbodCUZ7RcTJ5JEZVDVYAVbUwsrts2vrKPRC2LPV3vij3FKj` | Settled as Cowboy; CU: 128,338 |
+|| request_unstake | `33vaDUMsdK7N1bmN5E9mX4sRNRihf7Tx74qufpkPjJznEiyoTyF3bDFxDCkZ7euFY24QTCfoeedSkEm2ZYrjYAJC` | Opened Unstake PendingRandomness |
+|| settle_unstake | `Ak4Ysk3Yn5LKyehTS2mmabHL8xpmpdymppH4owjsRsrhRLcrQLxhT86rg4UnbGaoKHPWzRyjQmExiNJkev5TnoS` | Real Switchboard reveal + settle; CU: 114,630 |
+
+### Settle result
+
+* Position: closed
+* Role: Cowboy
+* `activeSince`: `1787029393`
+* `unstakeEligibleAt`: `1787029403` (10 seconds later, via `test-short-min-stake`)
+* Switchboard random output (hex): `86f4aec00c7985c09f24190dff7d5e82738742340721d5719ba4ca1257d860a0`
+* Expected Unstake theft: `false`
+* ANSEM fate: ToOwner
+
+### Economics
+
+Using the historical `unstake_return_bps = 9_500` and `unstake_tax_bps = 500`:
+
+* Principal staked: `100,000,000,000` atomic (`100` RODEO)
+* RODEO returned to owner: `95,000,000,000` atomic (`95` RODEO)
+* RODEO burned: `5,000,000,000` atomic (`5` RODEO)
+* ANSEM paid to owner: `0` (no accrued rewards in this isolated run)
+* ANSEM routed to Bull pool: `0`
+* BullRegistry: unchanged
+
+### Lifecycle and replay
+
+* `Position` account: **closed (null)**
+* `PendingRandomness` account: **closed (null)**
+* `ReceiptFunder` account: **closed (null)**
+* `PositionReceipt` asset: **burned/tombstoned** (MPL Core leaves a 1-byte tombstone, ~2.4M lamports)
+* `BullRegistry`: unchanged
+* Replay attempt: rejected because the `pending_randomness` account and `position` no longer exist
+
+### Devnet SOL balance (this run)
+
+* Wallet balance before Unstake test: **2.813841585 SOL**
+* Wallet balance after Unstake test: **2.778537636 SOL**
+* Program close `AqV3...` reclaimed: **8.13577368 SOL**
+* Program close `FRuP...` reclaimed: **8.13577368 SOL**
+* Final wallet balance: **19.050074996 SOL**
+
+### Net cost summary
+
+|| Category | SOL |
+|----------|-----|
+|| PROGRAM RENT LOCKED | 16.27154736 |
+|| PROGRAM RENT RECLAIMED | 16.27154736 |
+|| ORACLE / TX / NONREFUNDABLE COSTS | 8.493994863 |
+|| OTHER RENT LOST | 0 |
+|| NET SOL CONSUMED | 8.493994863 |
 
 ## Files
 
