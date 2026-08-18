@@ -115,6 +115,7 @@ jobs:
 
       - name: Start solana-test-validator
         run: |
+          set -euo pipefail
           mkdir -p .anchor/test-ledger
           pkill -f solana-test-validator || true
           sleep 1
@@ -124,6 +125,8 @@ jobs:
             --reset \
             --quiet \
             --bind-address 127.0.0.1 \
+            --rpc-port 8899 \
+            --faucet-port 9900 \
             --limit-ledger-size 100000 \
             --mint 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \
             --bpf-program CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d vendor/mpl-core/mpl_core_program.so \
@@ -134,7 +137,7 @@ jobs:
           echo "solana-test-validator PID: $!"
           echo "TEST_VALIDATOR_PID=$!" >> "$GITHUB_ENV"
           for i in $(seq 1 60); do
-            if solana block-height > /dev/null 2>&1; then
+            if curl -sS --max-time 2 http://127.0.0.1:8899 -X POST -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' 2>/dev/null | grep -q ok; then
               echo "Validator ready after ${i}s"
               break
             fi
@@ -145,6 +148,8 @@ jobs:
             fi
             sleep 1
           done
+          solana airdrop 1000 "${PAYER_PUBKEY}" --url http://127.0.0.1:8899
+          solana balance "${PAYER_PUBKEY}" --url http://127.0.0.1:8899
 
       - name: Run focused sparse-tree SBF benchmark
         run: RODEO_TEST_SUITE=benchmark anchor test --skip-build --skip-local-validator --skip-deploy
