@@ -958,7 +958,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
   async function settleReveal(
     positionId: BN,
     settler = payer,
-    bullProof?: { bufferPda: web3.PublicKey; refundRecipient: web3.PublicKey },
+    bullProof?: { bufferPda: web3.PublicKey; refundRecipient: web3.PublicKey } | null,
   ) {
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
     const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
@@ -985,7 +985,10 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     // threshold, and the full five-section payload when mint theft is selected.
     let effectiveBullProof = bullProof;
     let autoStagedBullProof = false;
-    if (!effectiveBullProof && expectedRevealRole(position, pendingRandomnessAccount.actionNonce, pendingRandomnessAccount.committedProtocolEpoch) === "bull") {
+    if (
+      effectiveBullProof === undefined &&
+      expectedRevealRole(position, pendingRandomnessAccount.actionNonce, pendingRandomnessAccount.committedProtocolEpoch) === "bull"
+    ) {
       await syncTrackerWithChain();
       const { payload } = await buildRevealPayloadForPosition(position, pos, pendingRandomnessAccount);
       const payloadBytes = serializeBullProofPayload(payload);
@@ -1058,6 +1061,24 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       bullRegistryTracker.registerBull(settledPos.owner, actualBull);
     }
   }
+  }
+
+  async function fixtureSetCompletedReveals(total: number) {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    await rodeoCoreProgram.methods
+      .testFixtureSetGlobalGameState(
+        new BN(total),
+        game.nextPositionId,
+        game.activeBullCount,
+        game.totalActiveBullPower,
+      )
+      .accounts({
+        authority: payer.publicKey,
+        globalConfig,
+        globalGameState,
+      })
+      .signers([payer])
+      .rpc();
   }
 
   async function recoverRevealTimeout(positionId: BN, caller = payer, owner = payer) {
@@ -5499,5 +5520,73 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         .rpc(),
     ).rejects.toThrow();
   }, 120_000);
+
+  describe("Focused reveal proof requirements", () => {
+    it("proofless pre-threshold non-Desperado Cowboy settles with null buffer and refund recipient", async () => {
+      const { positionId } = await findCowboyPosition(5);
+      const { position } = await stakeAndCommit(positionId);
+      await fixtureSetCompletedReveals(0);
+      await settleReveal(positionId, payer, null);
+      const settled = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+      expect(settled.role.cowboy).toBeTruthy();
+      expect(settled.pendingActionActive).toBe(false);
+    }, 90_000);
+
+    it("pre-threshold Bull without a BullProofBuffer is rejected", async () => {
+      const { positionId } = await findBullPosition();
+      await stakeAndCommit(positionId);
+      await fixtureSetCompletedReveals(0);
+      await expect(settleReveal(positionId, payer, null)).rejects.toThrow(
+        /BullProofBufferIncomplete/,
+      );
+    }, 90_000);
+
+    it("pre-threshold Bull with a correct current-insertion proof settles", async () => {
+      const { positionId } = await findBullPosition();
+      const { position } = await stakeAndCommit(positionId);
+      await fixtureSetCompletedReveals(0);
+      await settleReveal(positionId, payer);
+      const settled = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+      expect(settled.role.bull).toBeTruthy();
+      expect(settled.pendingActionActive).toBe(false);
+    }, 90_000);
+
+    it("post-threshold Cowboy without a historical victim proof is rejected", async () => {
+      const { positionId } = await findCowboyPosition(5);
+      const { position } = await stakeAndCommit(positionId);
+      await fixtureSetCompletedReveals(50);
+      await expect(settleReveal(positionId, payer, null)).rejects.toThrow(
+        /BullProofBufferIncomplete/,
+      );
+    }, 90_000);
+
+    it("post-threshold Cowboy with a canonical historical victim proof settles", async () => {
+      const { positionId } = await findCowboyPosition(5);
+      const { position, pendingRandomness } = await stakeAndCommit(positionId);
+      await fixtureSetCompletedReveals(50);
+      await syncTrackerWithChain();
+      const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+      const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
+      const { payload } = await buildRevealPayloadForPosition(position, pos, pending);
+      const payloadBytes = serializeBullProofPayload(payload);
+      const staged = await stageBullProofBuffer(
+        rodeoCoreProgram,
+        globalConfig,
+        position,
+        pendingRandomness,
+        payer,
+        new BN(1),
+        { reveal: {} },
+        payloadBytes,
+      );
+      await settleReveal(positionId, payer, {
+        bufferPda: staged.bufferPda,
+        refundRecipient: staged.refundRecipient,
+      });
+      const settled = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+      expect(settled.role.cowboy).toBeTruthy();
+      expect(settled.pendingActionActive).toBe(false);
+    }, 120_000);
+  });
 
 });
