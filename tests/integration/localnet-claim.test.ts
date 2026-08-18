@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Idl } from "@coral-xyz/anchor";
 import {
@@ -556,7 +556,11 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     // Build the canonical reveal payload deterministically before settlement.
     // This covers pre-theft Bull insertion, historical mint-theft, and the
     // combined five-section payload when both are required.
-    const { payload } = await buildRevealPayloadForPosition(position, pos, pending);
+    const { payload, finalOwner, stolen, selectedBull } = await buildRevealPayloadForPosition(
+      position,
+      pos,
+      pending,
+    );
     const payloadBytes = serializeBullProofPayload(payload);
 
     const nonce = new BN(1);
@@ -587,10 +591,58 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     const playerBalanceBeforeSettle = await getLamportBalance(provider, player.publicKey);
 
     // Call production settleReveal with real BullProofBuffer and independent prover/refund
-    await settleReveal(positionId, player, {
-      bufferPda: staged.bufferPda,
-      refundRecipient: staged.refundRecipient,
-    });
+    try {
+      await settleReveal(positionId, player, {
+        bufferPda: staged.bufferPda,
+        refundRecipient: staged.refundRecipient,
+      });
+    } catch (e: any) {
+      const historicalRegistry = buildHistoricalRegistry(position);
+      const currentRegistry = bullRegistryTracker.buildRegistry();
+      const trace = {
+        positionId: pos.positionId.toString(),
+        position: position.toBase58(),
+        prospectiveOwner: pos.owner.toBase58(),
+        actionNonce: pending.actionNonce.toString(),
+        configVersion: pending.configVersionSnapshot.toString(),
+        committedProtocolEpoch: pending.committedProtocolEpoch.toString(),
+        historicalRoot: Buffer.from(historicalRegistry.rootNode.hash).toString("hex"),
+        historicalCount: historicalRegistry.rootNode.count.toString(),
+        historicalPower: historicalRegistry.rootNode.power.toString(),
+        currentRoot: Buffer.from(currentRegistry.rootNode.hash).toString("hex"),
+        currentCount: currentRegistry.rootNode.count.toString(),
+        currentPower: currentRegistry.rootNode.power.toString(),
+        predictedRole: expectedRevealRole(position, pending.actionNonce, pending.committedProtocolEpoch),
+        bullTier: pos.bullTier.toString(),
+        bullPower: pos.buckPower.toString(),
+        mintTheftStolen: stolen,
+        finalOwner: finalOwner.toBase58(),
+        selectedBullPosition: selectedBull ? selectedBull.position.toBase58() : null,
+        selectedBullOwner: selectedBull ? selectedBull.owner.toBase58() : null,
+        selectedBullPower: selectedBull ? selectedBull.buckPower.toString() : null,
+        sectionBitmap: payload.sectionBitmap,
+        sections: {
+          victimOwner: payload.victimOwner !== null,
+          selectedOwner: payload.selectedOwner !== null,
+          selectedBull: payload.selectedBull !== null,
+          currentOwner: payload.currentOwner !== null,
+          currentBull: payload.currentBull !== null,
+          removeBull: payload.removeBull !== null,
+        },
+        payloadLength: payloadBytes.length,
+      };
+      const dump = {
+        trace,
+        error: String(e),
+        logs: (e as any).logs ?? (e as any).simulationResponse?.logs ?? null,
+      };
+      const tracePath = `/tmp/reveal-bull-trace-${pos.positionId.toString()}.json`;
+      writeFileSync(tracePath, JSON.stringify(dump, null, 2));
+      console.error("REVEAL_BULL_TRACE:", JSON.stringify(trace, null, 2));
+      console.error("REVEAL_BULL_ERROR:", e);
+      console.error("REVEAL_BULL_LOGS:", e.logs ?? e.simulationResponse?.logs ?? null);
+      throw e;
+    }
 
     // Fetch settled position and update tracker with the actual buck power and
     // final owner the protocol assigned from randomness.
@@ -933,7 +985,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     // threshold, and the full five-section payload when mint theft is selected.
     let effectiveBullProof = bullProof;
     let autoStagedBullProof = false;
-    if (!effectiveBullProof && expectedRevealRole(position) === "bull") {
+    if (!effectiveBullProof && expectedRevealRole(position, pendingRandomnessAccount.actionNonce, pendingRandomnessAccount.committedProtocolEpoch) === "bull") {
       await syncTrackerWithChain();
       const { payload } = await buildRevealPayloadForPosition(position, pos, pendingRandomnessAccount);
       const payloadBytes = serializeBullProofPayload(payload);
@@ -1287,13 +1339,44 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     if (!positionId.eq(game.nextPositionId)) {
       await fixtureAdvanceNextPositionId(positionId);
     }
-    await stakeAndCommit(positionId);
-    if (expectedRevealRole(position) === "bull") {
-      // Production Bull reveals require a staged BullProofBuffer. Stage it and
-      // let revealBullWithProof update the off-chain tracker.
-      await revealBullWithProof(positionId, payer, payer);
-    } else {
-      await settleReveal(positionId);
+    const { pendingRandomness } = await stakeAndCommit(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
+
+    // Always stage the canonical reveal payload.  It may be empty for a Cowboy
+    // before the theft threshold, but once the threshold is crossed every reveal
+    // needs at least a victim-owner historical proof.
+    await syncTrackerWithChain();
+    const { payload } = await buildRevealPayloadForPosition(position, pos, pending);
+    const payloadBytes = serializeBullProofPayload(payload);
+    const staged = await stageBullProofBuffer(
+      rodeoCoreProgram,
+      globalConfig,
+      position,
+      pendingRandomness,
+      payer,
+      new BN(1),
+      { reveal: {} },
+      payloadBytes,
+    );
+
+    await settleReveal(positionId, payer, {
+      bufferPda: staged.bufferPda,
+      refundRecipient: staged.refundRecipient,
+    });
+
+    // Update the off-chain tracker only when the chain confirms a Bull.
+    const posAfter = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    if (posAfter.role.bull) {
+      const actualBull: BullLeaf = {
+        position,
+        positionId: BigInt(positionId.toString()),
+        owner: posAfter.owner,
+        buckPower: posAfter.buckPower,
+        revealConfigVersion: BigInt(posAfter.revealConfigVersion.toString()),
+      };
+      bullRegistryTracker.registerBull(posAfter.owner, actualBull);
+      await assertTrackerMatchesChain();
     }
   }
 
@@ -1418,27 +1501,37 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     return new Uint8Array(createHash("sha256").update(preimage).digest());
   }
 
-  function expectedRevealRole(position: web3.PublicKey, config = PROTOCOL_CONFIG_V1): "cowboy" | "bull" {
-    const randomOutput = deriveMockCommitment(position, 0, new BN(0), new BN(0));
+  function expectedRevealRole(
+    position: web3.PublicKey,
+    actionNonce: BN,
+    protocolEpoch: BN,
+    config = PROTOCOL_CONFIG_V1,
+  ): "cowboy" | "bull" {
+    const randomOutput = deriveMockCommitment(position, 0, actionNonce, protocolEpoch);
     return mapRole(
       {
         randomOutput,
         domain: RandomnessDomain.Role,
         position: position.toBuffer(),
-        actionNonce: 0n,
+        actionNonce: BigInt(actionNonce.toString()),
       },
       config,
     ) as "cowboy" | "bull";
   }
 
-  function expectedCowboyKind(position: web3.PublicKey, config = PROTOCOL_CONFIG_V1): string {
-    const randomOutput = deriveMockCommitment(position, 0, new BN(0), new BN(0));
+  function expectedCowboyKind(
+    position: web3.PublicKey,
+    actionNonce: BN,
+    protocolEpoch: BN,
+    config = PROTOCOL_CONFIG_V1,
+  ): string {
+    const randomOutput = deriveMockCommitment(position, 0, actionNonce, protocolEpoch);
     return mapCowboyKind(
       {
         randomOutput,
         domain: RandomnessDomain.CowboyKind,
         position: position.toBuffer(),
-        actionNonce: 0n,
+        actionNonce: BigInt(actionNonce.toString()),
       },
       config,
     );
@@ -1738,17 +1831,22 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     maxAttempts = 1000,
   ): Promise<{ positionId: BN; position: web3.PublicKey; role: string; cowboyKind: string; stolen: boolean }> {
     const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     let candidate = game.nextPositionId.toNumber();
     for (let i = 0; i < maxAttempts; i++) {
       const positionId = new BN(candidate);
       const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
-      const role = expectedRevealRole(position);
+      const role = expectedRevealRole(position, new BN(0), reward.currentEpoch);
       if (role !== "cowboy") {
         candidate++;
         continue;
       }
-      const cowboyKind = expectedCowboyKind(position);
-      const stolen = expectedUnstakeTheftFlag(position, new BN(1), new BN(0));
+      const cowboyKind = expectedCowboyKind(position, new BN(0), reward.currentEpoch);
+      const stolen = expectedUnstakeTheftFlag(
+        position,
+        new BN(1),
+        reward.currentEpoch,
+      );
       if (predicate(positionId, position, role, cowboyKind, stolen)) {
         nextPositionId = candidate + 1;
         return { positionId, position, role, cowboyKind, stolen };
@@ -1760,11 +1858,21 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
 
   async function findBullPosition(maxAttempts = 100): Promise<{ positionId: BN; position: web3.PublicKey }> {
     const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     let candidate = game.nextPositionId.toNumber();
     for (let i = 0; i < maxAttempts; i++) {
       const positionId = new BN(candidate);
       const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
-      if (expectedRevealRole(position) === "bull") {
+      const role = expectedRevealRole(position, new BN(0), reward.currentEpoch);
+      if (role === "bull") {
+        writeFileSync(
+          `/tmp/find-bull-position-${positionId.toString()}.json`,
+          JSON.stringify(
+            { position: position.toBase58(), protocolEpoch: reward.currentEpoch.toString(), actionNonce: "0", role },
+            null,
+            2,
+          ),
+        );
         nextPositionId = candidate + 1;
         return { positionId, position };
       }
@@ -1778,17 +1886,18 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     maxAttempts = 10000,
   ): Promise<{ positionId: BN; position: web3.PublicKey }> {
     const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     let candidate = game.nextPositionId.toNumber();
     const desiredKind =
       cowboyKindCode === 254 ? "desperado" : `rank${cowboyKindCode}`;
     for (let i = 0; i < maxAttempts; i++) {
       const positionId = new BN(candidate);
       const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
-      if (expectedRevealRole(position) !== "cowboy") {
+      if (expectedRevealRole(position, new BN(0), reward.currentEpoch) !== "cowboy") {
         candidate++;
         continue;
       }
-      if (expectedCowboyKind(position) === desiredKind) {
+      if (expectedCowboyKind(position, new BN(0), reward.currentEpoch) === desiredKind) {
         nextPositionId = candidate + 1;
         return { positionId, position };
       }
@@ -2471,15 +2580,16 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
 
     while (attempts < 20) {
       attempts++;
-      const prep = await prepareUnstakeReadyPosition(new BN(0));
+      const { positionId: candidate } = await findBullPosition();
+      const prep = await prepareUnstakeReadyPositionById(candidate, new BN(0));
       if (prep.role === "bull") {
-        positionId = prep.positionId;
+        positionId = candidate;
         settleInfo = await requestUnstake(positionId);
         break;
       }
       // Close non-bull positions to keep state consistent.
-      const { pendingRandomness, actionNonce } = await requestUnstake(prep.positionId);
-      await settleUnstake(prep.positionId, actionNonce);
+      const { pendingRandomness, actionNonce } = await requestUnstake(candidate);
+      await settleUnstake(candidate, actionNonce);
     }
 
     if (!positionId || !settleInfo) {
@@ -3002,6 +3112,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     randomOutput: Uint8Array;
   }> {
     const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     let candidate = game.nextPositionId.toNumber();
     for (let i = 0; i < maxAttempts; i++) {
       const positionId = new BN(candidate);
@@ -3010,12 +3121,12 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         globalConfig,
         positionId,
       );
-      const role = expectedRevealRole(position, PROTOCOL_CONFIG_V1);
+      const role = expectedRevealRole(position, new BN(0), reward.currentEpoch, PROTOCOL_CONFIG_V1);
       if (role !== "cowboy") {
         candidate++;
         continue;
       }
-      const cowboyKind = expectedCowboyKind(position, PROTOCOL_CONFIG_V1);
+      const cowboyKind = expectedCowboyKind(position, new BN(0), reward.currentEpoch, PROTOCOL_CONFIG_V1);
       if (cowboyKind === "desperado") {
         candidate++;
         continue;
@@ -3023,7 +3134,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       const v1Stolen = expectedUnstakeTheftFlag(
         position,
         new BN(1),
-        new BN(0),
+        reward.currentEpoch,
         PROTOCOL_CONFIG_V1,
       );
       if (v1Stolen) {
@@ -3033,7 +3144,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       const v2Stolen = expectedUnstakeTheftFlag(
         position,
         new BN(1),
-        new BN(0),
+        reward.currentEpoch,
         PROTOCOL_CONFIG_V2,
       );
       if (!v2Stolen) {
@@ -3041,7 +3152,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         continue;
       }
       nextPositionId = candidate + 1;
-      const randomOutput = deriveMockCommitment(position, 1, new BN(1), new BN(0));
+      const randomOutput = deriveMockCommitment(position, 1, new BN(1), reward.currentEpoch);
       return { positionId, position, randomOutput };
     }
     throw new Error("Could not find a V1-safe / V2-stolen Cowboy position");
@@ -3052,6 +3163,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     position: web3.PublicKey;
   }> {
     const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     let candidate = game.nextPositionId.toNumber();
     for (let i = 0; i < maxAttempts; i++) {
       const positionId = new BN(candidate);
@@ -3060,12 +3172,12 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         globalConfig,
         positionId,
       );
-      const role = expectedRevealRole(position, PROTOCOL_CONFIG_V2);
+      const role = expectedRevealRole(position, new BN(0), reward.currentEpoch, PROTOCOL_CONFIG_V2);
       if (role !== "cowboy") {
         candidate++;
         continue;
       }
-      const cowboyKind = expectedCowboyKind(position, PROTOCOL_CONFIG_V2);
+      const cowboyKind = expectedCowboyKind(position, new BN(0), reward.currentEpoch, PROTOCOL_CONFIG_V2);
       if (cowboyKind === "desperado") {
         candidate++;
         continue;
@@ -3073,7 +3185,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       const stolen = expectedUnstakeTheftFlag(
         position,
         new BN(1),
-        new BN(0),
+        reward.currentEpoch,
         PROTOCOL_CONFIG_V2,
       );
       if (!stolen) {
@@ -3421,6 +3533,9 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     );
 
     const payout = rewardAfterBull.ansemClaimedAtomic.sub(rewardBeforeBull.ansemClaimedAtomic);
+    const orphanedReleased = rewardAfterBull.orphanedRewardReleasedAtomic.sub(
+      rewardBeforeBull.orphanedRewardReleasedAtomic,
+    );
     expect(payout.toString()).toBe(expectedPayout.toString());
     expect(payout.gtn(0)).toBe(true);
 
@@ -3428,7 +3543,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       new BN(ownerAnsemBeforeBull.amount.toString()).add(payout).toString(),
     );
     expect(rewardAfterBull.totalAnsemLiabilityAtomic.toString()).toBe(
-      rewardBeforeBull.totalAnsemLiabilityAtomic.sub(payout).toString(),
+      rewardBeforeBull.totalAnsemLiabilityAtomic.sub(payout).sub(orphanedReleased).toString(),
     );
     expect(rewardAfterBull.recognizedRewardBalanceAtomic.toString()).toBe(
       rewardBeforeBull.recognizedRewardBalanceAtomic.sub(payout).toString(),
@@ -3437,7 +3552,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       rewardBeforeBull.positionClaimableLiabilityAtomic.toString(),
     );
     expect(rewardAfterBull.bullPoolLiabilityAtomic.toString()).toBe(
-      rewardBeforeBull.bullPoolLiabilityAtomic.sub(payout).toString(),
+      rewardBeforeBull.bullPoolLiabilityAtomic.sub(payout).sub(orphanedReleased).toString(),
     );
 
     expect(gameAfterBull.activeBullCount.toString()).toBe(
@@ -4891,26 +5006,23 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
 
     const { pendingRandomness } = await deriveStakeAccounts(positionId);
 
-    // Build and stage a valid real Bull proof buffer.  We do NOT call the helper
-    // that also settles, because the rollback test needs to inspect pre-failure
-    // state and then intentionally break the downstream CreateV2 payer.
+    // Build and stage a valid real reveal proof buffer.  We do NOT call the
+    // helper that also settles, because the rollback test needs to inspect
+    // pre-failure state and then intentionally break the downstream CreateV2 payer.
     await syncTrackerWithChain();
-    const bullLeaf: BullLeaf = {
-      position,
-      positionId: BigInt(positionId.toString()),
-      owner: player.publicKey,
-      buckPower: 0,
-      revealConfigVersion: 1n,
-    };
-    const staged = await stageRevealProofForBull(
+    const posForPayload = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
+    const { payload } = await buildRevealPayloadForPosition(position, posForPayload, pending);
+    const payloadBytes = serializeBullProofPayload(payload);
+    const staged = await stageBullProofBuffer(
       rodeoCoreProgram,
       globalConfig,
       position,
       pendingRandomness,
       prover,
       new BN(1),
-      bullRegistryTracker,
-      bullLeaf,
+      { reveal: {} },
+      payloadBytes,
     );
 
     // Capture pre-failure state explicitly.

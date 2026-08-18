@@ -5225,10 +5225,14 @@ fn resolve_mint_theft(
     let mut winning_bull_position = Pubkey::default();
 
     if completed_reveals >= config.min_reveals_for_theft {
-        let p = payload.ok_or(RodeoError::BullProofBufferIncomplete)?;
-        let victim_proof = p
-            .victim_owner()?
-            .ok_or(RodeoError::BullProofBufferIncomplete)?;
+        let p = payload.ok_or_else(|| {
+            msg!("BPI_RMT: payload_none");
+            RodeoError::BullProofBufferIncomplete
+        })?;
+        let victim_proof = p.victim_owner()?.ok_or_else(|| {
+            msg!("BPI_RMT: victim_owner_missing");
+            RodeoError::BullProofBufferIncomplete
+        })?;
         let (victim_count, victim_power, victim_prefix) = crate::borrowed_proof::verify_owner_ref(
             &pending_randomness.registry_root_snapshot,
             &prospective_owner,
@@ -5243,6 +5247,11 @@ fn resolve_mint_theft(
             victim_power,
         )?;
 
+        msg!(
+            "RMT_TRACE: prospective={} completed={} threshold={} victim_count={} victim_power={} victim_prefix={} external_count={} external_power={}",
+            prospective_owner, completed_reveals, config.min_reveals_for_theft, victim_count, victim_power, victim_prefix, external_count, external_power
+        );
+
         if external_count >= config.min_bulls_for_theft && external_power > 0 {
             let theft = probability::map_mint_theft_flag(
                 probability::RandomnessSampleContext {
@@ -5253,18 +5262,21 @@ fn resolve_mint_theft(
                 },
                 config,
             )?;
+            msg!("RMT_TRACE: mint_theft_flag={}", theft);
             if theft {
                 stolen = true;
-                let selected_owner = p
-                    .selected_owner()?
-                    .ok_or(RodeoError::BullProofBufferIncomplete)?;
-                let selected_bull = p
-                    .selected_bull()?
-                    .ok_or(RodeoError::BullProofBufferIncomplete)?;
-                require!(
-                    selected_owner.leaf.owner != prospective_owner,
+                let selected_owner = p.selected_owner()?.ok_or_else(|| {
+                    msg!("BPI_RMT: selected_owner_missing");
                     RodeoError::BullProofBufferIncomplete
-                );
+                })?;
+                let selected_bull = p.selected_bull()?.ok_or_else(|| {
+                    msg!("BPI_RMT: selected_bull_missing");
+                    RodeoError::BullProofBufferIncomplete
+                })?;
+                if selected_owner.leaf.owner == prospective_owner {
+                    msg!("BPI_RMT: selected_owner_is_victim");
+                    return err!(RodeoError::BullProofBufferIncomplete);
+                }
 
                 let owner_target = probability::rejection_sample_draw(
                     probability::RandomnessSampleContext {
@@ -5277,20 +5289,31 @@ fn resolve_mint_theft(
                 )?;
                 let safe_owner_target =
                     bull_registry::skip_victim_interval(owner_target, victim_prefix, victim_power);
+                msg!(
+                    "RMT_TRACE: owner_target={} safe_owner_target={}",
+                    owner_target,
+                    safe_owner_target
+                );
                 let (_selected_owner_count, selected_owner_power, selected_owner_prefix) =
                     crate::borrowed_proof::verify_owner_ref(
                         &pending_randomness.registry_root_snapshot,
                         &selected_owner.leaf.owner,
                         selected_owner,
                     )?;
-                require!(
-                    bull_registry::leaf_contains_target(
-                        selected_owner_prefix,
-                        selected_owner_power,
-                        safe_owner_target,
-                    ),
-                    RodeoError::BullProofBufferIncomplete
+                msg!(
+                    "RMT_TRACE: selected_owner={} sel_owner_power={} sel_owner_prefix={}",
+                    selected_owner.leaf.owner,
+                    selected_owner_power,
+                    selected_owner_prefix
                 );
+                if !bull_registry::leaf_contains_target(
+                    selected_owner_prefix,
+                    selected_owner_power,
+                    safe_owner_target,
+                ) {
+                    msg!("BPI_RMT: selected_owner_target_mismatch");
+                    return err!(RodeoError::BullProofBufferIncomplete);
+                }
 
                 let bull_target = probability::rejection_sample_draw(
                     probability::RandomnessSampleContext {
@@ -5301,24 +5324,29 @@ fn resolve_mint_theft(
                     },
                     selected_owner_power,
                 )?;
+                msg!("RMT_TRACE: bull_target={}", bull_target);
                 let (_selected_bull_count, selected_bull_power, selected_bull_prefix) =
                     crate::borrowed_proof::verify_bull_ref(
                         &selected_owner.leaf.bull_tree_root,
                         &selected_bull.leaf.position,
                         selected_bull,
                     )?;
-                require!(
-                    bull_registry::leaf_contains_target(
-                        selected_bull_prefix,
-                        selected_bull_power,
-                        bull_target,
-                    ),
-                    RodeoError::BullProofBufferIncomplete
+                msg!(
+                    "RMT_TRACE: selected_bull_pos={} sel_bull_owner={} sel_bull_power={} sel_bull_prefix={}",
+                    selected_bull.leaf.position, selected_bull.leaf.owner, selected_bull_power, selected_bull_prefix
                 );
-                require!(
-                    selected_bull.leaf.owner == selected_owner.leaf.owner,
-                    RodeoError::BullProofBufferIncomplete
-                );
+                if !bull_registry::leaf_contains_target(
+                    selected_bull_prefix,
+                    selected_bull_power,
+                    bull_target,
+                ) {
+                    msg!("BPI_RMT: selected_bull_target_mismatch");
+                    return err!(RodeoError::BullProofBufferIncomplete);
+                }
+                if selected_bull.leaf.owner != selected_owner.leaf.owner {
+                    msg!("BPI_RMT: selected_bull_owner_mismatch");
+                    return err!(RodeoError::BullProofBufferIncomplete);
+                }
 
                 final_owner = selected_bull.leaf.owner;
                 winning_bull_position = selected_bull.leaf.position;
@@ -5345,13 +5373,25 @@ fn apply_new_bull_registry_mutation(
     power: u8,
     reveal_config_version: u64,
 ) -> Result<()> {
-    let p = payload.ok_or(RodeoError::BullProofBufferIncomplete)?;
-    let current_owner = p
-        .current_owner()?
-        .ok_or(RodeoError::BullProofBufferIncomplete)?;
-    let current_bull = p
-        .current_bull()?
-        .ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let p = payload.ok_or_else(|| {
+        msg!("BPI_ANB: payload_none");
+        RodeoError::BullProofBufferIncomplete
+    })?;
+    let current_owner = p.current_owner()?.ok_or_else(|| {
+        msg!("BPI_ANB: current_owner_missing");
+        RodeoError::BullProofBufferIncomplete
+    })?;
+    let current_bull = p.current_bull()?.ok_or_else(|| {
+        msg!("BPI_ANB: current_bull_missing");
+        RodeoError::BullProofBufferIncomplete
+    })?;
+    msg!(
+        "ANB_TRACE: final_owner={} position={} current_owner_leaf={} current_bull_leaf={}",
+        final_owner,
+        position_key,
+        current_owner.leaf.owner,
+        current_bull.leaf.position
+    );
     let bull_leaf = BullLeaf {
         position: position_key,
         position_id,

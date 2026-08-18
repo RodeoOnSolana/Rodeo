@@ -199,10 +199,11 @@ fi
 
 echo "===> Running localnet suite: ${SUITE} (RPC ${BASE_PORT} / WS ${WS_PORT})"
 
+VITEST_FLAGS="${2:+${2} ${3:-}}"
 SUITE_EXIT=0
 if ! ANCHOR_PROVIDER_URL="${RPC_URL}" ANCHOR_WALLET="${WALLET}" \
      RODEO_TEST_SUITE="${SUITE}" \
-     pnpm --filter @rodeo/integration exec vitest run "${TEST_FILE}"; then
+     pnpm --filter @rodeo/integration exec vitest run "${TEST_FILE}" ${VITEST_FLAGS}; then
   echo "===> ${SUITE} FAILED" >&2
   SUITE_EXIT=1
 fi
