@@ -212,7 +212,7 @@ interface TrieNode {
   node: SparseMerkleNode;
 }
 
-class SparseTree {
+export class SparseTree {
   private root: TrieNode;
   private defaults: SparseMerkleNode[];
   private prefix: Buffer;
@@ -630,6 +630,272 @@ export function buildRevealPayload(
     currentBull: bproof,
     removeBull: null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark fixture generation
+// ---------------------------------------------------------------------------
+
+export const RANDOMNESS_DOMAIN_REVEAL = 0;
+export const RANDOMNESS_DOMAIN_UNSTAKE = 1;
+export const RANDOMNESS_DOMAIN_MINT_THEFT = 2;
+export const RANDOMNESS_DOMAIN_UNSTAKE_THEFT = 3;
+export const RANDOMNESS_DOMAIN_ROLE = 4;
+export const RANDOMNESS_DOMAIN_COWBOY_KIND = 5;
+export const RANDOMNESS_DOMAIN_BULL_TIER = 6;
+export const RANDOMNESS_DOMAIN_SUIT = 7;
+export const RANDOMNESS_DOMAIN_OWNER_SELECTION = 8;
+export const RANDOMNESS_DOMAIN_BULL_SELECTION = 9;
+
+const RANDOMNESS_DOMAIN_PREFIX = Buffer.from("rodeo_randomness_v1", "utf8");
+const REJECTION_SAMPLING_MAX_RETRIES = 64;
+const PROBABILITY_DENOMINATOR = 10_000_000n;
+
+export interface RandomnessSampleContext {
+  randomOutput: Uint8Array;
+  domain: number;
+  position: PublicKey;
+  actionNonce: bigint;
+}
+
+export function rejectionSampleDraw(
+  ctx: RandomnessSampleContext,
+  denominator: bigint,
+): bigint {
+  if (denominator <= 0n) {
+    throw new Error("rejectionSampleDraw denominator must be positive");
+  }
+
+  const PREIMAGE_LEN =
+    RANDOMNESS_DOMAIN_PREFIX.length + 1 + 32 + 32 + 8 + 8;
+  const preimage = Buffer.alloc(PREIMAGE_LEN);
+  let off = 0;
+
+  RANDOMNESS_DOMAIN_PREFIX.copy(preimage, off);
+  off += RANDOMNESS_DOMAIN_PREFIX.length;
+  preimage.writeUInt8(ctx.domain, off);
+  off += 1;
+  Buffer.from(ctx.randomOutput).copy(preimage, off);
+  off += 32;
+  ctx.position.toBuffer().copy(preimage, off);
+  off += 32;
+  preimage.writeBigUInt64LE(ctx.actionNonce, off);
+  off += 8;
+
+  const rangeSize = 1n << 64n;
+  const limit = rangeSize - (rangeSize % denominator);
+
+  for (let retry = 0; retry < REJECTION_SAMPLING_MAX_RETRIES; retry++) {
+    preimage.writeBigUInt64LE(BigInt(retry), off);
+    const digest = createHash("sha256").update(preimage).digest();
+
+    for (let chunkIndex = 0; chunkIndex < 4; chunkIndex++) {
+      const chunk = digest.subarray(chunkIndex * 8, (chunkIndex + 1) * 8);
+      const candidate = BigInt("0x" + chunk.toString("hex"));
+      if (candidate < limit) {
+        return candidate % denominator;
+      }
+    }
+  }
+
+  throw new Error("RejectionSamplingExhausted");
+}
+
+export function deriveCommitment(
+  position: PublicKey,
+  actionType: number,
+  actionNonce: bigint,
+  protocolEpoch: bigint,
+): Uint8Array {
+  const buf = Buffer.alloc(32 + 1 + 8 + 8);
+  position.toBuffer().copy(buf, 0);
+  buf.writeUInt8(actionType, 32);
+  buf.writeBigUInt64LE(actionNonce, 33);
+  buf.writeBigUInt64LE(protocolEpoch, 41);
+  return createHash("sha256").update(buf).digest();
+}
+
+const BENCHMARK_POWERS = [4, 6, 8, 10];
+const BENCHMARK_BULL_DISTRIBUTION = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+function le64Bytes(x: number | bigint): Buffer {
+  const b = Buffer.alloc(8);
+  b.writeBigUInt64LE(BigInt(x), 0);
+  return b;
+}
+
+function sha256Bytes(parts: Buffer[]): Buffer {
+  const h = createHash("sha256");
+  for (const p of parts) h.update(p);
+  return h.digest();
+}
+
+function deterministicOwner(index: number): PublicKey {
+  return new PublicKey(
+    sha256Bytes([Buffer.from("owner"), le64Bytes(index)]),
+  );
+}
+
+function deterministicBull(ownerIndex: number, bullIndex: number): PublicKey {
+  return new PublicKey(
+    sha256Bytes([
+      Buffer.from("bull"),
+      le64Bytes(ownerIndex),
+      le64Bytes(bullIndex),
+    ]),
+  );
+}
+
+function buildBullsForOwner(
+  ownerIndex: number,
+  count: number,
+  startCount: number,
+): { owner: PublicKey; bulls: BullLeaf[]; nextCount: number } {
+  const owner = deterministicOwner(ownerIndex);
+  const bulls: BullLeaf[] = [];
+  let c = startCount;
+  for (let j = 0; j < count; j++) {
+    const position = deterministicBull(ownerIndex, j);
+    const power = BENCHMARK_POWERS[(ownerIndex + j) % BENCHMARK_POWERS.length];
+    c++;
+    bulls.push({
+      position,
+      positionId: BigInt(c),
+      owner,
+      buckPower: power,
+      revealConfigVersion: 1n,
+    });
+  }
+  return { owner, bulls, nextCount: c };
+}
+
+export function buildBullTreeForOwner(bulls: BullLeaf[]): SparseTree {
+  const tree = new SparseTree(
+    bullLeafToNode(emptyBullLeaf()),
+    PREFIX_BULL_NODE,
+  );
+  for (const bull of bulls) {
+    tree.insert(bull.position.toBuffer(), bullLeafToNode(bull));
+  }
+  return tree;
+}
+
+export interface BenchmarkOwnerTree {
+  ownerTree: SparseTree;
+  ownerBulls: Map<string, BullLeaf[]>;
+  ownerList: PublicKey[];
+  totalPower: bigint;
+  totalCount: bigint;
+}
+
+export async function buildBenchmarkOwnerTree(scale: number): Promise<BenchmarkOwnerTree> {
+  if (scale < 0) throw new Error("buildBenchmarkOwnerTree scale must be >= 0");
+
+  const ownerTree = new SparseTree(
+    ownerLeafToNode(emptyOwnerLeaf()),
+    PREFIX_BULL_OWNER_NODE,
+  );
+  const ownerBulls = new Map<string, BullLeaf[]>();
+  const ownerList: PublicKey[] = [];
+  let totalCount = 0;
+  let totalPower = 0n;
+  let ownerIndex = 0;
+
+  async function addOwner(count: number) {
+    const { owner, bulls, nextCount } = buildBullsForOwner(
+      ownerIndex,
+      count,
+      totalCount,
+    );
+    const bullTree = buildBullTreeForOwner(bulls);
+    const bullRoot = bullTree.getRoot();
+    const ownerLeaf: OwnerLeaf = {
+      owner,
+      activeBullCount: BigInt(bulls.length),
+      totalBuckPower: bullRoot.power,
+      bullTreeRoot: bullRoot.hash,
+    };
+    ownerTree.insert(owner.toBuffer(), ownerLeafToNode(ownerLeaf));
+    ownerBulls.set(owner.toBase58(), bulls);
+    ownerList.push(owner);
+    totalCount = nextCount;
+    totalPower += bullRoot.power;
+    ownerIndex += 1;
+    // Yield so long-running synchronous tree construction does not starve
+    // the Vitest worker RPC loop (which otherwise trips the onTaskUpdate
+    // heartbeat timeout for 100K-scale fixtures).
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  const denseCount = scale >= 2000 ? 1000 : Math.floor(scale / 2);
+  let remaining = scale - denseCount;
+
+  if (denseCount > 0) await addOwner(denseCount);
+
+  let patternIdx = 0;
+  while (remaining > 0) {
+    const wanted =
+      BENCHMARK_BULL_DISTRIBUTION[
+        patternIdx % BENCHMARK_BULL_DISTRIBUTION.length
+      ];
+    const count = Math.min(wanted, remaining);
+    await addOwner(count);
+    remaining -= count;
+    patternIdx += 1;
+  }
+
+  return { ownerTree, ownerBulls, ownerList, totalPower, totalCount: BigInt(totalCount) };
+}
+
+export function findOwnerByPower(
+  ownerTree: SparseTree,
+  owners: PublicKey[],
+  target: bigint,
+): PublicKey {
+  for (const owner of owners) {
+    const proof = ownerTree.proof(owner.toBuffer());
+    const prefix = sparseProofPrefix(
+      owner.toBuffer(),
+      proof,
+      PREFIX_BULL_OWNER_NODE,
+    );
+    if (leafContainsTarget(prefix, proof.leaf.power, target)) {
+      return owner;
+    }
+  }
+  throw new Error(`No owner interval contains target ${target}`);
+}
+
+export function findBullByPower(
+  bullTree: SparseTree,
+  bulls: BullLeaf[],
+  target: bigint,
+): BullLeaf {
+  for (const bull of bulls) {
+    const proof = bullTree.proof(bull.position.toBuffer());
+    const prefix = sparseProofPrefix(
+      bull.position.toBuffer(),
+      proof,
+      PREFIX_BULL_NODE,
+    );
+    if (leafContainsTarget(prefix, proof.leaf.power, target)) {
+      return bull;
+    }
+  }
+  throw new Error(`No bull interval contains target ${target}`);
+}
+
+export function mapMintTheftFlag(
+  randomOutput: Uint8Array,
+  position: PublicKey,
+  actionNonce: bigint,
+): boolean {
+  const draw = rejectionSampleDraw(
+    { randomOutput, domain: RANDOMNESS_DOMAIN_MINT_THEFT, position, actionNonce },
+    PROBABILITY_DENOMINATOR,
+  );
+  // V1 mint_theft_weights: [500_000, 9_500_000] -> index 0 is "theft"
+  return draw < 500_000n;
 }
 
 /**

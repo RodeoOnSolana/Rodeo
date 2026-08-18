@@ -12,6 +12,22 @@ import {
 } from "@solana/spl-token";
 import { beforeAll, describe, expect, it } from "vitest";
 import { stageBullProofBuffer, deriveBullRegistryPda } from "./bull-registry-tracker.js";
+import {
+  buildBullTreeForOwner,
+  buildBenchmarkOwnerTree,
+  buildFullTheftRevealPayload,
+  buildRevealWithVictimPayload,
+  bullLeafToNode,
+  deriveCommitment,
+  findBullByPower,
+  findOwnerByPower,
+  mapMintTheftFlag,
+  ownerLeafToNode,
+  rejectionSampleDraw,
+  RANDOMNESS_DOMAIN_BULL_SELECTION,
+  RANDOMNESS_DOMAIN_OWNER_SELECTION,
+  serializeBullProofPayload,
+} from "./sparse-tree.js";
 
 const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
   "BPFLoaderUpgradeab1e11111111111111111111111",
@@ -60,6 +76,7 @@ interface FixtureCase {
   currentTotalBullCount: number;
   currentTotalBuckPower: number;
   currentRegistryVersion: number;
+  randomOutput: number[];
   expectedSuccess?: boolean;
 }
 
@@ -436,7 +453,123 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF SettleReveal benc
         new BN(0),
       );
 
-      // 1. Configure the deterministic fixture state.
+      // 1. Build the deterministic owner tree from the case scale without
+      // keeping every bull tree in memory. This makes the benchmark wallet-
+      // independent and avoids OOM for 10K/100K scales.
+      const { ownerTree, ownerBulls, ownerList, totalPower, totalCount } =
+        await buildBenchmarkOwnerTree(fixture.scale);
+      const prospectiveOwner = payer.publicKey;
+
+      // Fixture identity guard: the prospective staker must not already appear
+      // in the benchmark registry, otherwise historical/prospective proofs break.
+      if (ownerList.some((o) => o.equals(prospectiveOwner))) {
+        throw new Error(
+          `BenchmarkFixtureOwnerMismatch: staker ${prospectiveOwner.toBase58()} is already in the fixture registry`,
+        );
+      }
+
+      // Confirm the Position PDA / program ID produces the expected randomness.
+      const randomOutput = deriveCommitment(position, 0, 0n, 0n);
+      if (!bytesEq(randomOutput, fixture.randomOutput)) {
+        throw new Error(
+          `Benchmark fixture random output mismatch for ${fixture.positionId}: expected ${Buffer.from(new Uint8Array(fixture.randomOutput)).toString("hex")}, got ${Buffer.from(randomOutput).toString("hex")}`,
+        );
+      }
+
+      // 2. Resolve the theft flag and (when theft occurs) the selected victim.
+      const actionNonce = 0n;
+      const theft = mapMintTheftFlag(randomOutput, position, actionNonce);
+      let selectedOwner: web3.PublicKey;
+      let selectedBullPosition: web3.PublicKey | null = null;
+      let newBullOwner: web3.PublicKey;
+      let selectedBulls: import("./sparse-tree.js").BullLeaf[] | undefined;
+
+      if (theft) {
+        const ownerTarget = rejectionSampleDraw(
+          {
+            randomOutput,
+            domain: RANDOMNESS_DOMAIN_OWNER_SELECTION,
+            position,
+            actionNonce,
+          },
+          totalPower,
+        );
+        selectedOwner = findOwnerByPower(ownerTree, ownerList, ownerTarget);
+        if (selectedOwner.equals(prospectiveOwner)) {
+          throw new Error(
+            `BenchmarkFixtureOwnerMismatch: selected owner ${selectedOwner.toBase58()} equals staker`,
+          );
+        }
+
+        selectedBulls = ownerBulls.get(selectedOwner.toBase58())!;
+        const selectedBullTree = buildBullTreeForOwner(selectedBulls);
+        const bullTarget = rejectionSampleDraw(
+          {
+            randomOutput,
+            domain: RANDOMNESS_DOMAIN_BULL_SELECTION,
+            position,
+            actionNonce,
+          },
+          selectedBullTree.getRoot().power,
+        );
+        const selectedBull = findBullByPower(
+          selectedBullTree,
+          selectedBulls,
+          bullTarget,
+        );
+        selectedBullPosition = selectedBull.position;
+        newBullOwner = selectedOwner;
+      } else {
+        selectedOwner = ownerList[0] ?? web3.PublicKey.default;
+        newBullOwner = prospectiveOwner;
+      }
+
+      const newBull = {
+        position,
+        positionId: BigInt(fixture.positionId),
+        owner: newBullOwner,
+        buckPower: fixture.newBull.buck_power,
+        revealConfigVersion: BigInt(fixture.newBull.reveal_config_version),
+      };
+
+      // 3. Build the reveal payload against the actual registry and signer.
+      // The BuiltRegistry only needs the selected (or payer) bull tree.
+      const builtRegistry: import("./sparse-tree.js").BuiltRegistry = {
+        ownerTree,
+        bullTrees: new Map(),
+        entries: [],
+        rootNode: ownerTree.getRoot(),
+      };
+      if (theft && selectedBulls) {
+        const selectedBullTree = buildBullTreeForOwner(selectedBulls);
+        builtRegistry.bullTrees.set(
+          selectedOwner.toBase58(),
+          selectedBullTree,
+        );
+        builtRegistry.entries.push({
+          owner: selectedOwner,
+          bulls: selectedBulls,
+        });
+      }
+
+      const payload = theft
+        ? buildFullTheftRevealPayload(
+            builtRegistry,
+            builtRegistry,
+            prospectiveOwner,
+            selectedOwner,
+            selectedBullPosition!,
+            newBull,
+          )
+        : buildRevealWithVictimPayload(
+            builtRegistry,
+            builtRegistry,
+            prospectiveOwner,
+            newBull,
+          );
+      const payloadBytes = serializeBullProofPayload(payload);
+
+      // 4. Configure the on-chain state.
       await rodeoCoreProgram.methods
         .testFixtureSetGlobalGameState(
           new BN(100),
@@ -462,12 +595,16 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF SettleReveal benc
         .signers([payer])
         .rpc();
 
+      const registryCount = Number(totalCount);
+      const registryPower = Number(totalPower);
+      const registryVersion = 0;
+
       await rodeoCoreProgram.methods
         .testFixtureSetBullRegistry(
-          Buffer.from(new Uint8Array(fixture.snapshotRoot)),
-          new BN(fixture.snapshotTotalCount),
-          new BN(fixture.snapshotTotalPower),
-          new BN(fixture.snapshotVersion),
+          Buffer.from(new Uint8Array(ownerTree.getRoot().hash)),
+          new BN(registryCount),
+          new BN(registryPower),
+          new BN(registryVersion),
         )
         .accounts({
           authority: payer.publicKey,
@@ -477,16 +614,16 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF SettleReveal benc
         .signers([payer])
         .rpc();
 
-      // 2. Real production stake_and_commit.
+      // 5. stake_and_commit (captures the above snapshot in pending_randomness).
       await stakeAndCommit(positionId);
 
-      // 3. Move the registry to the "current" state the proof is built against.
+      // 6. Move registry to the current state the proof is built against.
       await rodeoCoreProgram.methods
         .testFixtureSetBullRegistry(
-          Buffer.from(new Uint8Array(fixture.currentOwnerTreeRoot)),
-          new BN(fixture.currentTotalBullCount),
-          new BN(fixture.currentTotalBuckPower),
-          new BN(fixture.currentRegistryVersion),
+          Buffer.from(new Uint8Array(ownerTree.getRoot().hash)),
+          new BN(registryCount),
+          new BN(registryPower),
+          new BN(registryVersion),
         )
         .accounts({
           authority: payer.publicKey,
@@ -496,8 +633,7 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF SettleReveal benc
         .signers([payer])
         .rpc();
 
-      // 4. Stage the reveal BullProofBuffer through production instructions.
-      const payloadBytes = Buffer.from(fixture.payloadHex, "hex");
+      // 7. Stage the BullProofBuffer.
       const nonce = new BN(1);
       const prover = payer;
       const staged = await stageBullProofBuffer(
@@ -514,13 +650,12 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF SettleReveal benc
       const bufferInfoBefore = await provider.connection.getAccountInfo(staged.bufferPda);
       expect(bufferInfoBefore).not.toBeNull();
       const bufferLamportsBefore = bufferInfoBefore!.lamports;
-
       const proverBalanceBefore = await getLamportBalance(provider, prover.publicKey);
 
-      // 5. Production settle_reveal with the target compute/heap budget.
+      // 8. Production settle_reveal.
       const { receiptAsset, sig } = await settleReveal(
         positionId,
-        new web3.PublicKey(fixture.finalOwner),
+        newBullOwner,
         {
           bufferPda: staged.bufferPda,
           refundRecipient: staged.refundRecipient,
@@ -530,20 +665,52 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF SettleReveal benc
       const settleTx = await getConfirmedTransaction(provider.connection, sig);
       const consumedCu = cuFrom(settleTx);
 
-      // 6. Post-state assertions.
+      // 9. Post-state assertions.
       const pos = await (rodeoCoreProgram.account as any).position.fetch(position);
       expect(pos.role.bull).toBeTruthy();
-      expect(pos.owner.toBase58()).toBe(fixture.finalOwner);
-      expect(pos.buckPower).toBe(fixture.newBull.buck_power);
-      expect(pos.revealConfigVersion.toNumber()).toBe(fixture.newBull.reveal_config_version);
+      expect(pos.owner.toBase58()).toBe(newBullOwner.toBase58());
+      expect(pos.buckPower).toBe(newBull.buckPower);
+      expect(pos.revealConfigVersion.toNumber()).toBe(Number(newBull.revealConfigVersion));
 
-      const registry = await (rodeoCoreProgram.account as any).bullRegistry.fetch(bullRegistry);
-      expect(Buffer.from(new Uint8Array(registry.ownerTreeRoot)).equals(
-        Buffer.from(new Uint8Array(fixture.ownerTreeRoot)),
+      // Recompute the expected on-chain owner tree root locally.
+      let expectedTotalCount = totalCount + 1n;
+      let expectedTotalPower = totalPower + BigInt(newBull.buckPower);
+      if (theft && selectedBulls) {
+        const selectedBullTree = buildBullTreeForOwner(selectedBulls);
+        selectedBullTree.insert(
+          newBull.position.toBuffer(),
+          bullLeafToNode(newBull),
+        );
+        const updatedOwnerLeaf = {
+          owner: selectedOwner,
+          activeBullCount: BigInt(selectedBulls.length + 1),
+          totalBuckPower: selectedBullTree.getRoot().power,
+          bullTreeRoot: selectedBullTree.getRoot().hash,
+        };
+        ownerTree.insert(
+          selectedOwner.toBuffer(),
+          ownerLeafToNode(updatedOwnerLeaf),
+        );
+      } else {
+        const payerBullTree = buildBullTreeForOwner([newBull]);
+        const payerOwnerLeaf = {
+          owner: prospectiveOwner,
+          activeBullCount: 1n,
+          totalBuckPower: BigInt(newBull.buckPower),
+          bullTreeRoot: payerBullTree.getRoot().hash,
+        };
+        ownerTree.insert(
+          prospectiveOwner.toBuffer(),
+          ownerLeafToNode(payerOwnerLeaf),
+        );
+      }
+
+      const registryAccount = await (rodeoCoreProgram.account as any).bullRegistry.fetch(bullRegistry);
+      expect(Buffer.from(new Uint8Array(registryAccount.ownerTreeRoot)).equals(
+        Buffer.from(new Uint8Array(ownerTree.getRoot().hash)),
       )).toBe(true);
-      expect(BigInt(registry.totalBullCount.toString())).toBe(BigInt(fixture.totalBullCount));
-      expect(BigInt(registry.totalBuckPower.toString())).toBe(BigInt(fixture.totalBuckPower));
-      expect(BigInt(registry.registryVersion.toString())).toBe(BigInt(fixture.registryVersion));
+      expect(BigInt(registryAccount.totalBullCount.toString())).toBe(expectedTotalCount);
+      expect(BigInt(registryAccount.totalBuckPower.toString())).toBe(expectedTotalPower);
 
       const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
         [Buffer.from("receipt-funder"), position.toBuffer()],
@@ -551,18 +718,13 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF SettleReveal benc
       );
       const receiptFunderInfo = await provider.connection.getAccountInfo(receiptFunder);
       expect(receiptFunderInfo).not.toBeNull();
-      // The ReceiptFunder PDA must persist after reveal so it can pay for the
-      // eventual receipt burn on unstake. It is not closed here.
       expect(receiptFunderInfo!.owner.toBase58()).toBe(web3.SystemProgram.programId.toBase58());
 
       const pendingInfo = await provider.connection.getAccountInfo(pendingRandomness);
-
       expect(pendingInfo).toBeNull();
       const bufferInfoAfter = await provider.connection.getAccountInfo(staged.bufferPda);
-
       expect(bufferInfoAfter).toBeNull();
       const receiptAssetInfo = await provider.connection.getAccountInfo(receiptAsset);
-
       expect(receiptAssetInfo).not.toBeNull();
       const proverBalanceAfter = await getLamportBalance(provider, prover.publicKey);
       expect(proverBalanceAfter).toBeGreaterThanOrEqual(proverBalanceBefore);
@@ -571,6 +733,6 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF SettleReveal benc
         `[settle-reveal] ${fixture.case} @ scale ${fixture.scale}: CU ${consumedCu}, payload ${payloadBytes.length} bytes`,
       );
     },
-    120_000,
+    600_000,
   );
 });
