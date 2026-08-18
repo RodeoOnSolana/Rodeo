@@ -85,13 +85,13 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build rodeo_core SBF with test-fixtures
-        run: scripts/check-sbf-stack-safety.sh anchor build --no-idl --program-name rodeo_core -- --features test-fixtures
+        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_core -- --features test-fixtures
 
       - name: Build rodeo_market SBF
-        run: scripts/check-sbf-stack-safety.sh anchor build --no-idl --program-name rodeo_market
+        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_market
 
       - name: Build rodeo_router SBF
-        run: scripts/check-sbf-stack-safety.sh anchor build --no-idl --program-name rodeo_router
+        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_router
 
       - name: Generate SDK from test-fixtures IDLs
         run: pnpm sdk:generate
