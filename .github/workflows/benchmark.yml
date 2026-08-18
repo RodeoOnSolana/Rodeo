@@ -118,11 +118,18 @@ jobs:
           mkdir -p .anchor/test-ledger
           pkill -f solana-test-validator || true
           sleep 1
+          PAYER_PUBKEY="$(solana-keygen pubkey "$HOME/.config/solana/id.json")"
           nohup solana-test-validator \
             --ledger .anchor/test-ledger \
             --reset \
             --quiet \
+            --bind-address 127.0.0.1 \
+            --limit-ledger-size 100000 \
+            --mint 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \
             --bpf-program CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d vendor/mpl-core/mpl_core_program.so \
+            --upgradeable-program CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA target/deploy/rodeo_core.so "${PAYER_PUBKEY}" \
+            --upgradeable-program 9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n target/deploy/rodeo_market.so "${PAYER_PUBKEY}" \
+            --upgradeable-program CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD target/deploy/rodeo_router.so "${PAYER_PUBKEY}" \
             > .anchor/test-ledger/test-ledger-log.txt 2>&1 &
           echo "solana-test-validator PID: $!"
           echo "TEST_VALIDATOR_PID=$!" >> "$GITHUB_ENV"
@@ -140,7 +147,7 @@ jobs:
           done
 
       - name: Run focused sparse-tree SBF benchmark
-        run: RODEO_TEST_SUITE=benchmark anchor test --skip-build --skip-local-validator
+        run: RODEO_TEST_SUITE=benchmark anchor test --skip-build --skip-local-validator --skip-deploy
 
       - name: Stop solana-test-validator
         if: always()
