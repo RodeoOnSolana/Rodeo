@@ -267,6 +267,26 @@ describe.skipIf(skipSuite)("Rodeo devnet Switchboard On-Demand randomness", () =
     sbProgram = await sb.AnchorUtils.loadProgramFromConnection(provider.connection, provider.wallet as any);
     queue = await sb.Queue.loadDefault(sbProgram);
 
+    // Pick a healthy on-chain oracle once so all filtered test cases can reuse it.
+    const queueData = await queue.loadData();
+    const oracleKeys = queueData.oracleKeys.slice(0, queueData.oracleKeysLen);
+    for (const key of oracleKeys) {
+      const candidate = new sb.Oracle(sbProgram, key);
+      const data = await candidate.loadData();
+      const gatewayUrl = Buffer.from(data.gatewayUri).toString().replace(/\0+$/g, "");
+      const validUntil = data.enclave.validUntil.toNumber();
+      const heartbeat = data.lastHeartbeat.toNumber();
+      const now = Math.floor(Date.now() / 1000);
+      if (gatewayUrl.length > 0 && validUntil > now && now - heartbeat <= 300) {
+        selectedOracle = candidate;
+        console.log(`Selected oracle ${key.toBase58()} gateway ${gatewayUrl}`);
+        break;
+      }
+    }
+    if (!selectedOracle) {
+      throw new Error("No healthy Switchboard oracle found on devnet queue");
+    }
+
     [globalConfig] = web3.PublicKey.findProgramAddressSync(
       [Buffer.from("global-config")],
       rodeoCoreProgram.programId,
@@ -897,4 +917,151 @@ describe.skipIf(skipSuite)("Rodeo devnet Switchboard On-Demand randomness", () =
     const suitKey = Object.keys(pos.suit as any)[0];
     expect(suit).toBe(suitKey);
   }, 60_000);
+
+  describe("Timeout and recovery", () => {
+    it("recovers a reveal action after the shortened Rodeo timeout without a Switchboard fulfillment", async () => {
+      console.log("pre timeout-recovery balance:", await fetchBalance(), "SOL");
+
+      const randomness = await createAndCommitRandomness();
+      const action = await deriveNextPositionAccounts();
+
+      const stakeIx = await rodeoCoreProgram.methods
+        .stakeAndCommit(action.positionId, new BN(100_000_000_000))
+        .accounts({
+          owner: payer.publicKey,
+          ownerRodeoTokenAccount: payerRodeoAccount,
+          globalConfig,
+          protocolConfig,
+          principalVault,
+          position: action.position,
+          pendingRandomness: action.pendingRandomness,
+          rewardState,
+          globalGameState,
+          bullRegistry,
+          receiptFunder: action.receiptFunder,
+          providerRandomnessAccount: randomness.pubkey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        } as any)
+        .instruction();
+      const stakeSig = await sendIx(provider, stakeIx, [payer]);
+      console.log("timeout-recovery stakeAndCommit sig:", stakeSig);
+
+      // Wait past the 2-second test timeout.
+      await sleep(3_000);
+
+      const recoverIx = await rodeoCoreProgram.methods
+        .recoverRevealTimeout()
+        .accounts({
+          caller: payer.publicKey,
+          position: action.position,
+          pendingRandomness: action.pendingRandomness,
+          globalConfig,
+          principalVault,
+          ownerRodeoAccount: payerRodeoAccount,
+          owner: payer.publicKey,
+          globalGameState,
+          receiptFunder: action.receiptFunder,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        } as any)
+        .instruction();
+      const recoverSig = await sendIx(provider, recoverIx, [payer]);
+      console.log("recoverRevealTimeout sig:", recoverSig);
+
+      // Recovery closes the Position, PendingRandomness, and ReceiptFunder.
+      const posClosed = await provider.connection.getAccountInfo(action.position);
+      expect(posClosed).toBeNull();
+
+      const pendingClosed = await provider.connection.getAccountInfo(action.pendingRandomness);
+      expect(pendingClosed).toBeNull();
+
+      const funderClosed = await provider.connection.getAccountInfo(action.receiptFunder);
+      expect(funderClosed).toBeNull();
+
+      // No receipt should have been minted because the reveal never completed.
+      const receiptAsset = await provider.connection.getAccountInfo(action.receiptAsset);
+      expect(receiptAsset).toBeNull();
+
+      console.log("post timeout-recovery balance:", await fetchBalance(), "SOL");
+    }, 120_000);
+
+    it("rejects late Switchboard fulfillment of a recovered reveal action", async () => {
+      console.log("pre late-fulfillment balance:", await fetchBalance(), "SOL");
+
+      const randomness = await createAndCommitRandomness();
+      const action = await deriveNextPositionAccounts();
+
+      const stakeIx = await rodeoCoreProgram.methods
+        .stakeAndCommit(action.positionId, new BN(100_000_000_000))
+        .accounts({
+          owner: payer.publicKey,
+          ownerRodeoTokenAccount: payerRodeoAccount,
+          globalConfig,
+          protocolConfig,
+          principalVault,
+          position: action.position,
+          pendingRandomness: action.pendingRandomness,
+          rewardState,
+          globalGameState,
+          bullRegistry,
+          receiptFunder: action.receiptFunder,
+          providerRandomnessAccount: randomness.pubkey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        } as any)
+        .instruction();
+      const stakeSig = await sendIx(provider, stakeIx, [payer]);
+      console.log("late-fulfillment stakeAndCommit sig:", stakeSig);
+
+      await sleep(3_000);
+
+      const recoverIx = await rodeoCoreProgram.methods
+        .recoverRevealTimeout()
+        .accounts({
+          caller: payer.publicKey,
+          position: action.position,
+          pendingRandomness: action.pendingRandomness,
+          globalConfig,
+          principalVault,
+          ownerRodeoAccount: payerRodeoAccount,
+          owner: payer.publicKey,
+          globalGameState,
+          receiptFunder: action.receiptFunder,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: web3.SystemProgram.programId,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        } as any)
+        .instruction();
+      await sendIx(provider, recoverIx, [payer]);
+
+      // Create a freshly fulfilled Switchboard result.
+      const lateRandomness = await createAndCommitRandomness();
+      const revealIx = await lateRandomness.revealIx(payer.publicKey);
+      const lateSettleIx = await rodeoCoreProgram.methods
+        .settleReveal()
+        .accounts({
+          ...settleRevealAccounts({
+            position: action.position,
+            pendingRandomness: action.pendingRandomness,
+            receiptAsset: action.receiptAsset,
+            receiptFunder: action.receiptFunder,
+            providerRandomnessAccount: lateRandomness.pubkey,
+          }),
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        } as any)
+        .instruction();
+
+      const { logs, err } = await sendTransactionWithLogs(
+        new web3.Transaction().add(revealIx, lateSettleIx),
+        [payer],
+      );
+      console.log("late-fulfillment rejection logs:", logs.slice(-6));
+      expect(err).toBeTruthy();
+      console.log("post late-fulfillment balance:", await fetchBalance(), "SOL");
+    }, 120_000);
+  });
 });

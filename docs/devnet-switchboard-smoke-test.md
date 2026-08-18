@@ -15,7 +15,7 @@ paths succeeded.
 
 | Item | Value |
 |------|-------|
-| Canonical production `rodeo_core` program ID | `CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA` |
+| Canonical production `rodeo_core` program ID | `EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z` |
 | Temporary devnet `rodeo_core` program ID | `EHaQcMmf9AtbCSLYct9ZoGwoLfGkb9B64nYCqRpM86ks` |
 | Devnet payer/deployer wallet (public key only) | `FFZwNMcRoMBu75kP8fpQJKPMubtQSPepPyKfFTvzkSQ6` |
 | Switchboard On-Demand Rust crate | `switchboard-on-demand` `0.13.0` |
@@ -137,6 +137,87 @@ mapping is the same single implementation used in local mock tests.
 * Ending balance after all security tests: **1.436011679 SOL**
 * Temporary devnet program closed and **8.10381336 SOL reclaimed**
 * Final devnet wallet balance: **9.539820039 SOL**
+
+## Second run: timeout, recovery, and late-fulfillment invariants
+
+This run reused the existing temporary `FRuP...` deployment instead of redeploying. It targeted the `Timeout and recovery` suite in `devnet-switchboard.test.ts` and did not reopen the previously accepted Reveal security cases.
+
+### Deployment preflight
+
+| Item | Value |
+|------|-------|
+| Temp `rodeo_core` program ID | `FRuP5DDR7g2pc8aHs6m5FYYzCeij9ZZwS41eJFogfRB7` |
+| ProgramData address | `Fk4zFNndbTQqYqkZydg99VR6utHcK5sLGkJmnc7f2E22` |
+| Devnet payer/deployer | `FFZwNMcRoMBu75kP8fpQJKPMubtQSPepPyKfFTvzkSQ6` |
+| Selected Switchboard oracle | `Hdu1niJgqVGhesoxgy37p6WBunVDoBacZJZVK7VRRevg` |
+| Deployed binary SHA256 | `69978741dd5f284794e7bdebfc164a4e5997c82259bbed1687c163fbd69c518f` |
+| Build features | `test-short-timeout` only |
+| `mock-randomness` | disabled |
+| `test-fixtures` | disabled |
+| Production `MIN_STAKE_SECONDS` | `86_400` (24 hours) — not shortened |
+| Last deployed slot | 484943551 |
+| ProgramData balance | **8.13577368 SOL** |
+| Payer balance before this run | **1.371010599 SOL** |
+
+### Timeout / recovery
+
+A legitimate `stakeAndCommit` was left to time out on the 2-second `test-short-timeout` build. `recoverRevealTimeout` succeeded after the timeout, closing the Position, PendingRandomness, and ReceiptFunder and refunding the 100,000 RODEO principal. No BullRegistry mutation or receipt was created.
+
+| Step | Signature | Notes |
+|------|-----------|-------|
+| stakeAndCommit | `2S9Zrz97kTquYwnHPbMx4cCAiz39FGQMwxX6aUs7oz8r3w52zQXCUcE7DoRuWeo9roANd7k89pNwpvsYqo7hT3Xg` | Created Position and PendingRandomness |
+| recoverRevealTimeout | `4VeQn21a3t4fVi86p6o74FANKwcsEb93MBiQEmHEUAFhQUuuL2oTBJcSN7mKQzKhkg5RNYpUfu9xAs3KdiSwUxu5` | Closed Position/PendingRandomness/ReceiptFunder and refunded principal |
+
+State after recovery:
+
+* `Position` account: **closed (null)**
+* `PendingRandomness` account: **closed (null)**
+* `ReceiptFunder` account: **closed (null)**
+* `ReceiptAsset`: **not created**
+* `BullRegistry`: unchanged
+* Principal returned to owner
+
+### Never-fulfilled provider recovery
+
+The timeout recovery test above is the explicit never-fulfilled case: the Switchboard randomness request was committed but intentionally never revealed, the Rodeo timeout elapsed, and the player successfully recovered principal. The protocol does not trap the player when the provider never completes.
+
+### Late fulfillment cannot resurrect
+
+After the timeout recovery closed the action, a separate, freshly fulfilled Switchboard randomness account was used to attempt `settleReveal` against the recovered Position. The program rejected the late settlement because the Position was already closed.
+
+| Step | Signature / log | Notes |
+|------|-----------------|-------|
+| stakeAndCommit | `RHfNYz7iajZKttcLaGp7ihCEHtMZ1KA5kW3rLgVdebCpiQobRXUk1pyef7ivSbzDsWdmr3YjNHNizra5qz51NKb` | Created a fresh Position and PendingRandomness |
+| recoverRevealTimeout | (within same test) | Recovered after 2-second timeout; Position closed |
+| Late settleReveal | logs included `AnchorError caused by account: position. Error Code: AccountNotInitialized. Error Number: 3012. ... Program FRuP... failed: custom program error: 0xbc4` | Rejected; consumed 9111 CU |
+
+Security property: **no valid Switchboard result can resurrect a recovered Rodeo action** — the old action remains dead.
+
+### Real-provider Unstake gate: blocked by build configuration
+
+The `FRuP...` binary was built with `test-short-timeout` only. `MIN_STAKE_SECONDS` remains the production `86_400` (24 hours). `request_unstake` therefore rejects new positions with `MinimumStakePeriodNotMet` immediately after reveal. A real-provider Unstake cannot be completed on this deployment without waiting a full day (or adding a `test-short-unstake-age` feature and redeploying).
+
+Cheapest safe approach to complete the Unstake gate:
+
+1. Add a new feature (e.g. `test-short-min-stake`) that lowers `MIN_STAKE_SECONDS` to a few seconds in `constants.rs`.
+2. Build and deploy a fresh temp binary (costs ~8.1 devnet SOL).
+3. Re-run the Unstake and replay tests against the new deployment.
+
+Because the user explicitly prohibited redeploying the current `FRuP...` binary and the remaining wallet balance is insufficient for another full program deploy, the Unstake gate is not exercised in this run.
+
+### Devnet SOL balance (this run)
+
+| Checkpoint | Balance |
+|------------|---------|
+| Before timeout/recovery tests | 1.371010599 SOL |
+| After timeout/recovery tests | 1.338056559 SOL |
+| After late-fulfillment test | 1.321582039 SOL |
+
+### Net cost summary (second run only)
+
+* Transaction/oracle rent fees consumed: ~0.04943 SOL
+* Program deployment rent still locked: ~8.13577368 SOL
+* Program not yet closed because the Unstake gate is incomplete
 
 ## Files
 
