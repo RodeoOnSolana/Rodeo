@@ -4,11 +4,11 @@ use mpl_core::instructions::{TransferV1CpiBuilder, UpdatePluginV1CpiBuilder};
 use mpl_core::types::Plugin;
 
 use crate::{
+    bull_registry::{add_bull_to_registry, remove_bull_from_registry, BullLeaf},
     borrowed_proof::{
         verify_bull_ref, verify_owner_ref, BullProofPayloadRef, BullProofRef,
         NativeTransferBullPayloadRef, OwnerProofRef,
     },
-    bull_registry::{add_bull_to_registry, remove_bull_from_registry, BullLeaf},
     constants::*,
     math,
     receipt::parse_core_asset_owner,
@@ -35,6 +35,9 @@ pub fn derive_claim_class(position: &Position) -> Result<ClaimClass> {
     }
 }
 
+/// Fixed V1 claim-policy version used for all ClaimCredit PDAs at launch.
+const CLAIM_POLICY_VERSION_V1: [u8; 8] = 1u64.to_le_bytes();
+
 /// Infallible variant used for PDA derivation where the Position role is
 /// expected to be assigned.  This must not be used for state validation.
 pub fn claim_class_of_position(position: &Position) -> ClaimClass {
@@ -51,43 +54,12 @@ pub fn claim_class_of_position(position: &Position) -> ClaimClass {
     }
 }
 
-/// V1 claim policy is hardcoded into the program.  Later versions are stored
-/// in immutable on-chain `ClaimPolicy` accounts.  This function returns the
-/// canonical splits for the requested version and validates the account when
-/// one is required.
-pub fn policy_bps_for_version(
-    version: u64,
-    policy_account: Option<&ClaimPolicy>,
-    class: ClaimClass,
-) -> Result<(u64, u64)> {
-    if version == 1 {
-        if let Some(policy) = policy_account {
-            require!(
-                policy.policy_version == 1,
-                RodeoError::InvalidClaimPolicyVersion
-            );
-        }
-        let splits = match class {
-            ClaimClass::NormalCowboy => (CLAIM_OWNER_BPS, CLAIM_BULL_POOL_BPS),
-            ClaimClass::Desperado => (DESPERADO_CLAIM_OWNER_BPS, DESPERADO_CLAIM_BULL_POOL_BPS),
-            ClaimClass::Bull => (BPS_DENOMINATOR, 0),
-        };
-        return Ok(splits);
+pub fn policy_bps(class: ClaimClass) -> (u64, u64) {
+    match class {
+        ClaimClass::NormalCowboy => (CLAIM_OWNER_BPS, CLAIM_BULL_POOL_BPS),
+        ClaimClass::Desperado => (DESPERADO_CLAIM_OWNER_BPS, DESPERADO_CLAIM_BULL_POOL_BPS),
+        ClaimClass::Bull => (BPS_DENOMINATOR, 0),
     }
-    let policy = policy_account.ok_or(RodeoError::InvalidClaimPolicyVersion)?;
-    require!(
-        policy.policy_version == version,
-        RodeoError::InvalidClaimPolicyVersion
-    );
-    let splits = match class {
-        ClaimClass::NormalCowboy => (
-            policy.normal_cowboy_owner_bps,
-            policy.normal_cowboy_bull_pool_bps,
-        ),
-        ClaimClass::Desperado => (policy.desperado_owner_bps, policy.desperado_bull_pool_bps),
-        ClaimClass::Bull => (policy.bull_owner_bps, policy.bull_bull_pool_bps),
-    };
-    Ok(splits)
 }
 
 pub fn claim_credit_pda(
@@ -118,14 +90,12 @@ pub struct SettledClaim {
     pub reason: RewardPaidReason,
 }
 
-/// Settle a gross claim amount according to the claim policy version that
-/// governed the accrual segment.  This is the single canonical implementation
-/// used by both `claim_position` and `claim_credit`.
+/// Settle a gross claim amount according to the immutable V1 claim splits.
+/// This is the single canonical implementation used by both `claim_position`
+/// and `claim_credit`.
 pub fn settle_claim_amount<'info>(
     amount: u64,
     claim_class: ClaimClass,
-    claim_policy_version: u64,
-    claim_policy_account: Option<&Account<'info, ClaimPolicy>>,
     reward_state: &mut RewardState,
     bull_accumulator: &mut BullAccumulator,
     game_state: &GlobalGameState,
@@ -136,9 +106,7 @@ pub fn settle_claim_amount<'info>(
 ) -> Result<SettledClaim> {
     require!(amount > 0, RodeoError::NoClaimableRewards);
 
-    let policy = claim_policy_account.map(|a| a.as_ref());
-    let (owner_bps, _bull_pool_bps) =
-        policy_bps_for_version(claim_policy_version, policy, claim_class)?;
+    let (owner_bps, _bull_pool_bps) = policy_bps(claim_class);
     let owner_amount = math::floor_bps(amount, owner_bps)?;
     let bull_pool_amount = math::checked_sub_u64(amount, owner_amount)?;
 
@@ -252,106 +220,6 @@ fn transfer_receipt_via_delegate<'info>(
 }
 
 // ---------------------------------------------------------------------------
-// InitializeClaimPolicy
-// ---------------------------------------------------------------------------
-
-#[derive(Accounts)]
-pub struct InitializeClaimPolicy<'info> {
-    #[account(mut)]
-    pub authority: Signer<'info>,
-
-    #[account(
-        mut,
-        seeds = [SEED_GLOBAL_CONFIG],
-        bump = global_config.bump,
-    )]
-    pub global_config: Box<Account<'info, GlobalConfig>>,
-
-    #[account(
-        init,
-        payer = authority,
-        space = 8 + ClaimPolicy::INIT_SPACE,
-        seeds = [SEED_CLAIM_POLICY, &(global_config.current_claim_policy_version + 1).to_le_bytes()],
-        bump
-    )]
-    pub claim_policy: Box<Account<'info, ClaimPolicy>>,
-
-    pub system_program: Program<'info, System>,
-}
-
-fn validate_claim_policy_splits(policy: &ClaimPolicy) -> Result<()> {
-    let classes = [
-        (
-            policy.normal_cowboy_owner_bps,
-            policy.normal_cowboy_bull_pool_bps,
-        ),
-        (policy.desperado_owner_bps, policy.desperado_bull_pool_bps),
-        (policy.bull_owner_bps, policy.bull_bull_pool_bps),
-    ];
-    for (owner_bps, bull_pool_bps) in classes.iter() {
-        require!(
-            *owner_bps <= BPS_DENOMINATOR,
-            RodeoError::InvalidClaimPolicySplits
-        );
-        require!(
-            *bull_pool_bps <= BPS_DENOMINATOR,
-            RodeoError::InvalidClaimPolicySplits
-        );
-        require!(
-            math::checked_add_u64(*owner_bps, *bull_pool_bps)? == BPS_DENOMINATOR,
-            RodeoError::InvalidClaimPolicySplits
-        );
-    }
-    Ok(())
-}
-
-pub fn initialize_claim_policy(
-    ctx: Context<InitializeClaimPolicy>,
-    normal_cowboy_owner_bps: u64,
-    normal_cowboy_bull_pool_bps: u64,
-    desperado_owner_bps: u64,
-    desperado_bull_pool_bps: u64,
-    bull_owner_bps: u64,
-    bull_bull_pool_bps: u64,
-) -> Result<()> {
-    let authority = ctx.accounts.authority.key();
-    require!(
-        authority == ctx.accounts.global_config.upgrade_council
-            || authority == ctx.accounts.global_config.treasury_council,
-        RodeoError::InvalidGovernanceAuthority
-    );
-
-    let next_version =
-        math::checked_add_u64(ctx.accounts.global_config.current_claim_policy_version, 1)?;
-    let policy = &mut ctx.accounts.claim_policy;
-    policy.version = 1;
-    policy.policy_version = next_version;
-    policy.normal_cowboy_owner_bps = normal_cowboy_owner_bps;
-    policy.normal_cowboy_bull_pool_bps = normal_cowboy_bull_pool_bps;
-    policy.desperado_owner_bps = desperado_owner_bps;
-    policy.desperado_bull_pool_bps = desperado_bull_pool_bps;
-    policy.bull_owner_bps = bull_owner_bps;
-    policy.bull_bull_pool_bps = bull_bull_pool_bps;
-    policy.bump = ctx.bumps.claim_policy;
-
-    validate_claim_policy_splits(policy)?;
-
-    ctx.accounts.global_config.current_claim_policy_version = next_version;
-
-    emit!(ClaimPolicyInitialized {
-        policy_version: next_version,
-        authority,
-        normal_cowboy_owner_bps,
-        normal_cowboy_bull_pool_bps,
-        desperado_owner_bps,
-        desperado_bull_pool_bps,
-        bull_owner_bps,
-        bull_bull_pool_bps,
-    });
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Account contexts
 // ---------------------------------------------------------------------------
 
@@ -411,7 +279,7 @@ pub struct PrepareTransfer<'info> {
         init_if_needed,
         payer = owner,
         space = 8 + ClaimCredit::INIT_SPACE,
-        seeds = [SEED_CLAIM_CREDIT, owner.key().as_ref(), &position.claim_policy_version.to_le_bytes(), &[claim_class_of_position(&position) as u8]],
+        seeds = [SEED_CLAIM_CREDIT, owner.key().as_ref(), &CLAIM_POLICY_VERSION_V1, &[claim_class_of_position(&position) as u8]],
         bump,
     )]
     pub claim_credit: Box<Account<'info, ClaimCredit>>,
@@ -494,19 +362,11 @@ pub struct ClaimCreditAccounts<'info> {
 
     #[account(
         mut,
-        seeds = [SEED_CLAIM_CREDIT, owner.key().as_ref(), &claim_credit.claim_policy_version.to_le_bytes(), &[claim_credit.claim_class as u8]],
+        seeds = [SEED_CLAIM_CREDIT, owner.key().as_ref(), &CLAIM_POLICY_VERSION_V1, &[claim_credit.claim_class as u8]],
         bump = claim_credit.bump,
         constraint = claim_credit.wallet == owner.key() @ RodeoError::InvalidOwner,
     )]
     pub claim_credit: Box<Account<'info, ClaimCredit>>,
-
-    /// CHECK: Optional claim-policy account.  Required for versions > 1; V1 is
-    /// hardcoded.  PDA correctness is verified in `claim_credit` when present.
-    #[account(
-        seeds = [SEED_CLAIM_POLICY, &claim_credit.claim_policy_version.to_le_bytes()],
-        bump,
-    )]
-    pub claim_policy: Option<Box<Account<'info, ClaimPolicy>>>,
 
     #[account(
         init_if_needed,
@@ -606,7 +466,7 @@ pub struct NativeTransferPosition<'info> {
         init_if_needed,
         payer = seller,
         space = 8 + ClaimCredit::INIT_SPACE,
-        seeds = [SEED_CLAIM_CREDIT, seller.key().as_ref(), &position.claim_policy_version.to_le_bytes(), &[claim_class_of_position(&position) as u8]],
+        seeds = [SEED_CLAIM_CREDIT, seller.key().as_ref(), &CLAIM_POLICY_VERSION_V1, &[claim_class_of_position(&position) as u8]],
         bump,
     )]
     pub seller_claim_credit: Box<Account<'info, ClaimCredit>>,
@@ -678,7 +538,7 @@ pub struct GiftPosition<'info> {
         init_if_needed,
         payer = seller,
         space = 8 + ClaimCredit::INIT_SPACE,
-        seeds = [SEED_CLAIM_CREDIT, seller.key().as_ref(), &position.claim_policy_version.to_le_bytes(), &[claim_class_of_position(&position) as u8]],
+        seeds = [SEED_CLAIM_CREDIT, seller.key().as_ref(), &CLAIM_POLICY_VERSION_V1, &[claim_class_of_position(&position) as u8]],
         bump,
     )]
     pub seller_claim_credit: Box<Account<'info, ClaimCredit>>,
@@ -716,7 +576,7 @@ fn checkpoint_position_claimable(
         if claim_credit.version == 0 {
             claim_credit.version = ACCOUNT_VERSION_CLAIM_CREDIT;
             claim_credit.wallet = wallet;
-            claim_credit.claim_policy_version = position.claim_policy_version;
+            claim_credit.claim_policy_version = 1;
             claim_credit.claim_class = claim_class_of_position(position);
             claim_credit.amount_atomic = 0;
             claim_credit.bump = bump;
@@ -743,10 +603,8 @@ fn remove_role_from_active_counts(
         Role::Bull => {
             global_game_state.active_bull_count =
                 math::checked_sub_u64(global_game_state.active_bull_count, 1)?;
-            global_game_state.total_active_bull_power = math::checked_sub_u64(
-                global_game_state.total_active_bull_power,
-                position.buck_power as u64,
-            )?;
+            global_game_state.total_active_bull_power =
+                math::checked_sub_u64(global_game_state.total_active_bull_power, position.buck_power as u64)?;
         }
         Role::Unassigned => {}
     }
@@ -769,10 +627,8 @@ fn add_role_to_active_counts(
         Role::Bull => {
             global_game_state.active_bull_count =
                 math::checked_add_u64(global_game_state.active_bull_count, 1)?;
-            global_game_state.total_active_bull_power = math::checked_add_u64(
-                global_game_state.total_active_bull_power,
-                position.buck_power as u64,
-            )?;
+            global_game_state.total_active_bull_power =
+                math::checked_add_u64(global_game_state.total_active_bull_power, position.buck_power as u64)?;
         }
         Role::Unassigned => {}
     }
@@ -808,12 +664,8 @@ fn remove_bull_from_current_registry_with_payload(
     bull_registry: &mut BullRegistry,
     payload: &BullProofPayloadRef<'_>,
 ) -> Result<()> {
-    let current_owner = payload
-        .current_owner()?
-        .ok_or(RodeoError::BullProofBufferIncomplete)?;
-    let remove_bull = payload
-        .remove_bull()?
-        .ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let current_owner = payload.current_owner()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let remove_bull = payload.remove_bull()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
 
     require_keys_eq!(
         current_owner.leaf.owner,
@@ -869,12 +721,8 @@ fn add_bull_to_current_registry_with_payload(
     bull_registry: &mut BullRegistry,
     payload: &BullProofPayloadRef<'_>,
 ) -> Result<()> {
-    let current_owner = payload
-        .current_owner()?
-        .ok_or(RodeoError::BullProofBufferIncomplete)?;
-    let current_bull = payload
-        .current_bull()?
-        .ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let current_owner = payload.current_owner()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let current_bull = payload.current_bull()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
 
     let bull_leaf = BullLeaf {
         position: position_key,
@@ -912,18 +760,10 @@ fn execute_native_transfer_composite(
     seller: &Pubkey,
     buyer: &Pubkey,
 ) -> Result<()> {
-    let seller_owner = payload
-        .seller_owner()?
-        .ok_or(RodeoError::BullProofBufferIncomplete)?;
-    let remove_bull = payload
-        .remove_bull()?
-        .ok_or(RodeoError::BullProofBufferIncomplete)?;
-    let buyer_owner = payload
-        .buyer_owner()?
-        .ok_or(RodeoError::BullProofBufferIncomplete)?;
-    let add_bull = payload
-        .add_bull()?
-        .ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let seller_owner = payload.seller_owner()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let remove_bull = payload.remove_bull()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let buyer_owner = payload.buyer_owner()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let add_bull = payload.add_bull()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
 
     require_keys_eq!(
         seller_owner.leaf.owner,
@@ -965,11 +805,7 @@ fn execute_native_transfer_composite(
 
     // 1. Verify and apply removal against starting R0/V.
     verify_owner_ref(&bull_registry.owner_tree_root, seller, seller_owner)?;
-    verify_bull_ref(
-        &seller_owner.leaf.bull_tree_root,
-        &position_key,
-        remove_bull,
-    )?;
+    verify_bull_ref(&seller_owner.leaf.bull_tree_root, &position_key, remove_bull)?;
 
     remove_bull_from_registry(
         bull_registry,
@@ -1000,11 +836,7 @@ fn execute_native_transfer_composite(
     Ok(())
 }
 
-fn reset_reward_baseline(
-    position: &mut Position,
-    reward_state: &RewardState,
-    bull_accumulator: &BullAccumulator,
-) {
+fn reset_reward_baseline(position: &mut Position, reward_state: &RewardState, bull_accumulator: &BullAccumulator) {
     position.last_cowboy_reward_index = reward_state.cowboy_reward_index;
     position.last_bull_reward_per_weight = bull_accumulator.reward_per_weight_scaled;
     position.cowboy_accrual_remainder_scaled = 0;
@@ -1020,11 +852,7 @@ pub fn prepare_transfer(ctx: Context<PrepareTransfer>) -> Result<()> {
     crate::require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
     let live_owner = parse_core_asset_owner(&ctx.accounts.receipt_asset.to_account_info())?;
-    require_keys_eq!(
-        live_owner,
-        ctx.accounts.owner.key(),
-        RodeoError::InvalidCoreAssetOwner
-    );
+    require_keys_eq!(live_owner, ctx.accounts.owner.key(), RodeoError::InvalidCoreAssetOwner);
 
     let position = &mut ctx.accounts.position;
     let position_key = position.key();
@@ -1059,22 +887,13 @@ pub fn prepare_transfer(ctx: Context<PrepareTransfer>) -> Result<()> {
             &ctx.accounts.bull_registry,
             now,
         )?;
-        remove_bull_from_current_registry_with_payload(
-            position,
-            position_key,
-            &mut ctx.accounts.bull_registry,
-            &payload,
-        )?;
+        remove_bull_from_current_registry_with_payload(position, position_key, &mut ctx.accounts.bull_registry, &payload)?;
         drop(buffer_data);
         mark_transfer_buffer_consumed(&buffer_info)?;
     }
     remove_role_from_active_counts(position, &mut ctx.accounts.global_game_state)?;
 
-    reset_reward_baseline(
-        position,
-        &ctx.accounts.reward_state,
-        &ctx.accounts.bull_accumulator,
-    );
+    reset_reward_baseline(position, &ctx.accounts.reward_state, &ctx.accounts.bull_accumulator);
     position.status = PositionStatus::TransferReady;
     position.state_version = math::checked_add_u64(position.state_version, 1)?;
 
@@ -1093,13 +912,12 @@ pub fn prepare_transfer(ctx: Context<PrepareTransfer>) -> Result<()> {
         false,
     )?;
 
-    let claim_policy_version = ctx.accounts.position.claim_policy_version;
     let claim_class = claim_class_of_position(&ctx.accounts.position);
 
     emit!(PositionTransferPrepared {
         position: position_key,
         owner: ctx.accounts.owner.key(),
-        claim_policy_version,
+        claim_policy_version: 1,
         claim_class,
         credit_amount,
     });
@@ -1107,7 +925,7 @@ pub fn prepare_transfer(ctx: Context<PrepareTransfer>) -> Result<()> {
     emit!(ClaimCreditCheckpointed {
         position: position_key,
         wallet: ctx.accounts.owner.key(),
-        claim_policy_version,
+        claim_policy_version: 1,
         claim_class,
         amount_atomic: credit_amount,
     });
@@ -1120,21 +938,13 @@ pub fn activate_position(ctx: Context<ActivatePosition>) -> Result<()> {
     crate::require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
     let live_owner = parse_core_asset_owner(&ctx.accounts.receipt_asset.to_account_info())?;
-    require_keys_eq!(
-        live_owner,
-        ctx.accounts.new_owner.key(),
-        RodeoError::InvalidCoreAssetOwner
-    );
+    require_keys_eq!(live_owner, ctx.accounts.new_owner.key(), RodeoError::InvalidCoreAssetOwner);
 
     let position = &mut ctx.accounts.position;
     let position_key = position.key();
 
     position.owner = ctx.accounts.new_owner.key();
-    reset_reward_baseline(
-        position,
-        &ctx.accounts.reward_state,
-        &ctx.accounts.bull_accumulator,
-    );
+    reset_reward_baseline(position, &ctx.accounts.reward_state, &ctx.accounts.bull_accumulator);
 
     if position.role == Role::Bull {
         let buffer_info = ctx
@@ -1157,18 +967,12 @@ pub fn activate_position(ctx: Context<ActivatePosition>) -> Result<()> {
             &mut ctx.accounts.reward_state,
             &ctx.accounts.global_game_state,
         )?;
-        add_bull_to_current_registry_with_payload(
-            position,
-            position_key,
-            &mut ctx.accounts.bull_registry,
-            &payload,
-        )?;
+        add_bull_to_current_registry_with_payload(position, position_key, &mut ctx.accounts.bull_registry, &payload)?;
         drop(buffer_data);
         mark_transfer_buffer_consumed(&buffer_info)?;
     }
     add_role_to_active_counts(position, &mut ctx.accounts.global_game_state)?;
 
-    position.claim_policy_version = ctx.accounts.global_config.current_claim_policy_version;
     position.status = PositionStatus::Active;
 
     set_receipt_frozen(
@@ -1220,8 +1024,6 @@ pub fn claim_credit(ctx: Context<ClaimCreditAccounts>) -> Result<()> {
     let settled = settle_claim_amount(
         amount,
         ctx.accounts.claim_credit.claim_class,
-        ctx.accounts.claim_credit.claim_policy_version,
-        ctx.accounts.claim_policy.as_ref().map(|a| &**a),
         &mut ctx.accounts.reward_state,
         &mut ctx.accounts.bull_accumulator,
         &ctx.accounts.global_game_state,
@@ -1238,10 +1040,7 @@ pub fn claim_credit(ctx: Context<ClaimCreditAccounts>) -> Result<()> {
         position: ctx.accounts.claim_credit.key(),
         owner: ctx.accounts.owner.key(),
         amount_atomic: settled.owner_amount,
-        recognized_reward_balance_atomic: ctx
-            .accounts
-            .reward_state
-            .recognized_reward_balance_atomic,
+        recognized_reward_balance_atomic: ctx.accounts.reward_state.recognized_reward_balance_atomic,
         reason: settled.reason,
     });
 
@@ -1262,11 +1061,7 @@ pub fn native_transfer_position(ctx: Context<NativeTransferPosition>) -> Result<
     crate::require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
     let live_owner = parse_core_asset_owner(&ctx.accounts.receipt_asset.to_account_info())?;
-    require_keys_eq!(
-        live_owner,
-        ctx.accounts.seller.key(),
-        RodeoError::InvalidCoreAssetOwner
-    );
+    require_keys_eq!(live_owner, ctx.accounts.seller.key(), RodeoError::InvalidCoreAssetOwner);
 
     let position = &mut ctx.accounts.position;
     let position_key = position.key();
@@ -1274,14 +1069,8 @@ pub fn native_transfer_position(ctx: Context<NativeTransferPosition>) -> Result<
     let buyer = ctx.accounts.buyer.key();
 
     require!(position.owner == seller, RodeoError::InvalidOwner);
-    require!(
-        position.status == PositionStatus::Active,
-        RodeoError::InvalidRole
-    );
-    require!(
-        !position.pending_action_active,
-        RodeoError::PendingActionConflict
-    );
+    require!(position.status == PositionStatus::Active, RodeoError::InvalidRole);
+    require!(!position.pending_action_active, RodeoError::PendingActionConflict);
 
     sync_position_rewards(
         position,
@@ -1341,11 +1130,7 @@ pub fn native_transfer_position(ctx: Context<NativeTransferPosition>) -> Result<
     )?;
 
     position.owner = buyer;
-    reset_reward_baseline(
-        position,
-        &ctx.accounts.reward_state,
-        &ctx.accounts.bull_accumulator,
-    );
+    reset_reward_baseline(position, &ctx.accounts.reward_state, &ctx.accounts.bull_accumulator);
 
     if position.role == Role::Bull {
         distribute_unallocated_bull_pool(
@@ -1356,23 +1141,21 @@ pub fn native_transfer_position(ctx: Context<NativeTransferPosition>) -> Result<
     }
     add_role_to_active_counts(position, &mut ctx.accounts.global_game_state)?;
 
-    let claim_policy_version = position.claim_policy_version;
     let claim_class = claim_class_of_position(position);
-    position.claim_policy_version = ctx.accounts.global_config.current_claim_policy_version;
     position.state_version = math::checked_add_u64(position.state_version, 1)?;
 
     emit!(PositionOwnershipTransferred {
         position: position_key,
         seller,
         buyer,
-        claim_policy_version,
+        claim_policy_version: 1,
         claim_class,
     });
 
     emit!(ClaimCreditCheckpointed {
         position: position_key,
         wallet: seller,
-        claim_policy_version,
+        claim_policy_version: 1,
         claim_class,
         amount_atomic: credit_amount,
     });
@@ -1385,11 +1168,7 @@ pub fn gift_position(ctx: Context<GiftPosition>) -> Result<()> {
     crate::require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
     let live_owner = parse_core_asset_owner(&ctx.accounts.receipt_asset.to_account_info())?;
-    require_keys_eq!(
-        live_owner,
-        ctx.accounts.seller.key(),
-        RodeoError::InvalidCoreAssetOwner
-    );
+    require_keys_eq!(live_owner, ctx.accounts.seller.key(), RodeoError::InvalidCoreAssetOwner);
 
     let position = &mut ctx.accounts.position;
     let position_key = position.key();
@@ -1397,14 +1176,8 @@ pub fn gift_position(ctx: Context<GiftPosition>) -> Result<()> {
     let recipient = ctx.accounts.recipient.key();
 
     require!(position.owner == seller, RodeoError::InvalidOwner);
-    require!(
-        position.status == PositionStatus::Active,
-        RodeoError::InvalidRole
-    );
-    require!(
-        !position.pending_action_active,
-        RodeoError::PendingActionConflict
-    );
+    require!(position.status == PositionStatus::Active, RodeoError::InvalidRole);
+    require!(!position.pending_action_active, RodeoError::PendingActionConflict);
 
     sync_position_rewards(
         position,
@@ -1464,11 +1237,7 @@ pub fn gift_position(ctx: Context<GiftPosition>) -> Result<()> {
     )?;
 
     position.owner = recipient;
-    reset_reward_baseline(
-        position,
-        &ctx.accounts.reward_state,
-        &ctx.accounts.bull_accumulator,
-    );
+    reset_reward_baseline(position, &ctx.accounts.reward_state, &ctx.accounts.bull_accumulator);
 
     if position.role == Role::Bull {
         distribute_unallocated_bull_pool(
@@ -1479,23 +1248,21 @@ pub fn gift_position(ctx: Context<GiftPosition>) -> Result<()> {
     }
     add_role_to_active_counts(position, &mut ctx.accounts.global_game_state)?;
 
-    let claim_policy_version = position.claim_policy_version;
     let claim_class = claim_class_of_position(position);
-    position.claim_policy_version = ctx.accounts.global_config.current_claim_policy_version;
     position.state_version = math::checked_add_u64(position.state_version, 1)?;
 
     emit!(PositionGifted {
         position: position_key,
         seller,
         recipient,
-        claim_policy_version,
+        claim_policy_version: 1,
         claim_class,
     });
 
     emit!(ClaimCreditCheckpointed {
         position: position_key,
         wallet: seller,
-        claim_policy_version,
+        claim_policy_version: 1,
         claim_class,
         amount_atomic: credit_amount,
     });
@@ -1506,18 +1273,6 @@ pub fn gift_position(ctx: Context<GiftPosition>) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
-
-#[event]
-pub struct ClaimPolicyInitialized {
-    pub policy_version: u64,
-    pub authority: Pubkey,
-    pub normal_cowboy_owner_bps: u64,
-    pub normal_cowboy_bull_pool_bps: u64,
-    pub desperado_owner_bps: u64,
-    pub desperado_bull_pool_bps: u64,
-    pub bull_owner_bps: u64,
-    pub bull_bull_pool_bps: u64,
-}
 
 #[event]
 pub struct PositionTransferPrepared {
@@ -1569,4 +1324,149 @@ pub struct ClaimCreditClaimed {
     pub gross_amount: u64,
     pub owner_amount: u64,
     pub bull_pool_amount: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Liability reconciliation tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::math;
+    use crate::state::{BullAccumulator, GlobalGameState, RewardState};
+
+    fn reward_state_with(recognized: u64, claimable_liability: u64) -> RewardState {
+        RewardState {
+            version: ACCOUNT_VERSION_REWARD_STATE,
+            global_config: Pubkey::default(),
+            current_epoch: 0,
+            epoch_started_at: 0,
+            last_closed_epoch_timestamp: 0,
+            total_ansem_liability_atomic: recognized,
+            cowboy_unmaterialized_liability_atomic: 0,
+            position_claimable_liability_atomic: claimable_liability,
+            bull_pool_liability_atomic: 0,
+            bull_pool_unallocated_liability_atomic: 0,
+            suit_vault_liability_atomic: 0,
+            recognized_reward_balance_atomic: recognized,
+            ansem_emitted_atomic: 0,
+            ansem_claimed_atomic: 0,
+            orphaned_reward_released_atomic: 0,
+            cowboy_reward_index: 0,
+            cowboy_index_remainder_scaled: 0,
+            cowboy_orphaned_accrual_remainder_scaled: 0,
+            suit_epoch: 0,
+            bump: 0,
+        }
+    }
+
+    fn bull_accumulator() -> BullAccumulator {
+        BullAccumulator {
+            version: ACCOUNT_VERSION_BULL_ACCUMULATOR,
+            global_config: Pubkey::default(),
+            reward_per_weight_scaled: 0,
+            bull_index_remainder_scaled: 0,
+            bull_orphaned_accrual_remainder_scaled: 0,
+            bump: 0,
+        }
+    }
+
+    fn game_state() -> GlobalGameState {
+        GlobalGameState {
+            version: ACCOUNT_VERSION_GLOBAL_GAME_STATE,
+            global_config: Pubkey::default(),
+            next_position_id: 0,
+            total_completed_reveals: 0,
+            live_position_count: 0,
+            active_cowboy_count: 1,
+            active_bull_count: 0,
+            total_active_cowboy_weight: 10_000,
+            total_active_bull_power: 0,
+            accounted_principal_atomic: 0,
+            bump: 0,
+        }
+    }
+
+    fn apply_claim_split(
+        reward_state: &mut RewardState,
+        gross: u64,
+        class: ClaimClass,
+    ) -> (u64, u64) {
+        let (owner_bps, _) = policy_bps(class);
+        let owner_amount = math::floor_bps(gross, owner_bps).unwrap();
+        let bull_pool_amount = gross - owner_amount;
+
+        reward_state.position_claimable_liability_atomic -= gross;
+        reward_state.total_ansem_liability_atomic -= owner_amount;
+        reward_state.recognized_reward_balance_atomic -= owner_amount;
+        reward_state.ansem_claimed_atomic += owner_amount;
+
+        if bull_pool_amount > 0 {
+            reward_state.bull_pool_unallocated_liability_atomic += bull_pool_amount;
+        }
+
+        (owner_amount, bull_pool_amount)
+    }
+
+    #[test]
+    fn normal_cowboy_10k_split_and_liability() {
+        let mut rs = reward_state_with(10_000, 10_000);
+        let (owner, bull) = apply_claim_split(&mut rs, 10_000, ClaimClass::NormalCowboy);
+        assert_eq!(owner, 8_000);
+        assert_eq!(bull, 2_000);
+        assert_eq!(rs.position_claimable_liability_atomic, 0);
+        assert_eq!(rs.total_ansem_liability_atomic, 2_000);
+        assert_eq!(rs.recognized_reward_balance_atomic, 2_000);
+        assert_eq!(rs.ansem_claimed_atomic, 8_000);
+        assert_eq!(rs.bull_pool_unallocated_liability_atomic, 2_000);
+        assert_eq!(rs.bull_pool_liability_atomic, 0);
+    }
+
+    #[test]
+    fn desperado_10k_split_and_liability() {
+        let mut rs = reward_state_with(10_000, 10_000);
+        let (owner, bull) = apply_claim_split(&mut rs, 10_000, ClaimClass::Desperado);
+        assert_eq!(owner, 9_800);
+        assert_eq!(bull, 200);
+        assert_eq!(rs.position_claimable_liability_atomic, 0);
+        assert_eq!(rs.total_ansem_liability_atomic, 200);
+        assert_eq!(rs.recognized_reward_balance_atomic, 200);
+        assert_eq!(rs.ansem_claimed_atomic, 9_800);
+        assert_eq!(rs.bull_pool_unallocated_liability_atomic, 200);
+    }
+
+    #[test]
+    fn bull_10k_split_and_liability() {
+        let mut rs = reward_state_with(10_000, 10_000);
+        let (owner, bull) = apply_claim_split(&mut rs, 10_000, ClaimClass::Bull);
+        assert_eq!(owner, 10_000);
+        assert_eq!(bull, 0);
+        assert_eq!(rs.position_claimable_liability_atomic, 0);
+        assert_eq!(rs.total_ansem_liability_atomic, 0);
+        assert_eq!(rs.recognized_reward_balance_atomic, 0);
+        assert_eq!(rs.ansem_claimed_atomic, 10_000);
+        assert_eq!(rs.bull_pool_unallocated_liability_atomic, 0);
+    }
+
+    #[test]
+    fn multiple_claim_credits_aggregate() {
+        let mut rs = reward_state_with(15_000, 15_000);
+        let (o1, b1) = apply_claim_split(&mut rs, 10_000, ClaimClass::NormalCowboy);
+        let (o2, b2) = apply_claim_split(&mut rs, 5_000, ClaimClass::NormalCowboy);
+        assert_eq!(o1 + o2, 12_000);
+        assert_eq!(b1 + b2, 3_000);
+        assert_eq!(rs.position_claimable_liability_atomic, 0);
+        assert_eq!(rs.total_ansem_liability_atomic, 3_000);
+        assert_eq!(rs.recognized_reward_balance_atomic, 3_000);
+        assert_eq!(rs.ansem_claimed_atomic, 12_000);
+        assert_eq!(rs.bull_pool_unallocated_liability_atomic, 3_000);
+    }
+
+    #[test]
+    fn zero_gross_claim_split_is_zero() {
+        let (owner, bull) = policy_bps(ClaimClass::NormalCowboy);
+        assert_eq!(math::floor_bps(0, owner).unwrap(), 0);
+        assert_eq!(0u64.checked_sub(0).unwrap(), 0);
+    }
 }

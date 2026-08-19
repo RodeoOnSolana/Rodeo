@@ -23,11 +23,11 @@ pub mod transfer_proof_buffer;
 use borrowed_proof::*;
 use bull_registry::*;
 use constants::*;
-use marketplace::*;
 use mpl_core::instructions::{
     BurnV1Builder, CreateCollectionV2Builder, CreateV2Builder, TransferV1Builder, UpdateV1Builder,
 };
 use mpl_core::types::{DataState, Plugin, PluginAuthority, PluginAuthorityPair, PluginType};
+use marketplace::*;
 use receipt::*;
 use state::*;
 use transfer_proof_buffer::*;
@@ -151,7 +151,6 @@ pub mod rodeo_core {
         global_config.treasury_council = treasury_council;
         global_config.emergency_guardians = emergency_guardians;
         global_config.current_config_version = 1;
-        global_config.current_claim_policy_version = 1;
         global_config.bump = ctx.bumps.global_config;
         global_config.principal_vault_bump = ctx.bumps.principal_vault;
         global_config.reward_vault_bump = ctx.bumps.reward_vault;
@@ -398,7 +397,6 @@ pub mod rodeo_core {
         position.last_bull_reward_per_weight = 0;
         position.bull_accrual_remainder_scaled = 0;
         position.claimable_ansem_atomic = 0;
-        position.claim_policy_version = ctx.accounts.global_config.current_claim_policy_version;
         position.settlement_nonce = 0;
         position.state_version = 0;
         position.listing_nonce = 0;
@@ -933,8 +931,6 @@ pub mod rodeo_core {
         let settled = crate::marketplace::settle_claim_amount(
             claimable,
             claim_class,
-            position.claim_policy_version,
-            ctx.accounts.claim_policy.as_ref().map(|a| &**a),
             &mut ctx.accounts.reward_state,
             &mut ctx.accounts.bull_accumulator,
             &ctx.accounts.global_game_state,
@@ -948,15 +944,11 @@ pub mod rodeo_core {
             position: position_key,
             owner,
             amount_atomic: settled.owner_amount,
-            recognized_reward_balance_atomic: ctx
-                .accounts
-                .reward_state
-                .recognized_reward_balance_atomic,
+            recognized_reward_balance_atomic: ctx.accounts.reward_state.recognized_reward_balance_atomic,
             reason: settled.reason,
         });
 
         position.claimable_ansem_atomic = 0;
-        position.claim_policy_version = ctx.accounts.global_config.current_claim_policy_version;
         cooldown.last_claimed_at = now;
 
         emit!(PositionClaimed {
@@ -967,26 +959,6 @@ pub mod rodeo_core {
         });
 
         Ok(())
-    }
-
-    pub fn initialize_claim_policy(
-        ctx: Context<InitializeClaimPolicy>,
-        normal_cowboy_owner_bps: u64,
-        normal_cowboy_bull_pool_bps: u64,
-        desperado_owner_bps: u64,
-        desperado_bull_pool_bps: u64,
-        bull_owner_bps: u64,
-        bull_bull_pool_bps: u64,
-    ) -> Result<()> {
-        crate::marketplace::initialize_claim_policy(
-            ctx,
-            normal_cowboy_owner_bps,
-            normal_cowboy_bull_pool_bps,
-            desperado_owner_bps,
-            desperado_bull_pool_bps,
-            bull_owner_bps,
-            bull_bull_pool_bps,
-        )
     }
 
     pub fn initialize_transfer_bull_proof(
@@ -1767,7 +1739,6 @@ pub mod rodeo_core {
             treasury_council: Pubkey::default(),
             emergency_guardians: Pubkey::default(),
             current_config_version: 0,
-            current_claim_policy_version: 1,
             bump: global_bump,
             principal_vault_bump: 0,
             reward_vault_bump: 0,
@@ -3867,14 +3838,6 @@ pub struct ClaimPosition<'info> {
     )]
     pub global_config: Box<Account<'info, GlobalConfig>>,
 
-    /// CHECK: Optional claim-policy account.  Required for versions > 1; V1 is
-    /// hardcoded.  PDA correctness is verified in `claim_position` when present.
-    #[account(
-        seeds = [SEED_CLAIM_POLICY, &position.claim_policy_version.to_le_bytes()],
-        bump,
-    )]
-    pub claim_policy: Option<Box<Account<'info, ClaimPolicy>>>,
-
     #[account(
         mut,
         seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
@@ -4713,10 +4676,6 @@ pub enum RodeoError {
     UnauthorizedInitializer,
     #[msg("Invalid governance authority")]
     InvalidGovernanceAuthority,
-    #[msg("Invalid claim policy splits")]
-    InvalidClaimPolicySplits,
-    #[msg("Invalid claim policy version")]
-    InvalidClaimPolicyVersion,
     #[msg("Governance authorities must be pairwise distinct")]
     GovernanceAuthoritiesNotDistinct,
     #[msg("RODEO and ANSEM mints must be different")]
@@ -4934,10 +4893,7 @@ pub(crate) fn require_elapsed_epochs_closed(reward_state: &RewardState, now: i64
 }
 
 /// Synchronize a Cowboy (or Desperado) position with the global Cowboy reward index.
-pub(crate) fn sync_cowboy_rewards(
-    position: &mut Position,
-    reward_state: &mut RewardState,
-) -> Result<()> {
+pub(crate) fn sync_cowboy_rewards(position: &mut Position, reward_state: &mut RewardState) -> Result<()> {
     if position.role != Role::Cowboy {
         return Ok(());
     }
@@ -5203,10 +5159,12 @@ fn resolve_mint_theft(
             msg!("BPI_RMT: payload_none");
             RodeoError::BullProofBufferIncomplete
         })?;
-        let victim_proof = p.victim_owner()?.ok_or_else(|| {
-            msg!("BPI_RMT: victim_owner_missing");
-            RodeoError::BullProofBufferIncomplete
-        })?;
+        let victim_proof = p
+            .victim_owner()?
+            .ok_or_else(|| {
+                msg!("BPI_RMT: victim_owner_missing");
+                RodeoError::BullProofBufferIncomplete
+            })?;
         let (victim_count, victim_power, victim_prefix) = crate::borrowed_proof::verify_owner_ref(
             &pending_randomness.registry_root_snapshot,
             &prospective_owner,
@@ -5239,14 +5197,18 @@ fn resolve_mint_theft(
             msg!("RMT_TRACE: mint_theft_flag={}", theft);
             if theft {
                 stolen = true;
-                let selected_owner = p.selected_owner()?.ok_or_else(|| {
-                    msg!("BPI_RMT: selected_owner_missing");
-                    RodeoError::BullProofBufferIncomplete
-                })?;
-                let selected_bull = p.selected_bull()?.ok_or_else(|| {
-                    msg!("BPI_RMT: selected_bull_missing");
-                    RodeoError::BullProofBufferIncomplete
-                })?;
+                let selected_owner = p
+                    .selected_owner()?
+                    .ok_or_else(|| {
+                        msg!("BPI_RMT: selected_owner_missing");
+                        RodeoError::BullProofBufferIncomplete
+                    })?;
+                let selected_bull = p
+                    .selected_bull()?
+                    .ok_or_else(|| {
+                        msg!("BPI_RMT: selected_bull_missing");
+                        RodeoError::BullProofBufferIncomplete
+                    })?;
                 if selected_owner.leaf.owner == prospective_owner {
                     msg!("BPI_RMT: selected_owner_is_victim");
                     return err!(RodeoError::BullProofBufferIncomplete);
@@ -5263,23 +5225,14 @@ fn resolve_mint_theft(
                 )?;
                 let safe_owner_target =
                     bull_registry::skip_victim_interval(owner_target, victim_prefix, victim_power);
-                msg!(
-                    "RMT_TRACE: owner_target={} safe_owner_target={}",
-                    owner_target,
-                    safe_owner_target
-                );
+                msg!("RMT_TRACE: owner_target={} safe_owner_target={}", owner_target, safe_owner_target);
                 let (_selected_owner_count, selected_owner_power, selected_owner_prefix) =
                     crate::borrowed_proof::verify_owner_ref(
                         &pending_randomness.registry_root_snapshot,
                         &selected_owner.leaf.owner,
                         selected_owner,
                     )?;
-                msg!(
-                    "RMT_TRACE: selected_owner={} sel_owner_power={} sel_owner_prefix={}",
-                    selected_owner.leaf.owner,
-                    selected_owner_power,
-                    selected_owner_prefix
-                );
+                msg!("RMT_TRACE: selected_owner={} sel_owner_power={} sel_owner_prefix={}", selected_owner.leaf.owner, selected_owner_power, selected_owner_prefix);
                 if !bull_registry::leaf_contains_target(
                     selected_owner_prefix,
                     selected_owner_power,
@@ -5351,20 +5304,21 @@ fn apply_new_bull_registry_mutation(
         msg!("BPI_ANB: payload_none");
         RodeoError::BullProofBufferIncomplete
     })?;
-    let current_owner = p.current_owner()?.ok_or_else(|| {
-        msg!("BPI_ANB: current_owner_missing");
-        RodeoError::BullProofBufferIncomplete
-    })?;
-    let current_bull = p.current_bull()?.ok_or_else(|| {
-        msg!("BPI_ANB: current_bull_missing");
-        RodeoError::BullProofBufferIncomplete
-    })?;
+    let current_owner = p
+        .current_owner()?
+        .ok_or_else(|| {
+            msg!("BPI_ANB: current_owner_missing");
+            RodeoError::BullProofBufferIncomplete
+        })?;
+    let current_bull = p
+        .current_bull()?
+        .ok_or_else(|| {
+            msg!("BPI_ANB: current_bull_missing");
+            RodeoError::BullProofBufferIncomplete
+        })?;
     msg!(
         "ANB_TRACE: final_owner={} position={} current_owner_leaf={} current_bull_leaf={}",
-        final_owner,
-        position_key,
-        current_owner.leaf.owner,
-        current_bull.leaf.position
+        final_owner, position_key, current_owner.leaf.owner, current_bull.leaf.position
     );
     let bull_leaf = BullLeaf {
         position: position_key,
@@ -6550,11 +6504,11 @@ mod tests {
 
     #[test]
     fn account_init_space_values() {
-        assert_eq!(GlobalConfig::INIT_SPACE, 274); // +8 for current_claim_policy_version
+        assert_eq!(GlobalConfig::INIT_SPACE, 266);
         assert_eq!(RewardState::INIT_SPACE, 194);
         assert_eq!(GlobalGameState::INIT_SPACE, 106);
         assert_eq!(BullAccumulator::INIT_SPACE, 82);
-        assert_eq!(Position::INIT_SPACE, 247); // +8 for claim_policy_version
+        assert_eq!(Position::INIT_SPACE, 239);
         assert_eq!(WalletClaimCooldown::INIT_SPACE, 74);
         assert_eq!(PendingRandomness::INIT_SPACE, 228);
         assert_eq!(ProtocolConfig::INIT_SPACE, 350);
@@ -6569,29 +6523,19 @@ mod tests {
         state::ActionType::Unstake.serialize(&mut buf).unwrap();
         assert_eq!(buf[0], 1);
         buf.clear();
-        state::ActionType::PrepareTransfer
-            .serialize(&mut buf)
-            .unwrap();
+        state::ActionType::PrepareTransfer.serialize(&mut buf).unwrap();
         assert_eq!(buf[0], 2);
         buf.clear();
-        state::ActionType::ActivatePosition
-            .serialize(&mut buf)
-            .unwrap();
+        state::ActionType::ActivatePosition.serialize(&mut buf).unwrap();
         assert_eq!(buf[0], 3);
         buf.clear();
-        state::ActionType::NativeTransferRemove
-            .serialize(&mut buf)
-            .unwrap();
+        state::ActionType::NativeTransferRemove.serialize(&mut buf).unwrap();
         assert_eq!(buf[0], 4);
         buf.clear();
-        state::ActionType::NativeTransferAdd
-            .serialize(&mut buf)
-            .unwrap();
+        state::ActionType::NativeTransferAdd.serialize(&mut buf).unwrap();
         assert_eq!(buf[0], 5);
         buf.clear();
-        state::ActionType::NativeTransferComposite
-            .serialize(&mut buf)
-            .unwrap();
+        state::ActionType::NativeTransferComposite.serialize(&mut buf).unwrap();
         assert_eq!(buf[0], 6);
     }
 
@@ -7107,7 +7051,6 @@ mod tests {
             cowboy_accrual_remainder_scaled: 0,
             bull_accrual_remainder_scaled: 0,
             claimable_ansem_atomic: 0,
-            claim_policy_version: 1,
             settlement_nonce: 0,
             state_version: 0,
             listing_nonce: 0,

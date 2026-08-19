@@ -2,18 +2,13 @@
 //! against accidental account-size changes and provide a single place to verify
 //! migration math when fields are added.
 
-use crate::state::*;
 use anchor_lang::Space;
+use crate::state::*;
 
 pub const GLOBAL_CONFIG_BASE_SPACE: usize = 8 + GlobalConfig::INIT_SPACE;
 pub const POSITION_BASE_SPACE: usize = 8 + Position::INIT_SPACE;
-pub const CLAIM_POLICY_BASE_SPACE: usize = 8 + ClaimPolicy::INIT_SPACE;
 pub const CLAIM_CREDIT_BASE_SPACE: usize = 8 + ClaimCredit::INIT_SPACE;
 pub const BULL_PROOF_BUFFER_BASE_SPACE: usize = 8 + BullProofBuffer::INIT_SPACE;
-
-// Size deltas relative to the pre-ClaimPolicy layout used in Phase 3.
-// Adding `current_claim_policy_version: u64` to GlobalConfig: +8 bytes (266 -> 274).
-// Adding `claim_policy_version: u64` to Position: +8 bytes (239 -> 247).
 
 #[cfg(test)]
 mod tests {
@@ -21,20 +16,14 @@ mod tests {
 
     #[test]
     fn global_config_size_is_expected() {
-        // 8 discriminator + 274 bytes of state
-        assert_eq!(GLOBAL_CONFIG_BASE_SPACE, 8 + 274);
+        // 8 discriminator + 266 bytes of state (pre-ClaimPolicy layout)
+        assert_eq!(GLOBAL_CONFIG_BASE_SPACE, 8 + 266);
     }
 
     #[test]
     fn position_size_is_expected() {
-        // 8 discriminator + 247 bytes of state (was 239 before claim_policy_version)
-        assert_eq!(POSITION_BASE_SPACE, 8 + 247);
-    }
-
-    #[test]
-    fn claim_policy_size_is_expected() {
-        // 8 discriminator + 58 bytes of state
-        assert_eq!(CLAIM_POLICY_BASE_SPACE, 8 + 58);
+        // 8 discriminator + 239 bytes of state (pre-ClaimPolicy layout)
+        assert_eq!(POSITION_BASE_SPACE, 8 + 239);
     }
 
     #[test]
@@ -50,21 +39,14 @@ mod tests {
         // payload length at init time, but the static INIT_SPACE includes the
         // configured maximum.
         let expected_fixed = 8 + 182 + 4;
-        assert_eq!(
-            8 + BullProofBuffer::INIT_SPACE,
-            expected_fixed + crate::constants::BULL_PROOF_BUFFER_MAX_PAYLOAD
-        );
+        assert_eq!(8 + BullProofBuffer::INIT_SPACE, expected_fixed + crate::constants::BULL_PROOF_BUFFER_MAX_PAYLOAD);
     }
 
     #[test]
     fn claim_splits_sum_to_bps() {
+        assert_eq!(crate::constants::CLAIM_OWNER_BPS + crate::constants::CLAIM_BULL_POOL_BPS, 10_000);
         assert_eq!(
-            crate::constants::CLAIM_OWNER_BPS + crate::constants::CLAIM_BULL_POOL_BPS,
-            10_000
-        );
-        assert_eq!(
-            crate::constants::DESPERADO_CLAIM_OWNER_BPS
-                + crate::constants::DESPERADO_CLAIM_BULL_POOL_BPS,
+            crate::constants::DESPERADO_CLAIM_OWNER_BPS + crate::constants::DESPERADO_CLAIM_BULL_POOL_BPS,
             10_000
         );
     }
