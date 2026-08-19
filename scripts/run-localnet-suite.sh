@@ -8,9 +8,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LEDGER_BASE="/tmp/rodeo-localnet-suite-ledger"
 WALLET="${HOME}/.config/solana/id.json"
-PAYER_PUBKEY="$(solana-keygen pubkey "${WALLET}")"
 
-export PATH="/home/rodeosolana/.cargo/bin:/home/rodeosolana/.local/bin:/home/rodeosolana/.local/share/solana/install/active_release/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"
+SOLANA_INSTALL_DIR="${SOLANA_INSTALL_DIR:-$HOME/.local/share/solana/install/active_release}"
+export PATH="${SOLANA_INSTALL_DIR}/bin:${HOME}/.cargo/bin:${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"
 
 SUITE="${1:-}"
 if [ -z "${SUITE}" ]; then
@@ -150,6 +150,11 @@ mkdir -p "${LEDGER}"
 
 cd "${ROOT}"
 
+if [ ! -f "${WALLET}" ]; then
+  solana-keygen new --no-bip39-passphrase --silent --force -o "${WALLET}"
+fi
+PAYER_PUBKEY="$(solana-keygen pubkey "${WALLET}")"
+
 nohup solana-test-validator \
   --ledger "${LEDGER}" \
   --rpc-port "${BASE_PORT}" \
@@ -199,7 +204,6 @@ fi
 
 # Fund the test wallet from the localnet faucet. The wallet file is created on
 # demand above; the fresh ledger starts with no balance for it.
-PAYER_PUBKEY="$(solana-keygen pubkey "${WALLET}")"
 if ! solana airdrop 1000 "${PAYER_PUBKEY}" --url "${RPC_URL}" >/dev/null 2>&1; then
   echo "ERROR: failed to airdrop localnet funds to ${PAYER_PUBKEY}" >&2
   dump_validator_log

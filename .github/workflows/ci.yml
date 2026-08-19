@@ -244,7 +244,8 @@ jobs:
         id: epoch-suite
         timeout-minutes: 45
         run: |
-          set -uo pipefail
+          set -u -o pipefail
+          set +e
           chmod +x scripts/run-localnet-suite.sh scripts/ci-localnet-health.sh
           scripts/ci-localnet-health.sh "http://127.0.0.1:8899" /tmp/phase0-epoch-health.log /tmp/rodeo-localnet-suite-ledger-epoch- &
           HEALTH_PID=$!
@@ -355,7 +356,8 @@ jobs:
         id: claim-suite
         timeout-minutes: 45
         run: |
-          set -uo pipefail
+          set -u -o pipefail
+          set +e
           chmod +x scripts/run-localnet-suite.sh scripts/ci-localnet-health.sh
           scripts/ci-localnet-health.sh "http://127.0.0.1:8899" /tmp/phase0-claim-health.log /tmp/rodeo-localnet-suite-ledger-claim- &
           HEALTH_PID=$!
