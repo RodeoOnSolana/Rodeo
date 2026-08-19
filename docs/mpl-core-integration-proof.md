@@ -85,40 +85,42 @@ The `metaplex-foundation/mpl-core` GitHub Releases only publish a prebuilt
 `release/core@0.11.1` or `release/core@0.11.2` tag, so no official prebuilt
 binary exists that exactly matches the pinned client version.
 
-**Chosen approach for 2D3A1:** `scripts/fetch-mpl-core-program.sh` fetches
-the on-chain program directly from its live mainnet-beta deployment via
-`solana program dump`, on every CI run (never committed to git; see
-`.gitignore`). This is:
+**Chosen approach for 2D3A1:** The verified Metaplex Core on-chain program
+binary is committed to this repository under `vendor/mpl-core/mpl_core_program.so`
+and its SHA-256 under `vendor/mpl-core/mpl_core_program.so.sha256`. Required
+CI runs `scripts/verify-mpl-core-program.sh` to load the local binary, verify
+its SHA-256 against the pinned `MPL_CORE_EXPECTED_SHA256`, and write the
+provenance to the job step summary. No live mainnet RPC is used in the
+required merge gate. This is:
 
-- **Not silent**: the SHA-256 is printed, written to
-  `vendor/mpl-core/mpl_core_program.so.sha256`, uploaded as a CI artifact,
-  and appended to the job step summary on every run.
+- **Deterministic and offline-safe**: the committed artifact is loaded at
+  genesis; CI does not depend on `api.mainnet-beta.solana.com` or any other
+  public RPC being available.
 - **Verifiable independently**: the program ID
-  `CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d` and its current executable
-  hash can be cross-checked against any public Solana explorer.
-- **Pinned and verified**: `scripts/fetch-mpl-core-program.sh` retries over
-  multiple public mainnet RPCs with bounded exponential backoff and checks
-  the downloaded binary against a pinned `MPL_CORE_EXPECTED_SHA256`. The
-  default pin is `f03e75373ae9cae07b5875f7818c55147b73c5607ca0f96968bab93cd583dc6e`.
-  If the live deployment no longer matches this hash, CI fails loudly so any
-  unannounced upgrade must be deliberately reviewed before the pin is
-  updated.
+  `CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d` and its executable hash
+  `f03e75373ae9cae07b5875f7818c55147b73c5607ca0f96968bab93cd583dc6e` can be
+  cross-checked against any public Solana explorer.
+- **Pinned and verified**: `scripts/verify-mpl-core-program.sh` fails the job
+  if the committed binary is missing or does not match the expected SHA-256.
+  Any intended pin update must be made by deliberately committing a new
+  verified binary and updating the provenance in this document.
 
-**License note**: `mpl-core`'s crates.io metadata lists a `non-standard`
-license. The on-chain binary is fetched into an ephemeral CI environment for
-test purposes only, is never committed to this repository, and is never
-redistributed; this is flagged here for owner/legal awareness rather than
-resolved unilaterally.
+**License and provenance**: `vendor/mpl-core/LICENSE` contains the full
+Metaplex(TM) NFT Open Source License that governs the committed `mpl-core`
+binary. The artifact is the compiled Object Code of the `mpl-core` fork
+`RodeoOnSolana/mpl-core` at pinned patch commit
+`e31f5de77a0bd23793ddf27bc887dc675ecaec75`. The fork's base/version is
+upstream `metaplex-foundation/mpl-core` `0.11.2`, with the source patch
+provenance already recorded under `## SBF stack safety and the mpl-core fork`
+below. Redistribution of the Object Code is permitted by the license
+provided the license text and attribution notices are included.
 
-**Follow-up alternative** (not implemented in this PR): build
-`programs/mpl-core` from source at commit
-`33eaba4d1cc792f79ee1107a290375efe144dbb2` (the exact commit the `0.11.2`
-client was published from) via `cargo build-sbf`, which would remove the
-dependency on a live mainnet RPC endpoint during CI. This was not attempted
-in 2D3A1 because that commit could not be located in the public commit
-history returned by the GitHub API within this proof pass (404); resolving
-that discrepancy with Metaplex is tracked as a follow-up rather than blocking
-this PR.
+**Refreshing the pin**: `scripts/fetch-mpl-core-program.sh` remains a
+maintenance tool. It can fetch the live mainnet deployment over public RPCs
+for comparison, but it must be run intentionally. If the downloaded binary
+matches a deliberately reviewed new SHA-256, commit it, run
+`scripts/verify-mpl-core-program.sh` locally, and update the provenance block
+in this document.
 
 ## How the binary is loaded
 
@@ -240,7 +242,10 @@ mpl-core = { version = "=0.11.2", default-features = false }
 - **mpl-core:** `0.11.2` (patched fork `RodeoOnSolana/mpl-core` at `e31f5de77a0bd23793ddf27bc887dc675ecaec75`)
 - **Upstream issue:** https://github.com/metaplex-foundation/mpl-core/issues/299
 - **MPL Core program ID:** `CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d`
+- **Localnet Core binary path:** `vendor/mpl-core/mpl_core_program.so`
 - **Localnet Core binary SHA256:** `f03e75373ae9cae07b5875f7818c55147b73c5607ca0f96968bab93cd583dc6e`
+- **Required CI path:** `scripts/verify-mpl-core-program.sh` verifies the committed binary offline; no live mainnet RPC is required for the merge gate.
+- **Maintenance/fetch tool:** `scripts/fetch-mpl-core-program.sh` is used only for intentional refresh of the pinned artifact.
 - **SBF stack-safety result:** zero `Stack offset ... exceeded max offset` and zero `overwrites values in the frame` diagnostics across default, epoch, claim, and mpl-core build profiles.
 - **Anchor 0.31.1 status:** Rodeo remains an Anchor 0.31.1 program. Only `mpl-core`'s optional `anchor` feature is disabled; Rodeo uses `mpl-core`'s generated CPI builders directly and parses Core accounts via `BaseAssetV1::load` / `SolanaAccount` Borsh deserialization.
 

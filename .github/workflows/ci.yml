@@ -179,16 +179,17 @@ jobs:
           solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
           solana config set --url localhost
 
-      # Fetches the live Metaplex Core on-chain program (see
-      # scripts/fetch-mpl-core-program.sh and
+      # Verifies the pinned, committed Metaplex Core on-chain program binary
+      # (see scripts/verify-mpl-core-program.sh and
       # docs/mpl-core-integration-proof.md) so it can be loaded into the
       # local test validator at genesis via Anchor.toml's [[test.genesis]].
-      # Every run's SHA-256 is written to the job summary so an unannounced
-      # mainnet upgrade is always visible rather than silently trusted.
-      - name: Fetch Metaplex Core program binary
+      # No live mainnet RPC is used; the required merge gate is decoupled from
+      # public RPC availability. To refresh the pin, run
+      # scripts/fetch-mpl-core-program.sh manually and commit the new artifact.
+      - name: Verify Metaplex Core program binary
         run: |
-          chmod +x scripts/fetch-mpl-core-program.sh
-          MPL_CORE_EXPECTED_SHA256="${MPL_CORE_EXPECTED_SHA256:-}" scripts/fetch-mpl-core-program.sh
+          chmod +x scripts/verify-mpl-core-program.sh
+          MPL_CORE_EXPECTED_SHA256="${MPL_CORE_EXPECTED_SHA256:-}" scripts/verify-mpl-core-program.sh
 
       - name: Upload Metaplex Core program binary provenance
         uses: actions/upload-artifact@v4
