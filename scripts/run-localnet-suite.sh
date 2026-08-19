@@ -8,9 +8,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LEDGER_BASE="/tmp/rodeo-localnet-suite-ledger"
 WALLET="${HOME}/.config/solana/id.json"
+PAYER_PUBKEY="$(solana-keygen pubkey "${WALLET}")"
 
-SOLANA_INSTALL_DIR="${SOLANA_INSTALL_DIR:-$HOME/.local/share/solana/install/active_release}"
-export PATH="${SOLANA_INSTALL_DIR}/bin:${HOME}/.cargo/bin:${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"
+export PATH="/home/rodeosolana/.cargo/bin:/home/rodeosolana/.local/bin:/home/rodeosolana/.local/share/solana/install/active_release/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"
 
 SUITE="${1:-}"
 if [ -z "${SUITE}" ]; then
@@ -72,7 +72,7 @@ if [ ! -f "${SBF_OUT_DIR}/rodeo_core.so" ]; then
 fi
 cp "${SBF_OUT_DIR}/rodeo_core.so" "${ROOT}/target/deploy/rodeo_core.so"
 
-BASE_PORT="${RODEO_LOCALNET_PORT:-$((RANDOM % 10000 + 20000))}"
+BASE_PORT=$((RANDOM % 10000 + 20000))
 WS_PORT=$((BASE_PORT + 1))
 FAUCET_PORT=$((BASE_PORT + 1000))
 RPC_URL="http://127.0.0.1:${BASE_PORT}"
@@ -118,7 +118,6 @@ wait_for_ws() {
   return 1
 }
 
-cp "${LEDGER}/validator.log" "/tmp/rodeo-${SUITE}.log" 2>/dev/null || true
 kill_validator() {
   pkill -9 -f 'solana-test-validator' >/dev/null 2>&1 || true
   pkill -9 -f 'solana logs' >/dev/null 2>&1 || true
@@ -135,8 +134,15 @@ kill_validator() {
   rm -rf "${ROOT}/.anchor/test-ledger" "${LEDGER_BASE}"-*
 }
 
+# Capture the last 200 validator log lines and preserve the full log for CI artifacts.
+dump_validator_log() {
+  if [ -f "${LEDGER}/validator.log" ]; then
+    tail -n 200 "${LEDGER}/validator.log" >&2 || true
+    cp "${LEDGER}/validator.log" "/tmp/rodeo-${SUITE}.log" 2>/dev/null || true
+  fi
+}
+
 # Clean up anything left over from an aborted run.
-cp "${LEDGER}/validator.log" "/tmp/rodeo-${SUITE}.log" 2>/dev/null || true
 kill_validator
 
 rm -rf "${LEDGER}"
@@ -144,10 +150,6 @@ mkdir -p "${LEDGER}"
 
 cd "${ROOT}"
 
-if [ ! -f "${WALLET}" ]; then
-  solana-keygen new --no-bip39-passphrase --silent --force -o "${WALLET}"
-fi
-PAYER_PUBKEY="$(solana-keygen pubkey "${WALLET}")"
 nohup solana-test-validator \
   --ledger "${LEDGER}" \
   --rpc-port "${BASE_PORT}" \
@@ -161,51 +163,57 @@ nohup solana-test-validator \
   --bpf-program CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d vendor/mpl-core/mpl_core_program.so \
   > "${LEDGER}/validator.log" 2>&1 &
 disown
-VALIDATOR_PID=$!
 
-sleep 1
+VALIDATOR_PID=""
+for _ in $(seq 1 15); do
+  VAL_PID=$(pgrep -f "solana-test-validator.*${LEDGER}" | head -1 || true)
+  if [ -n "${VAL_PID}" ]; then
+    VALIDATOR_PID="${VAL_PID}"
+    break
+  fi
+  sleep 1
+done
 
-if ! kill -0 "${VALIDATOR_PID}" 2>/dev/null && ! pgrep -f "solana-test-validator.*${LEDGER}" >/dev/null 2>&1; then
-  echo "ERROR: validator process for ${SUITE} not found" >&2
-  cat "${LEDGER}/validator.log" >&2 || true
+if [ -z "${VALIDATOR_PID}" ]; then
+  echo "ERROR: validator process for ${SUITE} not found after 15s" >&2
+  dump_validator_log
   kill_validator
   exit 1
 fi
 
+sleep 2
+
 if ! wait_for_health "${RPC_URL}"; then
   echo "ERROR: validator did not reach healthy state on port ${BASE_PORT}" >&2
-  cat "${LEDGER}/validator.log" >&2 || true
+  dump_validator_log
   kill_validator
   exit 1
 fi
 
 if ! wait_for_rpc_ready "${RPC_URL}"; then
   echo "ERROR: validator RPC not ready on port ${BASE_PORT}" >&2
-  cat "${LEDGER}/validator.log" >&2 || true
+  dump_validator_log
   kill_validator
   exit 1
 fi
 
 # Fund the test wallet from the localnet faucet. The wallet file is created on
 # demand above; the fresh ledger starts with no balance for it.
+PAYER_PUBKEY="$(solana-keygen pubkey "${WALLET}")"
 if ! solana airdrop 1000 "${PAYER_PUBKEY}" --url "${RPC_URL}" >/dev/null 2>&1; then
   echo "ERROR: failed to airdrop localnet funds to ${PAYER_PUBKEY}" >&2
-  cat "${LEDGER}/validator.log" >&2 || true
+  dump_validator_log
   kill_validator
   exit 1
 fi
 
 if ! wait_for_ws "${WS_PORT}"; then
   echo "ERROR: validator WebSocket not ready on port ${WS_PORT}" >&2
-  cat "${LEDGER}/validator.log" >&2 || true
+  dump_validator_log
   kill_validator
   exit 1
 fi
 
-echo "===> validator PID: ${VALIDATOR_PID}"
-echo "===> validator RPC: ${RPC_URL}"
-echo "===> current block height: $(solana block-height --url "${RPC_URL}" 2>/dev/null || echo n/a)"
-echo "===> wallet pubkey: ${PAYER_PUBKEY}"
 echo "===> Running localnet suite: ${SUITE} (RPC ${BASE_PORT} / WS ${WS_PORT})"
 
 VITEST_FLAGS="${2:+${2} ${3:-}}"
@@ -217,12 +225,13 @@ if ! ANCHOR_PROVIDER_URL="${RPC_URL}" ANCHOR_WALLET="${WALLET}" \
   SUITE_EXIT=1
 fi
 
+dump_validator_log
+
 if [ "${SUITE_EXIT}" -ne 0 ]; then
-  cp "${LEDGER}/validator.log" "/tmp/rodeo-${SUITE}-${BASE_PORT}-fail.log" 2>/dev/null || true
+  cp "/tmp/rodeo-${SUITE}.log" "/tmp/rodeo-${SUITE}-${BASE_PORT}-fail.log" 2>/dev/null || true
   echo "===> ${SUITE} validator log preserved at /tmp/rodeo-${SUITE}-${BASE_PORT}-fail.log" >&2
 fi
 
-cp "${LEDGER}/validator.log" "/tmp/rodeo-${SUITE}.log" 2>/dev/null || true
 kill_validator
 
 if [ "${SUITE_EXIT}" -eq 0 ]; then
