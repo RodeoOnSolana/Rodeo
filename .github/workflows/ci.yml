@@ -246,6 +246,11 @@ jobs:
           solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
           solana config set --url localhost
 
+      - name: Build auxiliary test program binaries
+        run: |
+          scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_market
+          scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_router
+
       - name: Build epoch-profile test program binary
         run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-epoch,test-short-claim-cooldown,test-fixtures
 
@@ -366,6 +371,11 @@ jobs:
           mkdir -p "$HOME/.config/solana"
           solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
           solana config set --url localhost
+
+      - name: Build auxiliary test program binaries
+        run: |
+          scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_market
+          scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_router
 
       - name: Build claim-profile test program binary
         run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-claim-cooldown,test-fixtures
