@@ -3320,6 +3320,18 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const positionUnstaked = await positionUnstakedPromise;
     const ansemAfterSettle = await getAccount(provider.connection, payerAnsemAccount);
     const rewardAfterSettle = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+
+    // settleUnstake() calls ensureEpochsClosed() itself, so the global
+    // cowboyRewardIndex used by the program may be higher than the pre-settle
+    // snapshot. Re-derive the expected synchronized amount from the reward
+    // index that was actually in effect during settle-time sync.
+    const postSettleIndexDelta = rewardAfterSettle.cowboyRewardIndex.sub(lastCowboyIndexAtRequest);
+    const postSettleAccrual = postSettleIndexDelta
+      .muln(10000)
+      .add(requestRemainder)
+      .div(scale);
+    expectedSynchronized = preRequestClaimable.add(postSettleAccrual);
+
     const gameAfterSettle =
       await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
 
