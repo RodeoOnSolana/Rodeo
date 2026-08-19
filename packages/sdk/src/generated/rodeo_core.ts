@@ -367,6 +367,10 @@ export const rodeoCoreIdl = {
         },
         {
           "name": "claim_policy",
+          "docs": [
+            "hardcoded.  PDA correctness is verified in `claim_credit` when present."
+          ],
+          "optional": true,
           "pda": {
             "seeds": [
               {
@@ -501,6 +505,10 @@ export const rodeoCoreIdl = {
         },
         {
           "name": "claim_policy",
+          "docs": [
+            "hardcoded.  PDA correctness is verified in `claim_position` when present."
+          ],
+          "optional": true,
           "pda": {
             "seeds": [
               {
@@ -522,8 +530,8 @@ export const rodeoCoreIdl = {
               },
               {
                 "kind": "account",
-                "path": "global_config.current_claim_policy_version",
-                "account": "GlobalConfig"
+                "path": "position.claim_policy_version",
+                "account": "Position"
               }
             ]
           }
@@ -1262,6 +1270,159 @@ export const rodeoCoreIdl = {
       ]
     },
     {
+      "name": "gift_position",
+      "discriminator": [
+        61,
+        254,
+        128,
+        22,
+        244,
+        100,
+        183,
+        74
+      ],
+      "accounts": [
+        {
+          "name": "seller",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "recipient"
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "account",
+                "path": "position.position_id",
+                "account": "Position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_state",
+          "writable": true
+        },
+        {
+          "name": "bull_accumulator",
+          "writable": true
+        },
+        {
+          "name": "bull_registry",
+          "writable": true
+        },
+        {
+          "name": "global_game_state",
+          "writable": true
+        },
+        {
+          "name": "bull_proof_buffer",
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "receipt_asset",
+          "writable": true
+        },
+        {
+          "name": "receipt_collection",
+          "writable": true
+        },
+        {
+          "name": "receipt_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "seller_claim_credit",
+          "writable": true
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "initialize_bull_proof",
       "discriminator": [
         19,
@@ -1488,7 +1649,32 @@ export const rodeoCoreIdl = {
           "address": "11111111111111111111111111111111"
         }
       ],
-      "args": []
+      "args": [
+        {
+          "name": "normal_cowboy_owner_bps",
+          "type": "u64"
+        },
+        {
+          "name": "normal_cowboy_bull_pool_bps",
+          "type": "u64"
+        },
+        {
+          "name": "desperado_owner_bps",
+          "type": "u64"
+        },
+        {
+          "name": "desperado_bull_pool_bps",
+          "type": "u64"
+        },
+        {
+          "name": "bull_owner_bps",
+          "type": "u64"
+        },
+        {
+          "name": "bull_bull_pool_bps",
+          "type": "u64"
+        }
+      ]
     },
     {
       "name": "initialize_protocol",
@@ -2108,35 +2294,6 @@ export const rodeoCoreIdl = {
           }
         },
         {
-          "name": "claim_policy",
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  99,
-                  108,
-                  97,
-                  105,
-                  109,
-                  45,
-                  112,
-                  111,
-                  108,
-                  105,
-                  99,
-                  121
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "global_config.current_claim_policy_version",
-                "account": "GlobalConfig"
-              }
-            ]
-          }
-        },
-        {
           "name": "reward_state",
           "writable": true
         },
@@ -2153,12 +2310,7 @@ export const rodeoCoreIdl = {
           "writable": true
         },
         {
-          "name": "remove_bull_proof_buffer",
-          "writable": true,
-          "optional": true
-        },
-        {
-          "name": "add_bull_proof_buffer",
+          "name": "bull_proof_buffer",
           "writable": true,
           "optional": true
         },
@@ -2216,16 +2368,7 @@ export const rodeoCoreIdl = {
           "address": "11111111111111111111111111111111"
         }
       ],
-      "args": [
-        {
-          "name": "claim_class",
-          "type": {
-            "defined": {
-              "name": "ClaimClass"
-            }
-          }
-        }
-      ]
+      "args": []
     },
     {
       "name": "prepare_transfer",
@@ -2296,35 +2439,6 @@ export const rodeoCoreIdl = {
                 "kind": "account",
                 "path": "position.position_id",
                 "account": "Position"
-              }
-            ]
-          }
-        },
-        {
-          "name": "claim_policy",
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  99,
-                  108,
-                  97,
-                  105,
-                  109,
-                  45,
-                  112,
-                  111,
-                  108,
-                  105,
-                  99,
-                  121
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "global_config.current_claim_policy_version",
-                "account": "GlobalConfig"
               }
             ]
           }
@@ -2404,16 +2518,7 @@ export const rodeoCoreIdl = {
           "address": "11111111111111111111111111111111"
         }
       ],
-      "args": [
-        {
-          "name": "claim_class",
-          "type": {
-            "defined": {
-              "name": "ClaimClass"
-            }
-          }
-        }
-      ]
+      "args": []
     },
     {
       "name": "recognize_rewards",
@@ -4345,6 +4450,19 @@ export const rodeoCoreIdl = {
       ]
     },
     {
+      "name": "PositionGifted",
+      "discriminator": [
+        63,
+        186,
+        13,
+        93,
+        168,
+        131,
+        88,
+        118
+      ]
+    },
+    {
       "name": "PositionOwnerChanged",
       "discriminator": [
         56,
@@ -4578,466 +4696,476 @@ export const rodeoCoreIdl = {
     },
     {
       "code": 6007,
+      "name": "InvalidClaimPolicySplits",
+      "msg": "Invalid claim policy splits"
+    },
+    {
+      "code": 6008,
+      "name": "InvalidClaimPolicyVersion",
+      "msg": "Invalid claim policy version"
+    },
+    {
+      "code": 6009,
       "name": "GovernanceAuthoritiesNotDistinct",
       "msg": "Governance authorities must be pairwise distinct"
     },
     {
-      "code": 6008,
+      "code": 6010,
       "name": "IdenticalTokenMints",
       "msg": "RODEO and ANSEM mints must be different"
     },
     {
-      "code": 6009,
+      "code": 6011,
       "name": "ActiveMintAuthority",
       "msg": "Mint authority must be revoked"
     },
     {
-      "code": 6010,
+      "code": 6012,
       "name": "ActiveFreezeAuthority",
       "msg": "Freeze authority must be revoked"
     },
     {
-      "code": 6011,
+      "code": 6013,
       "name": "RejectionSamplingExhausted",
       "msg": "Rejection sampling exhausted without an accepted candidate"
     },
     {
-      "code": 6012,
+      "code": 6014,
       "name": "InvalidBps",
       "msg": "Invalid BPS value"
     },
     {
-      "code": 6013,
+      "code": 6015,
       "name": "InvalidMint",
       "msg": "Invalid mint account"
     },
     {
-      "code": 6014,
+      "code": 6016,
       "name": "UnexpectedRodeoSupply",
       "msg": "RODEO mint supply does not match the expected total supply"
     },
     {
-      "code": 6015,
+      "code": 6017,
       "name": "InvalidVault",
       "msg": "Invalid vault account"
     },
     {
-      "code": 6016,
+      "code": 6018,
       "name": "InvalidDecimals",
       "msg": "Invalid decimals or atomic conversion failed"
     },
     {
-      "code": 6017,
+      "code": 6019,
       "name": "InvalidConfigVersion",
       "msg": "Claim policy version does not match the current protocol config"
     },
     {
-      "code": 6018,
+      "code": 6020,
       "name": "ZeroPrincipal",
       "msg": "Principal must be greater than zero"
     },
     {
-      "code": 6019,
+      "code": 6021,
       "name": "AlreadySettled",
       "msg": "Randomness has already been settled"
     },
     {
-      "code": 6020,
+      "code": 6022,
       "name": "InvalidReveal",
       "msg": "Reveal does not match the commitment"
     },
     {
-      "code": 6021,
+      "code": 6023,
       "name": "InvalidOwner",
       "msg": "Position owner does not match the signer"
     },
     {
-      "code": 6022,
+      "code": 6024,
       "name": "NoPendingRevealAction",
       "msg": "No reveal action is pending for this position"
     },
     {
-      "code": 6023,
+      "code": 6025,
       "name": "PositionLocked",
       "msg": "Position has a pending action and cannot be transferred"
     },
     {
-      "code": 6024,
+      "code": 6026,
       "name": "StakeAmountMismatch",
       "msg": "Stake amount must equal the configured requirement"
     },
     {
-      "code": 6025,
+      "code": 6027,
       "name": "MinimumStakePeriodNotMet",
       "msg": "Position has not been active long enough"
     },
     {
-      "code": 6026,
+      "code": 6028,
       "name": "ClaimCooldownNotMet",
       "msg": "Wallet claim cooldown has not elapsed"
     },
     {
-      "code": 6027,
+      "code": 6029,
       "name": "NoClaimableRewards",
       "msg": "Position has no claimable ANSEM after synchronization"
     },
     {
-      "code": 6028,
+      "code": 6030,
       "name": "EpochsNotClosed",
       "msg": "All elapsed epochs must be closed before this operation"
     },
     {
-      "code": 6029,
+      "code": 6031,
       "name": "InvalidProbabilityOutcome",
       "msg": "Randomness outcome does not map to a valid role/cowboy_kind/bull_tier/suit"
     },
     {
-      "code": 6030,
+      "code": 6032,
       "name": "InvalidProbabilityTable",
       "msg": "Probability table weights do not sum to denominator"
     },
     {
-      "code": 6031,
+      "code": 6033,
       "name": "PendingActionBlocksTransfer",
       "msg": "Cannot change owner while a randomness action is pending"
     },
     {
-      "code": 6032,
+      "code": 6034,
       "name": "PendingActionBlocksClaim",
       "msg": "Cannot claim while a randomness action is pending"
     },
     {
-      "code": 6033,
+      "code": 6035,
       "name": "StaleListing",
       "msg": "Listing no longer matches the position state"
     },
     {
-      "code": 6034,
+      "code": 6036,
       "name": "InvalidMarketReceipt",
       "msg": "Receipt asset does not match the position"
     },
     {
-      "code": 6035,
+      "code": 6037,
       "name": "InvalidSocialAttestation",
       "msg": "Social oracle attestation signatures are invalid"
     },
     {
-      "code": 6036,
+      "code": 6038,
       "name": "SuitCompetitionNotEnded",
       "msg": "Social competition epoch has not ended"
     },
     {
-      "code": 6037,
+      "code": 6039,
       "name": "UnrecognizedRewardFunding",
       "msg": "ANSEM in the vault is not yet recognized for liability accounting"
     },
     {
-      "code": 6038,
+      "code": 6040,
       "name": "UnauthorizedSwapVenue",
       "msg": "Unauthorized swap venue"
     },
     {
-      "code": 6039,
+      "code": 6041,
       "name": "SlippageExceeded",
       "msg": "Swap output below minimum"
     },
     {
-      "code": 6040,
+      "code": 6042,
       "name": "PausedNewStakes",
       "msg": "New stakes are paused"
     },
     {
-      "code": 6041,
+      "code": 6043,
       "name": "PausedNewRevealRequests",
       "msg": "New reveal requests are paused"
     },
     {
-      "code": 6042,
+      "code": 6044,
       "name": "PausedNewMarketplaceListings",
       "msg": "New marketplace listings are paused"
     },
     {
-      "code": 6043,
+      "code": 6045,
       "name": "PausedRouterSwaps",
       "msg": "Router swaps are paused"
     },
     {
-      "code": 6044,
+      "code": 6046,
       "name": "PositionAlreadyExists",
       "msg": "Position already exists for the chosen position_id"
     },
     {
-      "code": 6045,
+      "code": 6047,
       "name": "InvalidPositionId",
       "msg": "position_id must equal the next global position id"
     },
     {
-      "code": 6046,
+      "code": 6048,
       "name": "InvalidPrincipalVault",
       "msg": "Principal vault is invalid for the configured mint or authority"
     },
     {
-      "code": 6047,
+      "code": 6049,
       "name": "InvalidTokenAccount",
       "msg": "Owner token account is invalid for the configured mint or signer"
     },
     {
-      "code": 6048,
+      "code": 6050,
       "name": "PendingActionConflict",
       "msg": "Position already has a conflicting pending action"
     },
     {
-      "code": 6049,
+      "code": 6051,
       "name": "WrongActionType",
       "msg": "Pending action type does not match the requested operation"
     },
     {
-      "code": 6050,
+      "code": 6052,
       "name": "InvalidPendingRandomness",
       "msg": "Pending randomness account does not match the position and nonce"
     },
     {
-      "code": 6051,
+      "code": 6053,
       "name": "RandomnessNotReady",
       "msg": "Randomness result is not yet available"
     },
     {
-      "code": 6052,
+      "code": 6054,
       "name": "RandomnessTimeoutNotReached",
       "msg": "Randomness timeout has not been reached"
     },
     {
-      "code": 6053,
+      "code": 6055,
       "name": "RandomnessAlreadyAvailable",
       "msg": "Randomness has already been settled for this action"
     },
     {
-      "code": 6054,
+      "code": 6056,
       "name": "InvalidEpochBatch",
       "msg": "Invalid epoch batch size"
     },
     {
-      "code": 6055,
+      "code": 6057,
       "name": "NoElapsedEpoch",
       "msg": "No elapsed epoch to close"
     },
     {
-      "code": 6056,
+      "code": 6058,
       "name": "InvalidRewardVault",
       "msg": "Reward vault is invalid for the configured mint or authority"
     },
     {
-      "code": 6057,
+      "code": 6059,
       "name": "InvalidAnsemMint",
       "msg": "ANSEM mint account is invalid"
     },
     {
-      "code": 6058,
+      "code": 6060,
       "name": "InvalidRewardDestination",
       "msg": "Reward destination account is invalid"
     },
     {
-      "code": 6059,
+      "code": 6061,
       "name": "InsufficientRecognizedRewards",
       "msg": "Insufficient recognized rewards for the requested operation"
     },
     {
-      "code": 6060,
+      "code": 6062,
       "name": "LiabilityUnderflow",
       "msg": "Liability underflow"
     },
     {
-      "code": 6061,
+      "code": 6063,
       "name": "InvalidRewardIndex",
       "msg": "Invalid reward index ordering"
     },
     {
-      "code": 6062,
+      "code": 6064,
       "name": "InvalidRole",
       "msg": "Position role is invalid for this operation"
     },
     {
-      "code": 6063,
+      "code": 6065,
       "name": "UnstakeNotEligible",
       "msg": "Position is not yet eligible for unstake"
     },
     {
-      "code": 6064,
+      "code": 6066,
       "name": "NoPendingUnstakeAction",
       "msg": "No unstake action is pending for this position"
     },
     {
-      "code": 6065,
+      "code": 6067,
       "name": "UnstakeAlreadySettled",
       "msg": "Unstake has already been settled"
     },
     {
-      "code": 6066,
+      "code": 6068,
       "name": "InvalidRodeoDestination",
       "msg": "RODEO destination account is invalid"
     },
     {
-      "code": 6067,
+      "code": 6069,
       "name": "InvalidCoreAssetProgramOwner",
       "msg": "Account is not owned by the MPL Core program"
     },
     {
-      "code": 6068,
+      "code": 6070,
       "name": "CoreAssetDeserializationFailed",
       "msg": "Failed to deserialize a Core asset account"
     },
     {
-      "code": 6069,
+      "code": 6071,
       "name": "MissingPermanentTransferDelegate",
       "msg": "Missing or malformed permanent transfer delegate"
     },
     {
-      "code": 6070,
+      "code": 6072,
       "name": "MissingPermanentBurnDelegate",
       "msg": "Missing or malformed permanent burn delegate"
     },
     {
-      "code": 6071,
+      "code": 6073,
       "name": "MissingPermanentFreezeDelegate",
       "msg": "Missing or malformed permanent freeze delegate"
     },
     {
-      "code": 6072,
+      "code": 6074,
       "name": "CoreAssetFrozen",
       "msg": "Core receipt asset is frozen"
     },
     {
-      "code": 6073,
+      "code": 6075,
       "name": "CoreAssetNotFrozen",
       "msg": "Core receipt asset is not frozen"
     },
     {
-      "code": 6074,
+      "code": 6076,
       "name": "InvalidCoreAssetOwner",
       "msg": "Core receipt asset is not owned by the expected address"
     },
     {
-      "code": 6075,
+      "code": 6077,
       "name": "BullRegistryMalformedProof",
       "msg": "BullRegistry Merkle proof is malformed or incomplete"
     },
     {
-      "code": 6076,
+      "code": 6078,
       "name": "BullRegistryInvalidRoot",
       "msg": "BullRegistry Merkle root does not match the canonical root"
     },
     {
-      "code": 6077,
+      "code": 6079,
       "name": "BullRegistrySlotOccupied",
       "msg": "BullRegistry proof leaf is not the expected empty slot"
     },
     {
-      "code": 6078,
+      "code": 6080,
       "name": "BullRegistrySlotEmpty",
       "msg": "BullRegistry proof leaf is not the expected occupied slot"
     },
     {
-      "code": 6079,
+      "code": 6081,
       "name": "BullRegistryOwnerMismatch",
       "msg": "BullRegistry owner bucket does not match the leaf owner"
     },
     {
-      "code": 6080,
+      "code": 6082,
       "name": "BullProofBufferNotFinalized",
       "msg": "BullRegistry proof buffer is not finalized"
     },
     {
-      "code": 6081,
+      "code": 6083,
       "name": "BullProofBufferAlreadyConsumed",
       "msg": "BullRegistry proof buffer has already been consumed"
     },
     {
-      "code": 6082,
+      "code": 6084,
       "name": "InvalidBullProofBufferPda",
       "msg": "BullRegistry proof buffer PDA is invalid"
     },
     {
-      "code": 6083,
+      "code": 6085,
       "name": "InvalidRegistrySnapshot",
       "msg": "BullRegistry snapshot root or version does not match"
     },
     {
-      "code": 6084,
+      "code": 6086,
       "name": "BullProofBufferExpired",
       "msg": "BullRegistry proof buffer has expired"
     },
     {
-      "code": 6085,
+      "code": 6087,
       "name": "BullProofBufferBindingMismatch",
       "msg": "BullRegistry proof buffer is bound to a different account"
     },
     {
-      "code": 6086,
+      "code": 6088,
       "name": "BullProofBufferEmptyPayload",
       "msg": "BullProofBuffer payload length must be greater than zero"
     },
     {
-      "code": 6087,
+      "code": 6089,
       "name": "BullProofBufferOversized",
       "msg": "BullProofBuffer payload exceeds the schema maximum"
     },
     {
-      "code": 6088,
+      "code": 6090,
       "name": "BullProofBufferOffsetGap",
       "msg": "BullProofBuffer append offset is not sequential"
     },
     {
-      "code": 6089,
+      "code": 6091,
       "name": "BullProofBufferWrongPosition",
       "msg": "BullProofBuffer is bound to a different Position"
     },
     {
-      "code": 6090,
+      "code": 6092,
       "name": "BullProofBufferWrongProver",
       "msg": "BullProofBuffer can only be written by the original prover"
     },
     {
-      "code": 6091,
+      "code": 6093,
       "name": "BullProofBufferFinalized",
       "msg": "BullProofBuffer has already been finalized"
     },
     {
-      "code": 6092,
+      "code": 6094,
       "name": "BullProofBufferIncomplete",
       "msg": "BullProofBuffer payload is incomplete or wrong length"
     },
     {
-      "code": 6093,
+      "code": 6095,
       "name": "BullProofBufferNotAbandoned",
       "msg": "BullProofBuffer cannot be closed before expiry or consumption"
     },
     {
-      "code": 6094,
+      "code": 6096,
       "name": "BullProofBufferNotExpanded",
       "msg": "BullProofBuffer has not been expanded to the expected payload size"
     },
     {
-      "code": 6095,
+      "code": 6097,
       "name": "BullProofBufferInvalidExpansion",
       "msg": "BullProofBuffer expansion target is invalid"
     },
     {
-      "code": 6096,
+      "code": 6098,
       "name": "BullProofBufferExpansionTooLarge",
       "msg": "BullProofBuffer expansion exceeds the per-instruction account data limit"
     },
     {
-      "code": 6097,
+      "code": 6099,
       "name": "NoEligibleExternalBull",
       "msg": "No eligible external Bull exists for this theft"
     },
     {
-      "code": 6098,
+      "code": 6100,
       "name": "InvalidProviderAccount",
       "msg": "The provided randomness account is not a valid Switchboard randomness account"
     },
     {
-      "code": 6099,
+      "code": 6101,
       "name": "RandomnessNotResolved",
       "msg": "The Switchboard randomness account has not yet been revealed for this slot"
     }
@@ -5049,7 +5177,7 @@ export const rodeoCoreIdl = {
         "Stable, append-only discriminant for actions that stage BullProofBuffers.",
         "Variants must never be reordered. Existing discriminants:",
         "Reveal = 0, Unstake = 1, PrepareTransfer = 2, ActivatePosition = 3,",
-        "NativeTransferRemove = 4, NativeTransferAdd = 5."
+        "NativeTransferRemove = 4, NativeTransferAdd = 5, NativeTransferComposite = 6."
       ],
       "type": {
         "kind": "enum",
@@ -5071,6 +5199,9 @@ export const rodeoCoreIdl = {
           },
           {
             "name": "NativeTransferAdd"
+          },
+          {
+            "name": "NativeTransferComposite"
           }
         ]
       }
@@ -5693,6 +5824,30 @@ export const rodeoCoreIdl = {
           {
             "name": "authority",
             "type": "pubkey"
+          },
+          {
+            "name": "normal_cowboy_owner_bps",
+            "type": "u64"
+          },
+          {
+            "name": "normal_cowboy_bull_pool_bps",
+            "type": "u64"
+          },
+          {
+            "name": "desperado_owner_bps",
+            "type": "u64"
+          },
+          {
+            "name": "desperado_bull_pool_bps",
+            "type": "u64"
+          },
+          {
+            "name": "bull_owner_bps",
+            "type": "u64"
+          },
+          {
+            "name": "bull_bull_pool_bps",
+            "type": "u64"
           }
         ]
       }
@@ -6220,6 +6375,10 @@ export const rodeoCoreIdl = {
             "type": "u64"
           },
           {
+            "name": "claim_policy_version",
+            "type": "u64"
+          },
+          {
             "name": "settlement_nonce",
             "type": "u64"
           },
@@ -6302,6 +6461,38 @@ export const rodeoCoreIdl = {
           {
             "name": "bull_pool_amount",
             "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PositionGifted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "seller",
+            "type": "pubkey"
+          },
+          {
+            "name": "recipient",
+            "type": "pubkey"
+          },
+          {
+            "name": "claim_policy_version",
+            "type": "u64"
+          },
+          {
+            "name": "claim_class",
+            "type": {
+              "defined": {
+                "name": "ClaimClass"
+              }
+            }
           }
         ]
       }

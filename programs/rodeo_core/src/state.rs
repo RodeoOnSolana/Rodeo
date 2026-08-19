@@ -181,6 +181,7 @@ pub struct Position {
     pub cowboy_accrual_remainder_scaled: u128,
     pub bull_accrual_remainder_scaled: u128,
     pub claimable_ansem_atomic: u64,
+    pub claim_policy_version: u64,
     pub settlement_nonce: u64,
     pub state_version: u64,
     pub listing_nonce: u64,
@@ -290,7 +291,7 @@ pub enum PositionStatus {
 /// Stable, append-only discriminant for actions that stage BullProofBuffers.
 /// Variants must never be reordered. Existing discriminants:
 /// Reveal = 0, Unstake = 1, PrepareTransfer = 2, ActivatePosition = 3,
-/// NativeTransferRemove = 4, NativeTransferAdd = 5.
+/// NativeTransferRemove = 4, NativeTransferAdd = 5, NativeTransferComposite = 6.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
 pub enum ActionType {
     Reveal,
@@ -299,6 +300,7 @@ pub enum ActionType {
     ActivatePosition,
     NativeTransferRemove,
     NativeTransferAdd,
+    NativeTransferComposite,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]

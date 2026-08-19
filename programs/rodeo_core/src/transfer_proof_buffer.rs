@@ -5,10 +5,9 @@ use crate::{
         load_bull_proof_buffer_ref, BullProofPayloadRef, BULL_PROOF_BUFFER_CONSUMED_OFFSET,
     },
     constants::{
-        BULL_PROOF_BUFFER_MAX_PAYLOAD, BULL_PROOF_BUFFER_TTL_SECONDS,
-        ACCOUNT_VERSION_BULL_PROOF_BUFFER, BULL_PROOF_BUFFER_SCHEMA_VERSION,
-        SEED_BULL_REGISTRY, SEED_BULL_TRANSFER_PROOF_BUFFER,
-        SEED_POSITION,
+        ACCOUNT_VERSION_BULL_PROOF_BUFFER, BULL_PROOF_BUFFER_MAX_PAYLOAD,
+        BULL_PROOF_BUFFER_SCHEMA_VERSION, BULL_PROOF_BUFFER_TTL_SECONDS, SEED_BULL_REGISTRY,
+        SEED_BULL_TRANSFER_PROOF_BUFFER, SEED_POSITION,
     },
     state::{ActionType, BullProofBuffer, BullRegistry, GlobalConfig, Position},
     RodeoError,
@@ -40,10 +39,20 @@ fn validate_transfer_buffer<'a>(
         &crate::ID,
     )
     .map_err(|_| error!(RodeoError::InvalidBullProofBufferPda))?;
-    require!(info.key() == expected_pda, RodeoError::InvalidBullProofBufferPda);
+    require!(
+        info.key() == expected_pda,
+        RodeoError::InvalidBullProofBufferPda
+    );
 
-    require_keys_eq!(buffer.position, *position, RodeoError::BullProofBufferWrongPosition);
-    require!(buffer.action_type == expected_action as u8, RodeoError::WrongActionType);
+    require_keys_eq!(
+        buffer.position,
+        *position,
+        RodeoError::BullProofBufferWrongPosition
+    );
+    require!(
+        buffer.action_type == expected_action as u8,
+        RodeoError::WrongActionType
+    );
     require_keys_eq!(
         buffer.refund_recipient,
         *prover,
@@ -66,7 +75,10 @@ fn validate_transfer_buffer<'a>(
     );
     require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
     require!(!buffer.consumed, RodeoError::BullProofBufferAlreadyConsumed);
-    require!(now < buffer.expiry_timestamp, RodeoError::BullProofBufferExpired);
+    require!(
+        now < buffer.expiry_timestamp,
+        RodeoError::BullProofBufferExpired
+    );
 
     Ok(buffer)
 }
@@ -199,6 +211,43 @@ pub fn mark_transfer_buffer_consumed(buffer: &AccountInfo) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_native_transfer_composite_bull_proof_buffer<'a>(
+    info: &AccountInfo,
+    data: &'a [u8],
+    position: &Pubkey,
+    seller: &Pubkey,
+    bull_registry: &BullRegistry,
+    now: i64,
+) -> Result<crate::borrowed_proof::NativeTransferBullPayloadRef<'a>> {
+    let buffer = validate_transfer_buffer(
+        info,
+        data,
+        position,
+        ActionType::NativeTransferComposite,
+        seller,
+        bull_registry,
+        now,
+    )?;
+    let payload = crate::borrowed_proof::NativeTransferBullPayloadRef::new(buffer.payload)?;
+    require!(
+        payload.seller_owner()?.is_some(),
+        RodeoError::BullProofBufferIncomplete
+    );
+    require!(
+        payload.remove_bull()?.is_some(),
+        RodeoError::BullProofBufferIncomplete
+    );
+    require!(
+        payload.buyer_owner()?.is_some(),
+        RodeoError::BullProofBufferIncomplete
+    );
+    require!(
+        payload.add_bull()?.is_some(),
+        RodeoError::BullProofBufferIncomplete
+    );
+    Ok(payload)
+}
+
 // ---------------------------------------------------------------------------
 // Transfer BullProofBuffer instructions
 // ---------------------------------------------------------------------------
@@ -263,7 +312,8 @@ pub fn initialize_transfer_bull_proof(
         action_type == ActionType::PrepareTransfer
             || action_type == ActionType::ActivatePosition
             || action_type == ActionType::NativeTransferRemove
-            || action_type == ActionType::NativeTransferAdd,
+            || action_type == ActionType::NativeTransferAdd
+            || action_type == ActionType::NativeTransferComposite,
         RodeoError::BullProofBufferIncomplete
     );
     require_gte!(
@@ -431,10 +481,7 @@ pub struct CloseTransferBullProof<'info> {
     pub clock: Sysvar<'info, Clock>,
 }
 
-pub fn close_transfer_bull_proof(
-    _ctx: Context<CloseTransferBullProof>,
-    _nonce: u64,
-) -> Result<()> {
+pub fn close_transfer_bull_proof(_ctx: Context<CloseTransferBullProof>, _nonce: u64) -> Result<()> {
     // Anchor `close = refund_recipient` reclaims the account.
     Ok(())
 }
