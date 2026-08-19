@@ -11,6 +11,7 @@ pub mod borrowed_proof;
 pub mod bull_registry;
 pub mod constants;
 pub mod empty_nodes;
+pub mod marketplace;
 pub mod math;
 pub mod probability;
 pub mod receipt;
@@ -24,6 +25,7 @@ use mpl_core::instructions::{
     BurnV1Builder, CreateCollectionV2Builder, CreateV2Builder, TransferV1Builder, UpdateV1Builder,
 };
 use mpl_core::types::{DataState, Plugin, PluginAuthority, PluginAuthorityPair, PluginType};
+use marketplace::*;
 use receipt::*;
 use state::*;
 
@@ -1089,6 +1091,54 @@ pub mod rodeo_core {
         });
 
         Ok(())
+    }
+
+    pub fn prepare_transfer(
+        ctx: Context<PrepareTransfer>,
+        owner_proof: Option<CompressedOwnerProof>,
+        bull_proof: Option<CompressedBullProof>,
+        claim_class: ClaimClass,
+        claim_policy_version: u64,
+    ) -> Result<()> {
+        crate::marketplace::prepare_transfer(ctx, owner_proof, bull_proof, claim_class, claim_policy_version)
+    }
+
+    pub fn activate_position(
+        ctx: Context<ActivatePosition>,
+        owner_proof: Option<CompressedOwnerProof>,
+        bull_proof: Option<CompressedBullProof>,
+    ) -> Result<()> {
+        crate::marketplace::activate_position(ctx, owner_proof, bull_proof)
+    }
+
+    pub fn claim_credit(
+        ctx: Context<ClaimCreditAccounts>,
+        claim_class: ClaimClass,
+        claim_policy_version: u64,
+    ) -> Result<()> {
+        crate::marketplace::claim_credit(ctx, claim_class, claim_policy_version)
+    }
+
+    pub fn native_transfer_position(
+        ctx: Context<NativeTransferPosition>,
+        buyer: Pubkey,
+        owner_proof_remove: Option<CompressedOwnerProof>,
+        bull_proof_remove: Option<CompressedBullProof>,
+        owner_proof_add: Option<CompressedOwnerProof>,
+        bull_proof_add: Option<CompressedBullProof>,
+        claim_class: ClaimClass,
+        claim_policy_version: u64,
+    ) -> Result<()> {
+        crate::marketplace::native_transfer_position(
+            ctx,
+            buyer,
+            owner_proof_remove,
+            bull_proof_remove,
+            owner_proof_add,
+            bull_proof_add,
+            claim_class,
+            claim_policy_version,
+        )
     }
 
     pub fn request_unstake(ctx: Context<RequestUnstake>) -> Result<()> {
@@ -4768,6 +4818,8 @@ pub enum RodeoError {
     InvalidVault,
     #[msg("Invalid decimals or atomic conversion failed")]
     InvalidDecimals,
+    #[msg("Claim policy version does not match the current protocol config")]
+    InvalidConfigVersion,
     #[msg("Principal must be greater than zero")]
     ZeroPrincipal,
     #[msg("Randomness has already been settled")]
@@ -4953,7 +5005,7 @@ fn derive_commitment(
 }
 
 /// Require that all currently elapsed epochs have been closed.
-fn require_elapsed_epochs_closed(reward_state: &RewardState, now: i64) -> Result<()> {
+pub(crate) fn require_elapsed_epochs_closed(reward_state: &RewardState, now: i64) -> Result<()> {
     let next_boundary = reward_state
         .last_closed_epoch_timestamp
         .checked_add(EPOCH_DURATION_SECONDS)
@@ -4963,7 +5015,7 @@ fn require_elapsed_epochs_closed(reward_state: &RewardState, now: i64) -> Result
 }
 
 /// Synchronize a Cowboy (or Desperado) position with the global Cowboy reward index.
-fn sync_cowboy_rewards(position: &mut Position, reward_state: &mut RewardState) -> Result<()> {
+pub(crate) fn sync_cowboy_rewards(position: &mut Position, reward_state: &mut RewardState) -> Result<()> {
     if position.role != Role::Cowboy {
         return Ok(());
     }
@@ -5002,7 +5054,7 @@ fn sync_cowboy_rewards(position: &mut Position, reward_state: &mut RewardState) 
 }
 
 /// Synchronize a Bull position with the global Bull reward-per-weight accumulator.
-fn sync_bull_rewards(
+pub(crate) fn sync_bull_rewards(
     position: &mut Position,
     position_key: Pubkey,
     bull_accumulator: &mut BullAccumulator,
@@ -5054,7 +5106,7 @@ fn sync_bull_rewards(
 
 /// Route a claim-tax contribution into the Bull reward pool, updating the
 /// accumulator when there is active Bull power.
-fn distribute_bull_pool_contribution(
+pub(crate) fn distribute_bull_pool_contribution(
     source: BullPoolSource,
     contribution: u64,
     reward_state: &mut RewardState,
@@ -5095,7 +5147,7 @@ fn distribute_bull_pool_contribution(
 }
 
 /// Transfer ANSEM out of the program-controlled reward vault.
-fn transfer_ansem_from_vault<'info>(
+pub(crate) fn transfer_ansem_from_vault<'info>(
     amount: u64,
     global_config: &Account<'info, GlobalConfig>,
     reward_vault: AccountInfo<'info>,
@@ -5229,10 +5281,12 @@ fn resolve_mint_theft(
             msg!("BPI_RMT: payload_none");
             RodeoError::BullProofBufferIncomplete
         })?;
-        let victim_proof = p.victim_owner()?.ok_or_else(|| {
-            msg!("BPI_RMT: victim_owner_missing");
-            RodeoError::BullProofBufferIncomplete
-        })?;
+        let victim_proof = p
+            .victim_owner()?
+            .ok_or_else(|| {
+                msg!("BPI_RMT: victim_owner_missing");
+                RodeoError::BullProofBufferIncomplete
+            })?;
         let (victim_count, victim_power, victim_prefix) = crate::borrowed_proof::verify_owner_ref(
             &pending_randomness.registry_root_snapshot,
             &prospective_owner,
@@ -5265,14 +5319,18 @@ fn resolve_mint_theft(
             msg!("RMT_TRACE: mint_theft_flag={}", theft);
             if theft {
                 stolen = true;
-                let selected_owner = p.selected_owner()?.ok_or_else(|| {
-                    msg!("BPI_RMT: selected_owner_missing");
-                    RodeoError::BullProofBufferIncomplete
-                })?;
-                let selected_bull = p.selected_bull()?.ok_or_else(|| {
-                    msg!("BPI_RMT: selected_bull_missing");
-                    RodeoError::BullProofBufferIncomplete
-                })?;
+                let selected_owner = p
+                    .selected_owner()?
+                    .ok_or_else(|| {
+                        msg!("BPI_RMT: selected_owner_missing");
+                        RodeoError::BullProofBufferIncomplete
+                    })?;
+                let selected_bull = p
+                    .selected_bull()?
+                    .ok_or_else(|| {
+                        msg!("BPI_RMT: selected_bull_missing");
+                        RodeoError::BullProofBufferIncomplete
+                    })?;
                 if selected_owner.leaf.owner == prospective_owner {
                     msg!("BPI_RMT: selected_owner_is_victim");
                     return err!(RodeoError::BullProofBufferIncomplete);
@@ -5289,23 +5347,14 @@ fn resolve_mint_theft(
                 )?;
                 let safe_owner_target =
                     bull_registry::skip_victim_interval(owner_target, victim_prefix, victim_power);
-                msg!(
-                    "RMT_TRACE: owner_target={} safe_owner_target={}",
-                    owner_target,
-                    safe_owner_target
-                );
+                msg!("RMT_TRACE: owner_target={} safe_owner_target={}", owner_target, safe_owner_target);
                 let (_selected_owner_count, selected_owner_power, selected_owner_prefix) =
                     crate::borrowed_proof::verify_owner_ref(
                         &pending_randomness.registry_root_snapshot,
                         &selected_owner.leaf.owner,
                         selected_owner,
                     )?;
-                msg!(
-                    "RMT_TRACE: selected_owner={} sel_owner_power={} sel_owner_prefix={}",
-                    selected_owner.leaf.owner,
-                    selected_owner_power,
-                    selected_owner_prefix
-                );
+                msg!("RMT_TRACE: selected_owner={} sel_owner_power={} sel_owner_prefix={}", selected_owner.leaf.owner, selected_owner_power, selected_owner_prefix);
                 if !bull_registry::leaf_contains_target(
                     selected_owner_prefix,
                     selected_owner_power,
@@ -5377,20 +5426,21 @@ fn apply_new_bull_registry_mutation(
         msg!("BPI_ANB: payload_none");
         RodeoError::BullProofBufferIncomplete
     })?;
-    let current_owner = p.current_owner()?.ok_or_else(|| {
-        msg!("BPI_ANB: current_owner_missing");
-        RodeoError::BullProofBufferIncomplete
-    })?;
-    let current_bull = p.current_bull()?.ok_or_else(|| {
-        msg!("BPI_ANB: current_bull_missing");
-        RodeoError::BullProofBufferIncomplete
-    })?;
+    let current_owner = p
+        .current_owner()?
+        .ok_or_else(|| {
+            msg!("BPI_ANB: current_owner_missing");
+            RodeoError::BullProofBufferIncomplete
+        })?;
+    let current_bull = p
+        .current_bull()?
+        .ok_or_else(|| {
+            msg!("BPI_ANB: current_bull_missing");
+            RodeoError::BullProofBufferIncomplete
+        })?;
     msg!(
         "ANB_TRACE: final_owner={} position={} current_owner_leaf={} current_bull_leaf={}",
-        final_owner,
-        position_key,
-        current_owner.leaf.owner,
-        current_bull.leaf.position
+        final_owner, position_key, current_owner.leaf.owner, current_bull.leaf.position
     );
     let bull_leaf = BullLeaf {
         position: position_key,
