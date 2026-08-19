@@ -56,7 +56,8 @@ jobs:
           key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-anchor-${{ env.ANCHOR_VERSION }}-solana-${{ env.SOLANA_VERSION }}
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+        run: |
+          sudo apt-get install -y libudev-dev pkg-config || (sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config)
 
       - name: Install Agave CLI
         run: |
@@ -193,7 +194,8 @@ jobs:
           key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-anchor-${{ env.ANCHOR_VERSION }}-solana-${{ env.SOLANA_VERSION }}
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+        run: |
+          sudo apt-get install -y libudev-dev pkg-config || (sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config)
 
       - name: Install Agave CLI
         run: |
@@ -319,7 +321,8 @@ jobs:
           key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-anchor-${{ env.ANCHOR_VERSION }}-solana-${{ env.SOLANA_VERSION }}
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+        run: |
+          sudo apt-get install -y libudev-dev pkg-config || (sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config)
 
       - name: Install Agave CLI
         run: |
