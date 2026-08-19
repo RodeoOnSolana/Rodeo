@@ -1,0 +1,171 @@
+name: Sparse tree SBF benchmark
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - phase-3/bull-registry-mint-theft
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  sbf-benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOLANA_VERSION: v2.2.20
+      ANCHOR_VERSION: 0.31.1
+      RUST_VERSION: 1.85.1
+      SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install/active_release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+          rustup override set "$RUST_VERSION"
+
+      - name: Restore Rust, Anchor, and Solana toolchains
+        id: toolchain-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/anchor
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.local/share/solana/install
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-anchor-${{ env.ANCHOR_VERSION }}-solana-${{ env.SOLANA_VERSION }}
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Install Agave CLI
+        run: |
+          if [ ! -x "$SOLANA_INSTALL_DIR/bin/solana" ]; then
+            sh -c "$(curl -sSfL https://release.anza.xyz/$SOLANA_VERSION/install)"
+          fi
+          echo "$SOLANA_INSTALL_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor CLI
+        run: |
+          if ! command -v anchor >/dev/null || [ "$(anchor --version)" != "anchor-cli $ANCHOR_VERSION" ]; then
+            cargo install anchor-cli --version "$ANCHOR_VERSION" --locked
+          fi
+
+      - name: Save Rust, Anchor, and Solana toolchains
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/bin/anchor
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.local/share/solana/install
+          key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build rodeo_core SBF with test-fixtures and mock-randomness
+        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_core -- --features mock-randomness,test-fixtures
+
+      - name: Build rodeo_market SBF
+        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_market
+
+      - name: Build rodeo_router SBF
+        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_router
+
+      - name: Generate SDK from test-fixtures IDLs
+        run: pnpm sdk:generate
+
+      - name: Build TypeScript SDK
+        run: pnpm build
+
+      - name: TypeScript typecheck
+        run: pnpm typecheck
+
+      - name: Configure local validator wallet
+        run: |
+          mkdir -p "$HOME/.config/solana"
+          solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
+          solana config set --url localhost
+
+      - name: Fetch Metaplex Core program binary
+        run: |
+          chmod +x scripts/fetch-mpl-core-program.sh
+          scripts/fetch-mpl-core-program.sh
+
+      - name: Start solana-test-validator
+        run: |
+          set -euo pipefail
+          mkdir -p .anchor/test-ledger
+          pkill -f solana-test-validator || true
+          sleep 1
+          PAYER_PUBKEY="$(solana-keygen pubkey "$HOME/.config/solana/id.json")"
+          nohup solana-test-validator \
+            --ledger .anchor/test-ledger \
+            --reset \
+            --quiet \
+            --bind-address 127.0.0.1 \
+            --rpc-port 8899 \
+            --faucet-port 9900 \
+            --limit-ledger-size 100000 \
+            --mint 69tZK9TXp1iCKE5RdQj9i2PFVhPk77WfveyGV77CRyNi \
+            --bpf-program CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d vendor/mpl-core/mpl_core_program.so \
+            --upgradeable-program CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA target/deploy/rodeo_core.so "${PAYER_PUBKEY}" \
+            --upgradeable-program 9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n target/deploy/rodeo_market.so "${PAYER_PUBKEY}" \
+            --upgradeable-program CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD target/deploy/rodeo_router.so "${PAYER_PUBKEY}" \
+            > .anchor/test-ledger/test-ledger-log.txt 2>&1 &
+          echo "solana-test-validator PID: $!"
+          echo "TEST_VALIDATOR_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 60); do
+            if curl -sS --max-time 2 http://127.0.0.1:8899 -X POST -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' 2>/dev/null | grep -q ok; then
+              echo "Validator ready after ${i}s"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "Validator failed to start" >&2
+              tail -n 50 .anchor/test-ledger/test-ledger-log.txt >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+          solana airdrop 1000 "${PAYER_PUBKEY}" --url http://127.0.0.1:8899
+          solana balance "${PAYER_PUBKEY}" --url http://127.0.0.1:8899
+
+      - name: Run focused sparse-tree SBF benchmark
+        run: RODEO_TEST_SUITE=benchmark anchor test --skip-build --skip-local-validator --skip-deploy
+
+      - name: Stop solana-test-validator
+        if: always()
+        run: |
+          if [ -n "${TEST_VALIDATOR_PID:-}" ]; then
+            kill "${TEST_VALIDATOR_PID}" 2>/dev/null || true
+            wait "${TEST_VALIDATOR_PID}" 2>/dev/null || true
+          fi
+          pkill -f solana-test-validator || true
+
+      - name: Upload benchmark log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sparse-benchmark-log
+          path: .anchor/test-ledger/test-ledger-log.txt

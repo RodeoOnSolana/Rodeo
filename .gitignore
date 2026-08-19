@@ -12,9 +12,19 @@ phase-0-generated-artifacts/
 rodeo-phase-2a-*.zip
 phase-2a-*.txt
 
-# Fetched fresh by CI/localnet setup on every run (see
-# docs/mpl-core-integration-proof.md); never committed so drift from the
-# live mainnet-beta deployment is always visible in CI output rather than
-# silently stale in git history.
+# Pinned Metaplex Core program binary for deterministic CI/localnet. The
+# exact artifact is committed and hash-verified on every run. Temporary
+# download/intermediate files are still ignored.
+/vendor/mpl-core/*.tmp
 /vendor/mpl-core/*.so
+!/vendor/mpl-core/mpl_core_program.so
 /vendor/mpl-core/*.sha256
+!/vendor/mpl-core/mpl_core_program.so.sha256
+
+# Local benchmark/CI artifacts and temporary diagnostic files
+.ci-artifacts/
+*.bak
+check_ix*.js
+tests/integration/localnet-hash-loop.test.ts
+tests/integration/localnet-heap-diagnostic.test.ts
+test-ledger/

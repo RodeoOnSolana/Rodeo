@@ -1,3 +1,4 @@
+use crate::constants::*;
 use anchor_lang::prelude::*;
 
 #[account]
@@ -102,6 +103,63 @@ pub struct BullAccumulator {
 
 #[account]
 #[derive(InitSpace)]
+pub struct BullRegistry {
+    pub version: u8,
+    pub global_config: Pubkey,
+    /// Merkle-sum root of the owner tree.
+    pub owner_tree_root: [u8; 32],
+    /// Total active Bull Position count across all owners.
+    pub total_bull_count: u64,
+    /// Total active buck power across all owners.
+    pub total_buck_power: u64,
+    /// Monotonically increasing version. Incremented on every canonical root change.
+    pub registry_version: u64,
+    pub bump: u8,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct BullProofBuffer {
+    pub version: u8,
+    /// Schema version of the payload layout.
+    pub schema_version: u8,
+    /// The PendingRandomness this buffer is bound to.
+    pub pending_randomness: Pubkey,
+    /// The Position being settled.
+    pub position: Pubkey,
+    /// The action this proof buffer is for (Reveal or Unstake).
+    pub action_type: ActionType,
+    /// Snapshot root the proof must be verified against.
+    pub snapshot_root: [u8; 32],
+    /// Snapshot version the proof must be verified against.
+    pub snapshot_version: u64,
+    /// Historical snapshot total power used for external-weight calculation.
+    pub snapshot_total_power: u64,
+    /// Historical snapshot total Bull count used for threshold checks.
+    pub snapshot_total_count: u64,
+    /// The party that funded the buffer and receives its rent on close.
+    pub refund_recipient: Pubkey,
+    /// Timestamp after which the buffer is abandonable even if unconsumed.
+    pub expiry_timestamp: i64,
+    /// Nonce used in the PDA derivation to allow multiple buffers per prover.
+    pub nonce: u64,
+    /// Expected total payload length in bytes. Finalize enforces exact match.
+    pub expected_payload_length: u32,
+    /// True once the prover has finalized the payload; settlement may then consume it.
+    pub finalized: bool,
+    /// True once the buffer has been consumed by settlement.
+    pub consumed: bool,
+    /// Number of payload bytes written so far (test-fixture overwrite tracking).
+    pub filled: u32,
+    /// Bump for the proof-buffer PDA.
+    pub bump: u8,
+    /// Serialized proof payload (variable length, bounded by `BULL_PROOF_BUFFER_MAX_PAYLOAD`).
+    #[max_len(BULL_PROOF_BUFFER_MAX_PAYLOAD)]
+    pub payload: Vec<u8>,
+}
+
+#[account]
+#[derive(InitSpace)]
 pub struct Position {
     pub version: u8,
     pub owner: Pubkey,
@@ -159,6 +217,8 @@ pub struct PendingRandomness {
     pub timeout_timestamp: i64,
     pub registry_root_snapshot: [u8; 32],
     pub registry_version_snapshot: u64,
+    pub registry_total_count_snapshot: u64,
+    pub registry_total_power_snapshot: u64,
     pub config_version_snapshot: u64,
     pub settled: bool,
     pub bump: u8,

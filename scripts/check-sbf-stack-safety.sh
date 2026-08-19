@@ -27,12 +27,14 @@ trap 'rm -f "$LOG_FILE"' EXIT
 BUILD_STATUS=${PIPESTATUS[0]}
 
 if grep -Fq "overwrites values in the frame" "$LOG_FILE"; then
-  echo "::error::SBF stack-safety guard: build output contains 'overwrites values in the frame'. This indicates real undefined behavior in a generated SBF function (see docs/mpl-core-integration-proof.md and the settle_unstake stack-frame hotfix for prior art)." >&2
+  echo "::error::SBF stack-safety guard: build output contains 'overwrites values in the frame'." >&2
+  grep -F "overwrites values in the frame" "$LOG_FILE" >&2
   BUILD_STATUS=1
 fi
 
 if grep -Eq "Stack offset of [0-9]+ exceeded max offset" "$LOG_FILE"; then
-  echo "::error::SBF stack-safety guard: build output contains a 'Stack offset ... exceeded max offset' diagnostic. A generated SBF function's stack frame exceeds the 4096-byte SBF limit. Box additional large Account<...> fields in the offending Accounts struct." >&2
+  echo "::error::SBF stack-safety guard: build output contains a 'Stack offset ... exceeded max offset' diagnostic." >&2
+  grep -E "Stack offset of [0-9]+ exceeded max offset" "$LOG_FILE" >&2
   BUILD_STATUS=1
 fi
 

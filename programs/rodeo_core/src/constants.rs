@@ -17,6 +17,9 @@ pub const POT_FILL_SECONDS: i64 = 12 * 60 * 60;
 pub const SUIT_EPOCH_DAYS: u64 = 7;
 pub const SUIT_EPOCHS: u64 = SUIT_EPOCH_DAYS * 24 * 60 * 60 / (EPOCH_DURATION_SECONDS as u64);
 
+#[cfg(feature = "test-short-min-stake")]
+pub const MIN_STAKE_SECONDS: i64 = 10;
+#[cfg(not(feature = "test-short-min-stake"))]
 pub const MIN_STAKE_SECONDS: i64 = 24 * 60 * 60;
 
 #[cfg(feature = "test-short-claim-cooldown")]
@@ -27,6 +30,11 @@ pub const CLAIM_COOLDOWN_SECONDS: i64 = 60 * 60;
 pub const RANDOMNESS_TIMEOUT_SECONDS: i64 = 2;
 #[cfg(not(feature = "test-short-timeout"))]
 pub const RANDOMNESS_TIMEOUT_SECONDS: i64 = 30 * 60;
+
+#[cfg(feature = "test-short-timeout")]
+pub const BULL_PROOF_BUFFER_TTL_SECONDS: i64 = 60;
+#[cfg(not(feature = "test-short-timeout"))]
+pub const BULL_PROOF_BUFFER_TTL_SECONDS: i64 = 30 * 60;
 
 #[cfg(feature = "mock-randomness")]
 pub const USE_MOCK_RANDOMNESS: bool = true;
@@ -77,6 +85,8 @@ pub const SEED_GLOBAL_CONFIG: &[u8] = b"global-config";
 pub const SEED_REWARD_STATE: &[u8] = b"reward-state";
 pub const SEED_GLOBAL_GAME_STATE: &[u8] = b"global-game-state";
 pub const SEED_BULL_ACCUMULATOR: &[u8] = b"bull-accumulator";
+pub const SEED_BULL_REGISTRY: &[u8] = b"bull-registry";
+pub const SEED_BULL_PROOF_BUFFER: &[u8] = b"bull-proof-buffer";
 pub const SEED_PRINCIPAL_VAULT: &[u8] = b"principal-vault";
 pub const SEED_REWARD_VAULT: &[u8] = b"reward-vault";
 pub const SEED_POSITION: &[u8] = b"position";
@@ -111,6 +121,60 @@ pub const ACCOUNT_VERSION_POSITION: u8 = 4;
 pub const ACCOUNT_VERSION_WALLET_CLAIM_COOLDOWN: u8 = 1;
 pub const ACCOUNT_VERSION_PENDING_RANDOMNESS: u8 = 4;
 pub const ACCOUNT_VERSION_PROTOCOL_CONFIG: u8 = 1;
+pub const ACCOUNT_VERSION_BULL_REGISTRY: u8 = 1;
+pub const ACCOUNT_VERSION_BULL_PROOF_BUFFER: u8 = 1;
+
+// BullRegistry v1: two-level ordered binary Merkle-sum tree.
+// Owner tree depth 20 -> up to 2^20 owner buckets.
+// Per-owner Bull tree depth 20 -> up to 2^20 Bull leaves per owner.
+// These are compile-time parameters for the v1 proof format.
+pub const BULL_REGISTRY_OWNER_TREE_DEPTH: u32 = 20;
+pub const BULL_REGISTRY_BULL_TREE_DEPTH: u32 = 20;
+
+// Worst-case serialized proof payload for a single reveal:
+// up to six full proof sections (victim owner, selected owner, selected bull,
+// current owner, current bull, remove bull), each path up to 20 siblings,
+// plus leaf structs and per-section metadata.  16 KiB is comfortably above
+// the v1 benchmarked worst case and still well within Solana's 10 MiB
+// per-account data limit.  The one-shot allocate is capped by the runtime's
+// 10,240-byte per-instruction data-growth limit (≈320 32-byte siblings after
+// the fixed 194-byte header); larger logical payloads are filled via staged
+// `expand_bull_proof` calls, so the prover pays additional rent but the cap
+// is not weakened.
+pub const BULL_PROOF_BUFFER_SCHEMA_VERSION: u8 = 2;
+#[cfg(not(feature = "test-fixtures"))]
+pub const BULL_PROOF_BUFFER_MAX_PAYLOAD: usize = 16_384;
+#[cfg(feature = "test-fixtures")]
+pub const BULL_PROOF_BUFFER_MAX_PAYLOAD: usize = 5_000;
+
+// Account layout: 8-byte discriminator + 182 bytes fixed fields + 4-byte Vec
+// length prefix + payload. The first payload byte is at account-data offset 194.
+pub const BULL_PROOF_BUFFER_PAYLOAD_OFFSET: usize = 194;
+
+// The Solana runtime limits account-data growth in a single CPI to
+// MAX_PERMITTED_DATA_INCREASE (10,240 bytes). A fresh `initialize_bull_proof`
+// can therefore create at most a 10,240-byte account in one instruction,
+// i.e. 10,240 - 194 = 10,046 bytes of payload. Larger logical payloads keep
+// MAX_PAYLOAD = 16,384 but require an explicit `expand_bull_proof` instruction.
+pub const BULL_PROOF_BUFFER_ONE_SHOT_MAX_PAYLOAD: u32 =
+    10_240u32 - BULL_PROOF_BUFFER_PAYLOAD_OFFSET as u32;
+
+// Same runtime constant, expressed in account-data bytes. This is the largest
+// growth permitted in one `expand_bull_proof` call and is used for assertions.
+pub const BULL_PROOF_BUFFER_EXPAND_MAX_DELTA: usize = 10_240;
+
+/// Returns the account-data size used by `initialize_bull_proof` for a given
+/// `expected_payload_length`. It always allocates at least the fixed header
+/// plus `expected_payload_length` when it fits in one CPI, otherwise it caps at
+/// the one-shot limit and leaves full expansion to `expand_bull_proof`.
+pub const fn bull_proof_buffer_init_space(expected_payload_length: u32) -> usize {
+    let capped_payload = if expected_payload_length <= BULL_PROOF_BUFFER_ONE_SHOT_MAX_PAYLOAD {
+        expected_payload_length
+    } else {
+        BULL_PROOF_BUFFER_ONE_SHOT_MAX_PAYLOAD
+    };
+    BULL_PROOF_BUFFER_PAYLOAD_OFFSET + (capped_payload as usize)
+}
 
 // Compile-time guards for the production-safe default configuration. These are
 // always checked when the crate is compiled with the corresponding features.
@@ -118,6 +182,11 @@ pub const ACCOUNT_VERSION_PROTOCOL_CONFIG: u8 = 1;
 const _: () = assert!(RANDOMNESS_TIMEOUT_SECONDS == 30 * 60);
 #[cfg(feature = "test-short-timeout")]
 const _: () = assert!(RANDOMNESS_TIMEOUT_SECONDS == 2);
+
+#[cfg(not(feature = "test-short-timeout"))]
+const _: () = assert!(BULL_PROOF_BUFFER_TTL_SECONDS == 30 * 60);
+#[cfg(feature = "test-short-timeout")]
+const _: () = assert!(BULL_PROOF_BUFFER_TTL_SECONDS == 60);
 
 #[cfg(not(feature = "mock-randomness"))]
 const _: () = assert!(!USE_MOCK_RANDOMNESS);
@@ -143,3 +212,8 @@ const _: () = assert!(POT_FILL_SECONDS == 2);
 const _: () = assert!(CLAIM_COOLDOWN_SECONDS == 60 * 60);
 #[cfg(feature = "test-short-claim-cooldown")]
 const _: () = assert!(CLAIM_COOLDOWN_SECONDS == 2);
+
+#[cfg(not(feature = "test-short-min-stake"))]
+const _: () = assert!(MIN_STAKE_SECONDS == 24 * 60 * 60);
+#[cfg(feature = "test-short-min-stake")]
+const _: () = assert!(MIN_STAKE_SECONDS == 10);

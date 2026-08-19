@@ -24,6 +24,8 @@ test-short-timeout = []
 test-short-epoch = []
 # Reduces the wallet-level claim cooldown for local tests. Never enable in production.
 test-short-claim-cooldown = []
+# Reduces the minimum stake age for Unstake tests. Never enable in production.
+test-short-min-stake = []
 # Compiles test-only fixtures used to exercise pause states in local tests.
 # Never enable in production.
 test-fixtures = []
@@ -60,3 +62,8 @@ zeroize = "=1.8.2"
 # chain entirely.
 blake3 = "=1.5.5"
 switchboard-on-demand = { version = "0.13.0", default-features = false, features = ["anchor"] }
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"

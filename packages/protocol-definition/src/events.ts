@@ -235,6 +235,57 @@ export type OrphanedRewardReleasedEvent = ProtocolEventEnvelope<"orphanedRewardR
   readonly totalAnsemLiabilityAtomicAfter: bigint;
 }>;
 
+export type BullRegistryOperation = "add" | "remove";
+
+export type BullRegistryTransitionEvent = ProtocolEventEnvelope<"bullRegistryTransition", {
+  readonly oldRoot: Uint8Array;
+  readonly newRoot: Uint8Array;
+  readonly oldVersion: bigint;
+  readonly newVersion: bigint;
+  readonly operation: BullRegistryOperation;
+  readonly bullPosition: string;
+  readonly positionId: bigint;
+  readonly owner: string;
+  readonly buckPower: number;
+}>;
+
+export type MintTheftEvent = ProtocolEventEnvelope<"mintTheft", {
+  readonly position: string;
+  readonly positionId: bigint;
+  readonly prospectiveOwner: string;
+  readonly finalOwner: string;
+  readonly winningBullPosition: string;
+  readonly winningBullOwner: string;
+  readonly registrySnapshotVersion: bigint;
+  readonly configVersion: bigint;
+}>;
+
+
+export type ReceiptPluginAuthority =
+  | { readonly kind: "none" }
+  | { readonly kind: "owner" }
+  | { readonly kind: "updateAuthority" }
+  | { readonly kind: "address"; readonly address: string };
+
+export type SparseTreeBenchmarkedEvent = ProtocolEventEnvelope<"sparseTreeBenchmarked", {
+  readonly ownerTreeRoot: Uint8Array;
+  readonly totalBullCount: bigint;
+  readonly totalBuckPower: bigint;
+  readonly registryVersion: bigint;
+}>;
+
+export type PositionReceiptParsedEvent = ProtocolEventEnvelope<"positionReceiptParsed", {
+  readonly receiptAsset: string;
+  readonly owner: string;
+  readonly hasPermanentTransferDelegate: boolean;
+  readonly hasPermanentBurnDelegate: boolean;
+  readonly hasPermanentFreezeDelegate: boolean;
+  readonly frozen: boolean;
+  readonly permanentTransferAuthority: ReceiptPluginAuthority | null;
+  readonly permanentBurnAuthority: ReceiptPluginAuthority | null;
+  readonly permanentFreezeAuthority: ReceiptPluginAuthority | null;
+}>;
+
 export type RodeoProtocolEvent =
   | ProtocolInitializedEvent
   | PositionStakedEvent
@@ -259,4 +310,8 @@ export type RodeoProtocolEvent =
   | RandomnessTimeoutRecoveredEvent
   | UnstakeRequestedEvent
   | PositionUnstakedEvent
-  | OrphanedRewardReleasedEvent;
+  | OrphanedRewardReleasedEvent
+  | BullRegistryTransitionEvent
+  | MintTheftEvent
+  | PositionReceiptParsedEvent
+  | SparseTreeBenchmarkedEvent;

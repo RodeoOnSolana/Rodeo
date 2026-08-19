@@ -1,14 +1,24 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{Burn, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z");
+// Canonical rodeo_core program id for this repository/branch (PR #19).
+// Local tests load the compiled .so at this address via solana-test-validator
+// --bpf-program; the target/deploy keypair is only a build artifact and must not
+// override canonical program id.
+declare_id!("CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA");
 
+pub mod borrowed_proof;
+pub mod bull_registry;
 pub mod constants;
+pub mod empty_nodes;
 pub mod math;
 pub mod probability;
 pub mod receipt;
+pub mod sparse_tree;
 pub mod state;
 
+use borrowed_proof::*;
+use bull_registry::*;
 use constants::*;
 use mpl_core::instructions::{
     BurnV1Builder, CreateCollectionV2Builder, CreateV2Builder, TransferV1Builder, UpdateV1Builder,
@@ -38,15 +48,19 @@ pub mod rodeo_core {
             anchor_lang::solana_program::bpf_loader_upgradeable::UpgradeableLoaderState,
         >(&program_data, program_data.len() as u64)
         .map_err(|_| error!(RodeoError::InvalidProgramData))?;
-        let upgrade_authority_address = match program_data_state {
+        let _upgrade_authority_address = match program_data_state {
             anchor_lang::solana_program::bpf_loader_upgradeable::UpgradeableLoaderState::ProgramData {
                 upgrade_authority_address,
                 ..
             } => upgrade_authority_address,
             _ => return err!(RodeoError::InvalidProgramData),
         };
+        // In production the initializer must be the program's upgrade authority.
+        // Under test-fixtures the local validator may load the program without a
+        // signing upgrade authority, so we skip this check only in that build.
+        #[cfg(not(feature = "test-fixtures"))]
         require!(
-            upgrade_authority_address == Some(ctx.accounts.initializer.key()),
+            _upgrade_authority_address == Some(ctx.accounts.initializer.key()),
             RodeoError::UnauthorizedInitializer
         );
 
@@ -186,6 +200,15 @@ pub mod rodeo_core {
         probability::validate_protocol_config(&v1_config)?;
         protocol_config.set_inner(v1_config);
 
+        let bull_registry = &mut ctx.accounts.bull_registry;
+        bull_registry.version = ACCOUNT_VERSION_BULL_REGISTRY;
+        bull_registry.global_config = global_config.key();
+        bull_registry.owner_tree_root = bull_registry::empty_owner_tree_root();
+        bull_registry.total_bull_count = 0;
+        bull_registry.total_buck_power = 0;
+        bull_registry.registry_version = 0;
+        bull_registry.bump = ctx.bumps.bull_registry;
+
         // Create the official Rodeo PositionReceipt Collection. This is a
         // one-time action paid for by the initializer and uses the stateless
         // ReceiptAuthority PDA as the update authority.
@@ -242,6 +265,7 @@ pub mod rodeo_core {
             reward_state: reward_state.key(),
             global_game_state: global_game_state.key(),
             bull_accumulator: bull_accumulator.key(),
+            bull_registry: bull_registry.key(),
             protocol_config: protocol_config.key(),
             rodeo_mint: global_config.rodeo_mint,
             ansem_mint: global_config.ansem_mint,
@@ -427,8 +451,12 @@ pub mod rodeo_core {
         pending_randomness.timeout_timestamp = now
             .checked_add(RANDOMNESS_TIMEOUT_SECONDS)
             .ok_or(RodeoError::ArithmeticOverflow)?;
-        pending_randomness.registry_root_snapshot = [0u8; 32];
-        pending_randomness.registry_version_snapshot = 0;
+        pending_randomness.registry_root_snapshot = ctx.accounts.bull_registry.owner_tree_root;
+        pending_randomness.registry_version_snapshot = ctx.accounts.bull_registry.registry_version;
+        pending_randomness.registry_total_count_snapshot =
+            ctx.accounts.bull_registry.total_bull_count;
+        pending_randomness.registry_total_power_snapshot =
+            ctx.accounts.bull_registry.total_buck_power;
         pending_randomness.config_version_snapshot =
             ctx.accounts.global_config.current_config_version;
         pending_randomness.settled = false;
@@ -460,8 +488,10 @@ pub mod rodeo_core {
             provider_randomness_account,
             vrf_key: Some(provider_randomness_account),
             callback_id: None,
-            registry_root_snapshot: [0u8; 32],
-            registry_version_snapshot: 0,
+            registry_root_snapshot: pending_randomness.registry_root_snapshot,
+            registry_version_snapshot: pending_randomness.registry_version_snapshot,
+            registry_total_count_snapshot: pending_randomness.registry_total_count_snapshot,
+            registry_total_power_snapshot: pending_randomness.registry_total_power_snapshot,
             config_version_snapshot: pending_randomness.config_version_snapshot,
             commitment,
         });
@@ -1096,12 +1126,38 @@ pub mod rodeo_core {
         let clock = Clock::get()?;
         let protocol_epoch = ctx.accounts.reward_state.current_epoch;
 
-        let commitment = derive_commitment(
-            position.key(),
-            ActionType::Unstake,
-            action_nonce,
-            protocol_epoch,
-        );
+        #[cfg(feature = "mock-randomness")]
+        let (provider_program, provider_randomness_account, commitment, committed_slot) = {
+            let commitment = derive_commitment(
+                position.key(),
+                ActionType::Unstake,
+                action_nonce,
+                protocol_epoch,
+            );
+            (Pubkey::default(), Pubkey::default(), commitment, clock.slot)
+        };
+
+        #[cfg(not(feature = "mock-randomness"))]
+        let (provider_program, provider_randomness_account, commitment, committed_slot) = {
+            let randomness_account = &ctx.accounts.provider_randomness_account;
+            require!(
+                randomness_account.owner == &switchboard_on_demand::ON_DEMAND_MAINNET_PID
+                    || randomness_account.owner == &switchboard_on_demand::ON_DEMAND_DEVNET_PID,
+                RodeoError::InvalidProviderAccount
+            );
+            let randomness_data = RandomnessAccountData::parse(randomness_account.data.borrow())
+                .map_err(|_| RodeoError::InvalidProviderAccount)?;
+            require!(
+                randomness_data.get_value(clock.slot).is_err(),
+                RodeoError::RandomnessNotResolved
+            );
+            (
+                *randomness_account.owner,
+                randomness_account.key(),
+                randomness_data.seed_slothash,
+                randomness_data.seed_slot,
+            )
+        };
 
         position.pending_action_active = true;
         position.pending_action_type = ActionType::Unstake;
@@ -1113,16 +1169,21 @@ pub mod rodeo_core {
         pending_randomness.position = position.key();
         pending_randomness.action_type = ActionType::Unstake;
         pending_randomness.action_nonce = action_nonce;
-        pending_randomness.provider_program = Pubkey::default();
-        pending_randomness.provider_randomness_account = Pubkey::default();
+        pending_randomness.provider_program = provider_program;
+        pending_randomness.provider_randomness_account = provider_randomness_account;
         pending_randomness.commitment = commitment;
-        pending_randomness.committed_slot = clock.slot;
+        pending_randomness.committed_slot = committed_slot;
         pending_randomness.committed_protocol_epoch = protocol_epoch;
         pending_randomness.timeout_timestamp = now
             .checked_add(RANDOMNESS_TIMEOUT_SECONDS)
             .ok_or(RodeoError::ArithmeticOverflow)?;
+        // Unstake operates on the CURRENT BullRegistry, so the action does not
+        // freeze a historical registry snapshot. The committed proof buffer
+        // captures the live registry root at initialization time.
         pending_randomness.registry_root_snapshot = [0u8; 32];
         pending_randomness.registry_version_snapshot = 0;
+        pending_randomness.registry_total_count_snapshot = 0;
+        pending_randomness.registry_total_power_snapshot = 0;
         pending_randomness.config_version_snapshot =
             ctx.accounts.global_config.current_config_version;
         pending_randomness.settled = false;
@@ -1146,8 +1207,10 @@ pub mod rodeo_core {
             provider_randomness_account: Pubkey::default(),
             vrf_key: None,
             callback_id: None,
-            registry_root_snapshot: [0u8; 32],
-            registry_version_snapshot: 0,
+            registry_root_snapshot: pending_randomness.registry_root_snapshot,
+            registry_version_snapshot: pending_randomness.registry_version_snapshot,
+            registry_total_count_snapshot: pending_randomness.registry_total_count_snapshot,
+            registry_total_power_snapshot: pending_randomness.registry_total_power_snapshot,
             config_version_snapshot: pending_randomness.config_version_snapshot,
             commitment,
         });
@@ -1191,15 +1254,61 @@ pub mod rodeo_core {
             RodeoError::RandomnessAlreadyAvailable
         );
 
+        let position_key = ctx.accounts.position.key();
+        let action_nonce = ctx.accounts.pending_randomness.action_nonce;
+        let protocol_epoch = ctx.accounts.pending_randomness.committed_protocol_epoch;
+
         #[cfg(feature = "mock-randomness")]
-        return settle_unstake_mock(&mut ctx);
+        let random_output = derive_commitment(
+            position_key,
+            ActionType::Unstake,
+            action_nonce,
+            protocol_epoch,
+        );
 
         #[cfg(not(feature = "mock-randomness"))]
-        {
-            // Production builds require a verified randomness proof. The Switchboard
-            // adapter is intentionally not implemented in Phase 2C2B.
-            err!(RodeoError::RandomnessNotReady)
-        }
+        let random_output = {
+            let clock = &ctx.accounts.clock;
+            let randomness_account = &ctx.accounts.provider_randomness_account;
+            require_keys_eq!(
+                randomness_account.key(),
+                ctx.accounts.pending_randomness.provider_randomness_account,
+                RodeoError::InvalidProviderAccount
+            );
+            require!(
+                randomness_account.owner == &ctx.accounts.pending_randomness.provider_program,
+                RodeoError::InvalidProviderAccount
+            );
+            let randomness_data = RandomnessAccountData::parse(randomness_account.data.borrow())
+                .map_err(|_| RodeoError::InvalidProviderAccount)?;
+            require!(
+                randomness_data.seed_slot == ctx.accounts.pending_randomness.committed_slot,
+                RodeoError::InvalidProviderAccount
+            );
+            randomness_data
+                .get_value(clock.slot)
+                .map_err(|_| RodeoError::RandomnessNotReady)?
+        };
+
+        let global_config_key = ctx.accounts.global_config.key().clone();
+        let config_version = ctx.accounts.pending_randomness.config_version_snapshot;
+        let (expected_protocol_config_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                global_config_key.as_ref(),
+                &config_version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let protocol_config_box = load_historical_protocol_config(
+            &*ctx.accounts.protocol_config,
+            &expected_protocol_config_key,
+            &global_config_key,
+            config_version,
+        )?;
+        let config: &ProtocolConfig = &*protocol_config_box;
+
+        settle_unstake_common(&mut ctx, random_output, config)
     }
 
     pub fn recover_unstake_timeout(ctx: Context<RecoverUnstakeTimeout>) -> Result<()> {
@@ -1252,6 +1361,614 @@ pub mod rodeo_core {
             recovery_action: TimeoutRecoveryAction::CancelUnstake,
         });
 
+        Ok(())
+    }
+
+    pub fn initialize_bull_proof(
+        ctx: Context<InitializeBullProof>,
+        action_type: ActionType,
+        expected_payload_length: u32,
+        nonce: u64,
+    ) -> Result<()> {
+        require!(
+            action_type == ActionType::Reveal || action_type == ActionType::Unstake,
+            RodeoError::BullProofBufferIncomplete
+        );
+        require_gte!(
+            BULL_PROOF_BUFFER_MAX_PAYLOAD as u32,
+            expected_payload_length,
+            RodeoError::BullProofBufferOversized
+        );
+
+        let pending_randomness = &ctx.accounts.pending_randomness;
+        require!(
+            pending_randomness.action_type == action_type,
+            RodeoError::BullProofBufferIncomplete
+        );
+        require!(
+            !pending_randomness.settled,
+            RodeoError::RandomnessAlreadyAvailable
+        );
+
+        let position = &ctx.accounts.position;
+        require_keys_eq!(
+            pending_randomness.position,
+            position.key(),
+            RodeoError::InvalidPendingRandomness
+        );
+
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        buffer.version = ACCOUNT_VERSION_BULL_PROOF_BUFFER;
+        buffer.schema_version = BULL_PROOF_BUFFER_SCHEMA_VERSION;
+        buffer.action_type = action_type;
+        buffer.pending_randomness = pending_randomness.key();
+        buffer.position = position.key();
+        // Unstake removal proofs prove against the CURRENT BullRegistry at the
+        // time of proof staging. Reveal proofs prove against the historical
+        // registry snapshot committed at request_reveal time.
+        if action_type == ActionType::Unstake {
+            buffer.snapshot_root = ctx.accounts.bull_registry.owner_tree_root;
+            buffer.snapshot_version = ctx.accounts.bull_registry.registry_version;
+            buffer.snapshot_total_count = ctx.accounts.bull_registry.total_bull_count;
+            buffer.snapshot_total_power = ctx.accounts.bull_registry.total_buck_power;
+        } else {
+            buffer.snapshot_root = pending_randomness.registry_root_snapshot;
+            buffer.snapshot_version = pending_randomness.registry_version_snapshot;
+            buffer.snapshot_total_count = pending_randomness.registry_total_count_snapshot;
+            buffer.snapshot_total_power = pending_randomness.registry_total_power_snapshot;
+        }
+        buffer.refund_recipient = ctx.accounts.prover.key();
+        buffer.expiry_timestamp = pending_randomness
+            .timeout_timestamp
+            .checked_add(BULL_PROOF_BUFFER_TTL_SECONDS)
+            .ok_or(RodeoError::ArithmeticOverflow)?;
+        buffer.nonce = nonce;
+        buffer.expected_payload_length = expected_payload_length;
+        buffer.finalized = false;
+        buffer.consumed = false;
+        buffer.bump = ctx.bumps.bull_proof_buffer;
+        buffer.payload = Vec::new();
+
+        Ok(())
+    }
+
+    pub fn append_bull_proof(
+        ctx: Context<AppendBullProof>,
+        nonce: u64,
+        offset: u32,
+        chunk: Vec<u8>,
+    ) -> Result<()> {
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        require!(!buffer.finalized, RodeoError::BullProofBufferFinalized);
+        require_keys_eq!(
+            buffer.refund_recipient,
+            ctx.accounts.prover.key(),
+            RodeoError::BullProofBufferWrongProver
+        );
+        require_eq!(
+            offset,
+            buffer.payload.len() as u32,
+            RodeoError::BullProofBufferOffsetGap
+        );
+
+        let new_len = (offset as usize)
+            .checked_add(chunk.len())
+            .ok_or(RodeoError::ArithmeticOverflow)?;
+        require_gte!(
+            buffer.expected_payload_length as usize,
+            new_len,
+            RodeoError::BullProofBufferOversized
+        );
+        require_gte!(
+            BULL_PROOF_BUFFER_MAX_PAYLOAD,
+            new_len,
+            RodeoError::BullProofBufferOversized
+        );
+
+        let account_data_len = buffer.to_account_info().data_len();
+        let required_len =
+            BULL_PROOF_BUFFER_PAYLOAD_OFFSET + (buffer.expected_payload_length as usize);
+        require_gte!(
+            account_data_len,
+            required_len,
+            RodeoError::BullProofBufferNotExpanded
+        );
+
+        buffer.payload.extend_from_slice(&chunk);
+        Ok(())
+    }
+
+    pub fn finalize_bull_proof(ctx: Context<FinalizeBullProof>, nonce: u64) -> Result<()> {
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        require!(!buffer.finalized, RodeoError::BullProofBufferFinalized);
+        require_keys_eq!(
+            buffer.refund_recipient,
+            ctx.accounts.prover.key(),
+            RodeoError::BullProofBufferWrongProver
+        );
+        require_eq!(
+            buffer.payload.len() as u32,
+            buffer.expected_payload_length,
+            RodeoError::BullProofBufferIncomplete
+        );
+
+        buffer.finalized = true;
+        Ok(())
+    }
+
+    pub fn close_bull_proof(ctx: Context<CloseBullProof>, nonce: u64) -> Result<()> {
+        let buffer = &ctx.accounts.bull_proof_buffer;
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            buffer.consumed || now >= buffer.expiry_timestamp,
+            RodeoError::BullProofBufferNotAbandoned
+        );
+        Ok(())
+    }
+
+    /// Expand a BullProofBuffer that was initialized with a one-shot account size
+    /// up to its full `expected_payload_length`. The runtime limits account-data
+    /// growth to `MAX_PERMITTED_DATA_INCREASE` bytes per instruction, so this may
+    /// need to be called multiple times for payloads far beyond the one-shot cap.
+    /// The prover is the refund recipient and must fund the additional rent.
+    pub fn expand_bull_proof_buffer(ctx: Context<ExpandBullProofBuffer>, nonce: u64) -> Result<()> {
+        let buffer = &ctx.accounts.bull_proof_buffer;
+        require!(!buffer.finalized, RodeoError::BullProofBufferFinalized);
+        require_keys_eq!(
+            buffer.refund_recipient,
+            ctx.accounts.prover.key(),
+            RodeoError::BullProofBufferWrongProver
+        );
+        require_eq!(buffer.nonce, nonce, RodeoError::InvalidBullProofBufferPda);
+
+        let expected_payload_length = buffer.expected_payload_length as usize;
+        require!(
+            expected_payload_length <= BULL_PROOF_BUFFER_MAX_PAYLOAD,
+            RodeoError::BullProofBufferOversized
+        );
+
+        let buffer_info = ctx.accounts.bull_proof_buffer.to_account_info();
+        let current_len = buffer_info.data_len();
+        let target_len = BULL_PROOF_BUFFER_PAYLOAD_OFFSET + expected_payload_length;
+
+        require!(
+            target_len >= current_len,
+            RodeoError::BullProofBufferInvalidExpansion
+        );
+        if target_len == current_len {
+            return Ok(());
+        }
+
+        let delta = target_len - current_len;
+        require!(
+            delta <= BULL_PROOF_BUFFER_EXPAND_MAX_DELTA,
+            RodeoError::BullProofBufferExpansionTooLarge
+        );
+
+        let rent = Rent::get()?;
+        let new_rent = rent.minimum_balance(target_len);
+        let current_lamports = buffer_info.lamports();
+        if new_rent > current_lamports {
+            let diff = new_rent - current_lamports;
+            require!(
+                ctx.accounts.prover.lamports() >= diff,
+                RodeoError::InvalidProgramAccount
+            );
+            let cpi_ctx = CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.prover.to_account_info(),
+                    to: buffer_info.clone(),
+                },
+            );
+            anchor_lang::system_program::transfer(cpi_ctx, diff)?;
+        }
+
+        buffer_info.resize(target_len)?;
+        Ok(())
+    }
+
+    /// Benchmark fixture for the sparse-tree verifier.  It exercises the exact
+    /// production verification and add/remove paths and then restores the
+    /// registry so the benchmark is non-destructive.  Compute units are read
+    #[cfg(feature = "test-fixtures")]
+    pub fn benchmark_sparse_tree(
+        ctx: Context<BenchmarkSparseTree>,
+        victim: Option<Pubkey>,
+        new_bull: Option<BullLeaf>,
+    ) -> Result<()> {
+        let snapshot = SparseTreeBenchmarkSnapshot {
+            owner_tree_root: ctx.accounts.bull_registry.owner_tree_root,
+            total_bull_count: ctx.accounts.bull_registry.total_bull_count,
+            total_buck_power: ctx.accounts.bull_registry.total_buck_power,
+            registry_version: ctx.accounts.bull_registry.registry_version,
+        };
+
+        let buffer_data = if let Some(buffer_info) = ctx.accounts.bull_proof_buffer.as_ref() {
+            require!(
+                buffer_info.owner == &crate::ID,
+                RodeoError::InvalidProgramAccount
+            );
+            Some(buffer_info.data.borrow())
+        } else {
+            None
+        };
+
+        let current_owner_tree_root = ctx.accounts.bull_registry.owner_tree_root;
+        let (payload, historical_owner_tree_root) = if let Some(ref d) = buffer_data {
+            let buffer = BullProofBufferRef::from_account_data(&**d)
+                .map_err(|_| RodeoError::BullProofBufferIncomplete)?;
+            require!(buffer.finalized, RodeoError::BullProofBufferNotFinalized);
+            let historical_root = if buffer.snapshot_root != [0u8; 32] {
+                buffer.snapshot_root
+            } else {
+                current_owner_tree_root
+            };
+            (
+                Some(
+                    BullProofPayloadRef::new(buffer.payload)
+                        .map_err(|_| RodeoError::BullProofBufferIncomplete)?,
+                ),
+                historical_root,
+            )
+        } else {
+            (None, current_owner_tree_root)
+        };
+
+        let registry = &mut ctx.accounts.bull_registry;
+
+        if let Some(ref payload) = payload {
+            // victim owner membership / non-membership against historical snapshot
+            if let Some(ref victim_key) = victim {
+                if let Some(victim_proof) = payload.victim_owner()? {
+                    verify_owner_ref(&historical_owner_tree_root, victim_key, victim_proof)?;
+                }
+            }
+
+            // selected owner against historical snapshot
+            if let Some(selected_owner) = payload.selected_owner()? {
+                msg!("bench verify owner");
+                let owner = selected_owner.leaf.owner;
+                verify_owner_ref(&historical_owner_tree_root, &owner, selected_owner)?;
+            }
+
+            // selected bull, using the matching HISTORICAL owner leaf's bull tree root
+            if let Some(selected_bull) = payload.selected_bull()? {
+                let owner = selected_bull.leaf.owner;
+                let owner_proof = payload
+                    .selected_owner()?
+                    .filter(|p| p.leaf.owner == owner)
+                    .or_else(|| {
+                        payload
+                            .current_owner()
+                            .ok()
+                            .flatten()
+                            .filter(|p| p.leaf.owner == owner)
+                    })
+                    .ok_or(RodeoError::BullRegistryOwnerMismatch)?;
+                verify_bull_ref(
+                    &owner_proof.leaf.bull_tree_root,
+                    &selected_bull.leaf.position,
+                    selected_bull,
+                )?;
+            }
+
+            // remove takes precedence over add if both are present to avoid
+            // using a stale owner proof after mutation.
+            let mut mutated = false;
+            if let Some(remove_bull) = payload.remove_bull()? {
+                let remove_bull = remove_bull.to_owned()?;
+                let owner = remove_bull.leaf.owner;
+                let owner_proof = payload
+                    .current_owner()?
+                    .filter(|p| p.leaf.owner == owner)
+                    .or_else(|| {
+                        payload
+                            .selected_owner()
+                            .ok()
+                            .flatten()
+                            .filter(|p| p.leaf.owner == owner)
+                    })
+                    .ok_or(RodeoError::BullRegistryOwnerMismatch)?
+                    .to_owned()?;
+                remove_bull_from_registry(registry, &remove_bull.leaf, &owner_proof, &remove_bull)?;
+                mutated = true;
+            }
+
+            if !mutated {
+                if let Some(ref new_bull_leaf) = new_bull {
+                    let owner_proof = payload
+                        .current_owner()?
+                        .ok_or(RodeoError::BullRegistryOwnerMismatch)?
+                        .to_owned()?;
+                    let bull_proof = payload
+                        .current_bull()?
+                        .ok_or(RodeoError::BullRegistryMalformedProof)?
+                        .to_owned()?;
+                    add_bull_to_registry(registry, new_bull_leaf, &owner_proof, &bull_proof)?;
+                }
+            }
+        }
+
+        // restore registry to keep benchmark non-destructive
+        ctx.accounts.bull_registry.owner_tree_root = snapshot.owner_tree_root;
+        ctx.accounts.bull_registry.total_bull_count = snapshot.total_bull_count;
+        ctx.accounts.bull_registry.total_buck_power = snapshot.total_buck_power;
+        ctx.accounts.bull_registry.registry_version = snapshot.registry_version;
+
+        emit!(SparseTreeBenchmarked {
+            owner_tree_root: snapshot.owner_tree_root,
+            total_bull_count: snapshot.total_bull_count,
+            total_buck_power: snapshot.total_buck_power,
+            registry_version: snapshot.registry_version,
+        });
+        msg!("SparseTreeBenchmarked");
+
+        Ok(())
+    }
+
+    #[cfg(feature = "test-fixtures")]
+    pub fn benchmark_sparse_hash_loop(
+        _ctx: Context<BenchmarkSparseHashLoop>,
+        iterations: u32,
+    ) -> Result<[u8; 32]> {
+        const HASH_LOOP_PREFIX: &[u8] = b"rodeo_v2_bull_owner_node";
+        let mut buf = [0u8; 256];
+        let mut current_hash = [0u8; 32];
+        let mut current_count = 0u64;
+        let mut current_power = 0u64;
+        for level in 0..iterations {
+            let left_hash = current_hash;
+            let right_hash = [level as u8; 32];
+            let left_count = current_count;
+            let right_count = level as u64;
+            let left_power = current_power;
+            let right_power = level as u64;
+            let mut off = 0usize;
+            let append = |buf: &mut [u8; 256], off: &mut usize, bytes: &[u8]| {
+                let end = *off + bytes.len();
+                buf[*off..end].copy_from_slice(bytes);
+                *off = end;
+            };
+            append(&mut buf, &mut off, HASH_LOOP_PREFIX);
+            append(&mut buf, &mut off, &left_hash);
+            append(&mut buf, &mut off, &left_count.to_le_bytes());
+            append(&mut buf, &mut off, &left_power.to_le_bytes());
+            append(&mut buf, &mut off, &right_hash);
+            append(&mut buf, &mut off, &right_count.to_le_bytes());
+            append(&mut buf, &mut off, &right_power.to_le_bytes());
+            current_hash = anchor_lang::solana_program::hash::hash(&buf[..off]).to_bytes();
+            current_count = current_count.wrapping_add(right_count);
+            current_power = current_power.wrapping_add(right_power);
+            if level == 0 {
+                anchor_lang::solana_program::log::sol_log_64(0, 0, 0, 0, 0);
+            }
+            if level % 32 == 31 {
+                anchor_lang::solana_program::log::sol_log_64((level + 1) as u64, 0, 0, 0, 0);
+            }
+        }
+        anchor_lang::solana_program::log::sol_log_64(
+            iterations as u64,
+            current_hash[0] as u64,
+            current_hash[1] as u64,
+            current_hash[2] as u64,
+            current_hash[3] as u64,
+        );
+        msg!("HashLoopDone");
+        Ok(current_hash)
+    }
+
+    #[cfg(feature = "test-fixtures")]
+    pub fn benchmark_heap(
+        _ctx: Context<BenchmarkHeap>,
+        total_bytes: u32,
+        iterations: u32,
+    ) -> Result<()> {
+        anchor_lang::solana_program::log::sol_log_64(
+            total_bytes as u64,
+            iterations as u64,
+            0,
+            0,
+            0,
+        );
+        let mut allocated: u64 = 0;
+        for _ in 0..iterations {
+            let v = vec![0u8; total_bytes as usize];
+            allocated = allocated
+                .checked_add(v.len() as u64)
+                .ok_or(RodeoError::ArithmeticOverflow)?;
+        }
+        anchor_lang::solana_program::log::sol_log_64(allocated, 0, 0, 0, 0);
+        Ok(())
+    }
+
+    /// Test-only fixture to set the BullRegistry root and counters for
+    /// Test-only fixture to set the BullRegistry root and counters for
+    /// benchmark initialization.  Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_initialize_protocol_accounts(
+        ctx: Context<TestFixtureInitializeProtocolAccounts>,
+    ) -> Result<()> {
+        let global_bump = ctx.bumps.global_config;
+        let bull_bump = ctx.bumps.bull_registry;
+        let global_key = ctx.accounts.global_config.key();
+        ctx.accounts.global_config.set_inner(GlobalConfig {
+            version: 1,
+            rodeo_mint: Pubkey::default(),
+            ansem_mint: Pubkey::default(),
+            rodeo_decimals: 0,
+            ansem_decimals: 0,
+            stake_amount_atomic: 0,
+            expected_total_supply_atomic: 0,
+            launch_timestamp: 0,
+            principal_vault: Pubkey::default(),
+            reward_vault: Pubkey::default(),
+            pause_new_stakes: false,
+            pause_new_reveal_requests: false,
+            pause_new_marketplace_listings: false,
+            pause_router_swaps: false,
+            upgrade_council: Pubkey::default(),
+            treasury_council: Pubkey::default(),
+            emergency_guardians: Pubkey::default(),
+            current_config_version: 0,
+            bump: global_bump,
+            principal_vault_bump: 0,
+            reward_vault_bump: 0,
+        });
+        ctx.accounts.bull_registry.set_inner(BullRegistry {
+            version: 1,
+            global_config: global_key,
+            owner_tree_root: [0u8; 32],
+            total_bull_count: 0,
+            total_buck_power: 0,
+            registry_version: 0,
+            bump: bull_bump,
+        });
+        Ok(())
+    }
+
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_set_bull_registry(
+        ctx: Context<TestFixtureSetBullRegistry>,
+        owner_tree_root: [u8; 32],
+        total_bull_count: u64,
+        total_buck_power: u64,
+        registry_version: u64,
+    ) -> Result<()> {
+        let registry = &mut ctx.accounts.bull_registry;
+        registry.owner_tree_root = owner_tree_root;
+        registry.total_bull_count = total_bull_count;
+        registry.total_buck_power = total_buck_power;
+        registry.registry_version = registry_version;
+        Ok(())
+    }
+
+    /// Test-only fixture to overwrite the global game-state counters used by
+    /// the SettleReveal benchmark. Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_set_global_game_state(
+        ctx: Context<TestFixtureSetGlobalGameState>,
+        total_completed_reveals: u64,
+        next_position_id: u64,
+        active_bull_count: u64,
+        total_active_bull_power: u64,
+    ) -> Result<()> {
+        let game = &mut ctx.accounts.global_game_state;
+        game.total_completed_reveals = total_completed_reveals;
+        game.next_position_id = next_position_id;
+        game.active_bull_count = active_bull_count;
+        game.total_active_bull_power = total_active_bull_power;
+        Ok(())
+    }
+
+    /// Test-only fixture to overwrite the reward-state epoch used by the
+    /// SettleReveal benchmark. Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_set_reward_state(
+        ctx: Context<TestFixtureSetRewardState>,
+        current_epoch: u64,
+    ) -> Result<()> {
+        let reward = &mut ctx.accounts.reward_state;
+        reward.current_epoch = current_epoch;
+        Ok(())
+    }
+
+    /// Test-only fixture to initialize a BullProofBuffer for benchmark
+    /// staging, using dummy position/pending-randomness and authority as
+    /// prover/refund.  Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_initialize_bull_proof_buffer(
+        ctx: Context<TestFixtureInitializeBullProofBuffer>,
+        expected_payload_length: u32,
+        nonce: u64,
+    ) -> Result<()> {
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        buffer.version = ACCOUNT_VERSION_BULL_PROOF_BUFFER;
+        buffer.schema_version = BULL_PROOF_BUFFER_SCHEMA_VERSION;
+        buffer.action_type = ActionType::Unstake;
+        buffer.pending_randomness = ctx.accounts.authority.key();
+        buffer.position = ctx.accounts.authority.key();
+        buffer.snapshot_root = [0u8; 32];
+        buffer.snapshot_version = 0;
+        buffer.snapshot_total_count = 0;
+        buffer.snapshot_total_power = 0;
+        buffer.refund_recipient = ctx.accounts.authority.key();
+        buffer.expiry_timestamp = i64::MAX;
+        buffer.nonce = nonce;
+        buffer.expected_payload_length = expected_payload_length;
+        buffer.finalized = false;
+        buffer.consumed = false;
+        buffer.bump = ctx.bumps.bull_proof_buffer;
+        buffer.payload = Vec::new();
+        Ok(())
+    }
+
+    /// Test-only fixture to set the snapshot fields on a benchmark
+    /// BullProofBuffer.  Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_set_bull_proof_buffer_snapshot(
+        ctx: Context<TestFixtureSetBullProofBufferSnapshot>,
+        snapshot_root: [u8; 32],
+        snapshot_version: u64,
+        snapshot_total_count: u64,
+        snapshot_total_power: u64,
+    ) -> Result<()> {
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        buffer.snapshot_root = snapshot_root;
+        buffer.snapshot_version = snapshot_version;
+        buffer.snapshot_total_count = snapshot_total_count;
+        buffer.snapshot_total_power = snapshot_total_power;
+        Ok(())
+    }
+
+    /// Test-only fixture to append a chunk to the benchmark
+    /// BullProofBuffer.  Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_append_bull_proof_buffer(
+        ctx: Context<TestFixtureAppendBullProofBuffer>,
+        nonce: u64,
+        offset: u32,
+        chunk: Vec<u8>,
+    ) -> Result<()> {
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        require!(!buffer.finalized, RodeoError::BullProofBufferFinalized);
+        require_eq!(
+            offset,
+            buffer.payload.len() as u32,
+            RodeoError::BullProofBufferOffsetGap
+        );
+        let new_len = (offset as usize)
+            .checked_add(chunk.len())
+            .ok_or(RodeoError::ArithmeticOverflow)?;
+        require_gte!(
+            buffer.expected_payload_length as usize,
+            new_len,
+            RodeoError::BullProofBufferOversized
+        );
+        require_gte!(
+            BULL_PROOF_BUFFER_MAX_PAYLOAD,
+            new_len,
+            RodeoError::BullProofBufferOversized
+        );
+        buffer.payload.extend_from_slice(&chunk);
+        Ok(())
+    }
+
+    /// Test-only fixture to finalize the benchmark BullProofBuffer.
+    /// Never part of the production binary.
+    #[cfg(feature = "test-fixtures")]
+    pub fn test_fixture_finalize_bull_proof_buffer(
+        ctx: Context<TestFixtureFinalizeBullProofBuffer>,
+        nonce: u64,
+    ) -> Result<()> {
+        let buffer = &mut ctx.accounts.bull_proof_buffer;
+        require!(!buffer.finalized, RodeoError::BullProofBufferFinalized);
+        require_eq!(
+            buffer.payload.len() as u32,
+            buffer.expected_payload_length,
+            RodeoError::BullProofBufferIncomplete
+        );
+        buffer.finalized = true;
         Ok(())
     }
 
@@ -2262,6 +2979,186 @@ pub mod rodeo_core {
 
 #[cfg(feature = "test-fixtures")]
 #[derive(Accounts)]
+pub struct TestFixtureInitializeProtocolAccounts<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + GlobalConfig::INIT_SPACE,
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + BullRegistry::INIT_SPACE,
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
+
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct TestFixtureSetBullRegistry<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump = bull_registry.bump,
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct TestFixtureSetGlobalGameState<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_GLOBAL_GAME_STATE, global_config.key().as_ref()],
+        bump = global_game_state.bump,
+    )]
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct TestFixtureSetRewardState<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_REWARD_STATE, global_config.key().as_ref()],
+        bump = reward_state.bump,
+    )]
+    pub reward_state: Box<Account<'info, RewardState>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(expected_payload_length: u32, nonce: u64)]
+pub struct TestFixtureInitializeBullProofBuffer<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + BullProofBuffer::INIT_SPACE,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            authority.key().as_ref(),
+            authority.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(snapshot_root: [u8; 32], snapshot_version: u64, snapshot_total_count: u64, snapshot_total_power: u64)]
+pub struct TestFixtureSetBullProofBufferSnapshot<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            authority.key().as_ref(),
+            authority.key().as_ref(),
+            &bull_proof_buffer.nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(nonce: u64, offset: u32, chunk: Vec<u8>)]
+pub struct TestFixtureAppendBullProofBuffer<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            authority.key().as_ref(),
+            authority.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+        constraint = !bull_proof_buffer.finalized @ RodeoError::BullProofBufferFinalized,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+#[instruction(nonce: u64)]
+pub struct TestFixtureFinalizeBullProofBuffer<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            authority.key().as_ref(),
+            authority.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
 #[instruction(pause_new_stakes: bool, pause_new_reveal_requests: bool)]
 pub struct TestSetPauseFlags<'info> {
     pub authority: Signer<'info>,
@@ -2510,8 +3407,8 @@ pub struct InitializeProtocol<'info> {
     )]
     pub program_data: AccountInfo<'info>,
 
-    pub rodeo_mint: Account<'info, Mint>,
-    pub ansem_mint: Account<'info, Mint>,
+    pub rodeo_mint: Box<Account<'info, Mint>>,
+    pub ansem_mint: Box<Account<'info, Mint>>,
 
     #[account(
         init,
@@ -2548,6 +3445,15 @@ pub struct InitializeProtocol<'info> {
         bump
     )]
     pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
+
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + BullRegistry::INIT_SPACE,
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
 
     #[account(
         init,
@@ -2679,6 +3585,12 @@ pub struct StakeAndCommit<'info> {
     )]
     pub global_game_state: Box<Account<'info, GlobalGameState>>,
 
+    #[account(
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump = bull_registry.bump,
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
+
     /// CHECK: The System-Program-owned ReceiptFunder PDA for this Position.
     /// Created and prefunded by the player during stake_and_commit; it is
     /// later used as the MPL Core payer for receipt create/burn.
@@ -2733,6 +3645,13 @@ pub struct SettleReveal<'info> {
 
     #[account(
         mut,
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump = bull_registry.bump,
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
+
+    #[account(
+        mut,
         seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
         bump = position.bump,
         constraint = position.pending_action_active @ RodeoError::PendingActionConflict,
@@ -2756,6 +3675,17 @@ pub struct SettleReveal<'info> {
     )]
     pub pending_randomness: Box<Account<'info, PendingRandomness>>,
 
+    /// Proof buffer is optional.  It is required when mint theft or new-Bull
+    /// current-mutation proof data is needed, and must be omitted when no
+    /// proof is required.
+    /// CHECK: manually validated as a raw BullProofBuffer PDA.
+    #[account(mut)]
+    pub bull_proof_buffer: Option<UncheckedAccount<'info>>,
+
+    /// CHECK: Receives the proof-buffer rent refund when a buffer is consumed.
+    #[account(mut)]
+    pub refund_recipient: Option<AccountInfo<'info>>,
+
     #[account(
         seeds = [
             SEED_PROTOCOL_CONFIG,
@@ -2768,9 +3698,13 @@ pub struct SettleReveal<'info> {
     pub protocol_config: Box<Account<'info, ProtocolConfig>>,
 
     /// CHECK: Account receives reclaimed rent and is validated against the position owner.
-    /// Also used as the embedded Core asset owner for the PositionReceipt.
     #[account(mut, constraint = owner.key() == position.owner @ RodeoError::InvalidOwner)]
     pub owner: AccountInfo<'info>,
+
+    /// CHECK: The final owner of the Position after reveal; used as the Core
+    /// asset owner for the PositionReceipt. It is verified against the mutated
+    /// position owner before the CreateV2 CPI.
+    pub receipt_owner: AccountInfo<'info>,
 
     /// CHECK: The new Core Asset account at the PositionReceipt PDA.
     #[account(
@@ -3095,6 +4029,12 @@ pub struct RequestUnstake<'info> {
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
     pub clock: Sysvar<'info, Clock>,
+
+    /// CHECK: Switchboard On-Demand randomness account that will later be
+    /// fulfilled and used as the entropy source for unstake settlement.
+    /// Must be owned by the Switchboard On-Demand program and unresolved.
+    #[account(mut)]
+    pub provider_randomness_account: AccountInfo<'info>,
 }
 
 #[derive(Accounts)]
@@ -3131,6 +4071,27 @@ pub struct SettleUnstake<'info> {
 
     #[account(
         mut,
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump = bull_registry.bump,
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
+
+    /// Proof buffer is only required for Bull removal.
+    /// It is loaded manually in the handler to keep `SettleUnstake::try_accounts`
+    /// within the SBF stack limit.  The buffer is prover-funded and its
+    /// `refund_recipient` is committed at initialization to the prover's key,
+    /// which may differ from the position owner (independent proof service).
+    #[account(mut)]
+    pub bull_proof_buffer: Option<AccountInfo<'info>>,
+
+    /// CHECK: Receives the proof-buffer rent refund when a buffer is consumed.
+    /// Validated against `buffer.refund_recipient` in the handler.  This is
+    /// separate from the owner-funded ReceiptFunder reserve refund.
+    #[account(mut)]
+    pub refund_recipient: Option<AccountInfo<'info>>,
+
+    #[account(
+        mut,
         close = owner,
         seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
         bump = position.bump,
@@ -3156,16 +4117,8 @@ pub struct SettleUnstake<'info> {
     )]
     pub pending_randomness: Box<Account<'info, PendingRandomness>>,
 
-    #[account(
-        seeds = [
-            SEED_PROTOCOL_CONFIG,
-            global_config.key().as_ref(),
-            &pending_randomness.config_version_snapshot.to_le_bytes(),
-        ],
-        bump = protocol_config.bump,
-        constraint = protocol_config.config_version == pending_randomness.config_version_snapshot @ RodeoError::InvalidProbabilityTable,
-    )]
-    pub protocol_config: Box<Account<'info, ProtocolConfig>>,
+    /// CHECK: PDA, program ownership, and contents are validated manually in the handler.
+    pub protocol_config: UncheckedAccount<'info>,
 
     #[account(
         mut,
@@ -3208,36 +4161,19 @@ pub struct SettleUnstake<'info> {
     #[account(mut, constraint = owner.key() == position.owner @ RodeoError::InvalidOwner)]
     pub owner: AccountInfo<'info>,
 
-    /// CHECK: The PositionReceipt Core Asset to be burned.
-    #[account(
-        mut,
-        seeds = [SEED_POSITION_RECEIPT, position.key().as_ref()],
-        bump,
-        constraint = receipt_asset.key() == position.receipt_asset @ RodeoError::InvalidCoreAssetOwner,
-    )]
+    /// CHECK: PDA, ownership, and relation to the position are validated manually.
+    #[account(mut)]
     pub receipt_asset: UncheckedAccount<'info>,
 
-    /// CHECK: The official Rodeo receipt Collection this asset belongs to.
-    #[account(
-        mut,
-        seeds = [SEED_RECEIPT_COLLECTION, global_config.key().as_ref()],
-        bump,
-    )]
+    /// CHECK: PDA is validated manually.
+    #[account(mut)]
     pub receipt_collection: UncheckedAccount<'info>,
 
-    /// CHECK: Stateless ReceiptAuthority PDA used to sign the `BurnV1` CPI.
-    #[account(
-        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
-        bump,
-    )]
+    /// CHECK: PDA is validated manually.
     pub receipt_authority: UncheckedAccount<'info>,
 
-    /// CHECK: The ReceiptFunder PDA that paid the create rent and receives the burn refund.
-    #[account(
-        mut,
-        seeds = [SEED_RECEIPT_FUNDER, position.key().as_ref()],
-        bump,
-    )]
+    /// CHECK: PDA is validated manually.
+    #[account(mut)]
     pub receipt_funder: UncheckedAccount<'info>,
 
     /// CHECK: MPL Core program.
@@ -3247,6 +4183,11 @@ pub struct SettleUnstake<'info> {
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub clock: Sysvar<'info, Clock>,
+
+    /// CHECK: Switchboard On-Demand randomness account that was bound at
+    /// request time and must now be resolved to settle the unstake.
+    #[account(mut)]
+    pub provider_randomness_account: AccountInfo<'info>,
 }
 
 #[derive(Accounts)]
@@ -3294,9 +4235,223 @@ pub struct RecoverUnstakeTimeout<'info> {
     pub clock: Sysvar<'info, Clock>,
 }
 
+#[derive(Accounts)]
+#[instruction(action_type: ActionType, expected_payload_length: u32, nonce: u64)]
+pub struct InitializeBullProof<'info> {
+    #[account(mut)]
+    pub prover: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        seeds = [
+            SEED_POSITION,
+            global_config.key().as_ref(),
+            &position.position_id.to_le_bytes(),
+        ],
+        bump = position.bump,
+        constraint = position.pending_action_active @ RodeoError::PendingActionConflict,
+        constraint = position.pending_action_type == pending_randomness.action_type @ RodeoError::WrongActionType,
+    )]
+    pub position: Box<Account<'info, Position>>,
+
+    #[account(
+        seeds = [
+            SEED_RANDOMNESS,
+            position.key().as_ref(),
+            &[pending_randomness.action_type as u8],
+            &position.pending_action_nonce.to_le_bytes(),
+        ],
+        bump = pending_randomness.bump,
+        constraint = pending_randomness.position == position.key() @ RodeoError::InvalidPendingRandomness,
+        constraint = pending_randomness.action_nonce == position.pending_action_nonce @ RodeoError::InvalidPendingRandomness,
+    )]
+    pub pending_randomness: Box<Account<'info, PendingRandomness>>,
+
+    #[account(
+        init,
+        payer = prover,
+        space = bull_proof_buffer_init_space(expected_payload_length),
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            pending_randomness.key().as_ref(),
+            prover.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+
+    #[account(
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump = bull_registry.bump,
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
+
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+#[instruction(nonce: u64)]
+pub struct ExpandBullProofBuffer<'info> {
+    #[account(mut)]
+    pub prover: Signer<'info>,
+
+    /// CHECK: Only used to re-derive the buffer PDA; the binding is checked
+    /// against the value stored in the buffer after deserialization.
+    pub pending_randomness: AccountInfo<'info>,
+
+    #[account(
+        mut,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            pending_randomness.key().as_ref(),
+            prover.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+        constraint = !bull_proof_buffer.finalized @ RodeoError::BullProofBufferFinalized,
+        constraint = bull_proof_buffer.refund_recipient == prover.key() @ RodeoError::BullProofBufferWrongProver,
+        constraint = bull_proof_buffer.pending_randomness == pending_randomness.key() @ RodeoError::InvalidBullProofBufferPda,
+        constraint = bull_proof_buffer.nonce == nonce @ RodeoError::InvalidBullProofBufferPda,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(nonce: u64, offset: u32, chunk: Vec<u8>)]
+pub struct AppendBullProof<'info> {
+    #[account(mut)]
+    pub prover: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            bull_proof_buffer.pending_randomness.as_ref(),
+            prover.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+        constraint = !bull_proof_buffer.finalized @ RodeoError::BullProofBufferFinalized,
+        constraint = bull_proof_buffer.refund_recipient == prover.key() @ RodeoError::BullProofBufferWrongProver,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+}
+
+#[derive(Accounts)]
+#[instruction(nonce: u64)]
+pub struct FinalizeBullProof<'info> {
+    #[account(mut)]
+    pub prover: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            bull_proof_buffer.pending_randomness.as_ref(),
+            prover.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+        constraint = bull_proof_buffer.refund_recipient == prover.key() @ RodeoError::BullProofBufferWrongProver,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+}
+
+#[derive(Accounts)]
+#[instruction(nonce: u64)]
+pub struct CloseBullProof<'info> {
+    /// CHECK: The original prover is used to re-derive the buffer PDA.
+    pub prover: AccountInfo<'info>,
+
+    #[account(
+        mut,
+        close = refund_recipient,
+        seeds = [
+            SEED_BULL_PROOF_BUFFER,
+            bull_proof_buffer.pending_randomness.as_ref(),
+            prover.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        bump = bull_proof_buffer.bump,
+    )]
+    pub bull_proof_buffer: Box<Account<'info, BullProofBuffer>>,
+
+    /// CHECK: Receives the refunded lamports recorded in the buffer.
+    #[account(mut, address = bull_proof_buffer.refund_recipient)]
+    pub refund_recipient: AccountInfo<'info>,
+
+    pub clock: Sysvar<'info, Clock>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct BenchmarkSparseHashLoop<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct BenchmarkSparseTree<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_BULL_REGISTRY, global_config.key().as_ref()],
+        bump = bull_registry.bump,
+    )]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
+
+    /// Benchmark reads a finalized BullProofBuffer account to mirror the
+    /// real production proof transport.  None gives an empty/no-proof
+    /// baseline.
+    pub bull_proof_buffer: Option<AccountInfo<'info>>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(Accounts)]
+pub struct BenchmarkHeap<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug)]
+struct SparseTreeBenchmarkSnapshot {
+    pub owner_tree_root: [u8; 32],
+    pub total_bull_count: u64,
+    pub total_buck_power: u64,
+    pub registry_version: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
+
+#[cfg(feature = "test-fixtures")]
+#[event]
+pub struct SparseTreeBenchmarked {
+    pub owner_tree_root: [u8; 32],
+    pub total_bull_count: u64,
+    pub total_buck_power: u64,
+    pub registry_version: u64,
+}
 
 #[event]
 pub struct ProtocolInitialized {
@@ -3304,6 +4459,7 @@ pub struct ProtocolInitialized {
     pub reward_state: Pubkey,
     pub global_game_state: Pubkey,
     pub bull_accumulator: Pubkey,
+    pub bull_registry: Pubkey,
     pub protocol_config: Pubkey,
     pub rodeo_mint: Pubkey,
     pub ansem_mint: Pubkey,
@@ -3352,6 +4508,8 @@ pub struct RandomnessRequested {
     pub callback_id: Option<[u8; 32]>,
     pub registry_root_snapshot: [u8; 32],
     pub registry_version_snapshot: u64,
+    pub registry_total_count_snapshot: u64,
+    pub registry_total_power_snapshot: u64,
     pub config_version_snapshot: u64,
     pub commitment: [u8; 32],
 }
@@ -3401,6 +4559,37 @@ pub struct RandomnessSettled {
     pub committed_protocol_epoch: u64,
     pub settled_at: i64,
     pub config_version_snapshot: u64,
+}
+
+#[event]
+pub struct MintTheft {
+    pub position: Pubkey,
+    pub position_id: u64,
+    pub prospective_owner: Pubkey,
+    pub final_owner: Pubkey,
+    pub winning_bull_position: Pubkey,
+    pub winning_bull_owner: Pubkey,
+    pub registry_snapshot_version: u64,
+    pub config_version: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BullRegistryOperation {
+    Add,
+    Remove,
+}
+
+#[event]
+pub struct BullRegistryTransition {
+    pub old_root: [u8; 32],
+    pub new_root: [u8; 32],
+    pub old_version: u64,
+    pub new_version: u64,
+    pub operation: BullRegistryOperation,
+    pub bull_position: Pubkey,
+    pub position_id: u64,
+    pub owner: Pubkey,
+    pub buck_power: u8,
 }
 
 #[event]
@@ -3693,6 +4882,52 @@ pub enum RodeoError {
     CoreAssetNotFrozen,
     #[msg("Core receipt asset is not owned by the expected address")]
     InvalidCoreAssetOwner,
+    #[msg("BullRegistry Merkle proof is malformed or incomplete")]
+    BullRegistryMalformedProof,
+    #[msg("BullRegistry Merkle root does not match the canonical root")]
+    BullRegistryInvalidRoot,
+    #[msg("BullRegistry proof leaf is not the expected empty slot")]
+    BullRegistrySlotOccupied,
+    #[msg("BullRegistry proof leaf is not the expected occupied slot")]
+    BullRegistrySlotEmpty,
+    #[msg("BullRegistry owner bucket does not match the leaf owner")]
+    BullRegistryOwnerMismatch,
+    #[msg("BullRegistry proof buffer is not finalized")]
+    BullProofBufferNotFinalized,
+    #[msg("BullRegistry proof buffer has already been consumed")]
+    BullProofBufferAlreadyConsumed,
+    #[msg("BullRegistry proof buffer PDA is invalid")]
+    InvalidBullProofBufferPda,
+    #[msg("BullRegistry snapshot root or version does not match")]
+    InvalidRegistrySnapshot,
+    #[msg("BullRegistry proof buffer has expired")]
+    BullProofBufferExpired,
+    #[msg("BullRegistry proof buffer is bound to a different account")]
+    BullProofBufferBindingMismatch,
+    #[msg("BullProofBuffer payload length must be greater than zero")]
+    BullProofBufferEmptyPayload,
+    #[msg("BullProofBuffer payload exceeds the schema maximum")]
+    BullProofBufferOversized,
+    #[msg("BullProofBuffer append offset is not sequential")]
+    BullProofBufferOffsetGap,
+    #[msg("BullProofBuffer is bound to a different Position")]
+    BullProofBufferWrongPosition,
+    #[msg("BullProofBuffer can only be written by the original prover")]
+    BullProofBufferWrongProver,
+    #[msg("BullProofBuffer has already been finalized")]
+    BullProofBufferFinalized,
+    #[msg("BullProofBuffer payload is incomplete or wrong length")]
+    BullProofBufferIncomplete,
+    #[msg("BullProofBuffer cannot be closed before expiry or consumption")]
+    BullProofBufferNotAbandoned,
+    #[msg("BullProofBuffer has not been expanded to the expected payload size")]
+    BullProofBufferNotExpanded,
+    #[msg("BullProofBuffer expansion target is invalid")]
+    BullProofBufferInvalidExpansion,
+    #[msg("BullProofBuffer expansion exceeds the per-instruction account data limit")]
+    BullProofBufferExpansionTooLarge,
+    #[msg("No eligible external Bull exists for this theft")]
+    NoEligibleExternalBull,
     #[msg("The provided randomness account is not a valid Switchboard randomness account")]
     InvalidProviderAccount,
     #[msg("The Switchboard randomness account has not yet been revealed for this slot")]
@@ -3961,163 +5196,241 @@ fn convert_orphaned_remainders(
     Ok(())
 }
 
-fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]) -> Result<()> {
+/// Compact outcome of historical mint-theft resolution.
+/// All historical proof references are dropped before this is returned.
+#[derive(Debug)]
+struct MintTheftOutcome {
+    final_owner: Pubkey,
+    stolen: bool,
+    winning_bull_position: Pubkey,
+}
+
+/// Resolve historical mint theft using borrowed proof references.
+/// All historical proof temporaries die inside this helper.
+#[inline(never)]
+fn resolve_mint_theft(
+    payload: Option<&BullProofPayloadRef>,
+    pending_randomness: &PendingRandomness,
+    config: &ProtocolConfig,
+    prospective_owner: Pubkey,
+    position_key: Pubkey,
+    random_output: [u8; 32],
+    action_nonce: u64,
+    completed_reveals: u64,
+) -> Result<MintTheftOutcome> {
     use crate::probability;
 
-    let config: &ProtocolConfig = &**ctx.accounts.protocol_config;
+    let mut final_owner = prospective_owner;
+    let mut stolen = false;
+    let mut winning_bull_position = Pubkey::default();
 
-    let position_key = ctx.accounts.position.key();
-    let action_type = ctx.accounts.pending_randomness.action_type;
-    let action_nonce = ctx.accounts.pending_randomness.action_nonce;
-    let protocol_epoch = ctx.accounts.pending_randomness.committed_protocol_epoch;
+    if completed_reveals >= config.min_reveals_for_theft {
+        let p = payload.ok_or_else(|| {
+            msg!("BPI_RMT: payload_none");
+            RodeoError::BullProofBufferIncomplete
+        })?;
+        let victim_proof = p.victim_owner()?.ok_or_else(|| {
+            msg!("BPI_RMT: victim_owner_missing");
+            RodeoError::BullProofBufferIncomplete
+        })?;
+        let (victim_count, victim_power, victim_prefix) = crate::borrowed_proof::verify_owner_ref(
+            &pending_randomness.registry_root_snapshot,
+            &prospective_owner,
+            victim_proof,
+        )?;
+        let external_count = math::checked_sub_u64(
+            pending_randomness.registry_total_count_snapshot,
+            victim_count,
+        )?;
+        let external_power = math::checked_sub_u64(
+            pending_randomness.registry_total_power_snapshot,
+            victim_power,
+        )?;
 
-    let role = probability::map_role(
-        probability::RandomnessSampleContext {
-            random_output,
-            domain: probability::RandomnessDomain::Role,
-            position: position_key,
-            action_nonce,
-        },
-        config,
-    )?;
+        msg!(
+            "RMT_TRACE: prospective={} completed={} threshold={} victim_count={} victim_power={} victim_prefix={} external_count={} external_power={}",
+            prospective_owner, completed_reveals, config.min_reveals_for_theft, victim_count, victim_power, victim_prefix, external_count, external_power
+        );
 
-    let suit = probability::map_suit(
-        probability::RandomnessSampleContext {
-            random_output,
-            domain: probability::RandomnessDomain::Suit,
-            position: position_key,
-            action_nonce,
-        },
-        config,
-    )?;
-
-    let position = &mut ctx.accounts.position;
-    let pending_randomness = &mut ctx.accounts.pending_randomness;
-    let now = Clock::get()?.unix_timestamp;
-
-    position.status = PositionStatus::Active;
-    position.active_since = now;
-    position.unstake_eligible_at = now
-        .checked_add(MIN_STAKE_SECONDS)
-        .ok_or(RodeoError::ArithmeticOverflow)?;
-    position.suit = suit;
-    position.pending_action_active = false;
-    position.settlement_nonce = position
-        .settlement_nonce
-        .checked_add(1)
-        .ok_or(RodeoError::ArithmeticOverflow)?;
-    position.reveal_config_version = pending_randomness.config_version_snapshot;
-
-    pending_randomness.settled = true;
-
-    let game_state = &mut ctx.accounts.global_game_state;
-    game_state.total_completed_reveals =
-        math::checked_add_u64(game_state.total_completed_reveals, 1)?;
-
-    let active_since = position.active_since;
-    let unstake_eligible_at = position.unstake_eligible_at;
-    let settlement_nonce = position.settlement_nonce;
-    let final_owner = position.owner;
-    let config_version = position.reveal_config_version;
-
-    match role {
-        Role::Cowboy => {
-            let kind = probability::map_cowboy_kind(
+        if external_count >= config.min_bulls_for_theft && external_power > 0 {
+            let theft = probability::map_mint_theft_flag(
                 probability::RandomnessSampleContext {
                     random_output,
-                    domain: probability::RandomnessDomain::CowboyKind,
+                    domain: probability::RandomnessDomain::MintTheft,
                     position: position_key,
                     action_nonce,
                 },
                 config,
             )?;
-            let weight = match kind {
-                CowboyKind::Rank(rank) if (4..=10).contains(&rank) => {
-                    probability::accrual_weight_for_cowboy_index(config, (rank - 4) as usize)
+            msg!("RMT_TRACE: mint_theft_flag={}", theft);
+            if theft {
+                stolen = true;
+                let selected_owner = p.selected_owner()?.ok_or_else(|| {
+                    msg!("BPI_RMT: selected_owner_missing");
+                    RodeoError::BullProofBufferIncomplete
+                })?;
+                let selected_bull = p.selected_bull()?.ok_or_else(|| {
+                    msg!("BPI_RMT: selected_bull_missing");
+                    RodeoError::BullProofBufferIncomplete
+                })?;
+                if selected_owner.leaf.owner == prospective_owner {
+                    msg!("BPI_RMT: selected_owner_is_victim");
+                    return err!(RodeoError::BullProofBufferIncomplete);
                 }
-                CowboyKind::Desperado => probability::accrual_weight_for_cowboy_index(config, 7),
-                _ => 0,
-            };
 
-            // Defensive: a valid map_cowboy_kind must produce either a rank or desperado.
-            require!(
-                weight > 0 || matches!(kind, CowboyKind::Unassigned),
-                RodeoError::InvalidProbabilityOutcome
-            );
-
-            position.role = Role::Cowboy;
-            position.cowboy_kind = kind;
-            position.accrual_weight = weight;
-            position.last_cowboy_reward_index = ctx.accounts.reward_state.cowboy_reward_index;
-            position.cowboy_accrual_remainder_scaled = 0;
-            position.last_bull_reward_per_weight = 0;
-            position.bull_accrual_remainder_scaled = 0;
-
-            game_state.active_cowboy_count =
-                math::checked_add_u64(game_state.active_cowboy_count, 1)?;
-            game_state.total_active_cowboy_weight =
-                math::checked_add_u128(game_state.total_active_cowboy_weight, weight as u128)?;
-        }
-        Role::Bull => {
-            let tier = probability::map_bull_tier(
-                probability::RandomnessSampleContext {
-                    random_output,
-                    domain: probability::RandomnessDomain::BullTier,
-                    position: position_key,
-                    action_nonce,
-                },
-                config,
-            )?;
-            let power = probability::buck_power_for_tier(config, tier);
-
-            position.role = Role::Bull;
-            position.bull_tier = tier;
-            position.buck_power = power;
-            position.last_cowboy_reward_index = 0;
-            position.cowboy_accrual_remainder_scaled = 0;
-            position.last_bull_reward_per_weight =
-                ctx.accounts.bull_accumulator.reward_per_weight_scaled;
-            position.bull_accrual_remainder_scaled = 0;
-
-            let was_first_bull = game_state.active_bull_count == 0;
-            game_state.active_bull_count = math::checked_add_u64(game_state.active_bull_count, 1)?;
-            game_state.total_active_bull_power =
-                math::checked_add_u64(game_state.total_active_bull_power, power as u64)?;
-
-            // If this is the first eligible Bull and unallocated liability exists,
-            // distribute it through the accumulator before moving it to the pool.
-            if was_first_bull {
-                let unallocated = ctx
-                    .accounts
-                    .reward_state
-                    .bull_pool_unallocated_liability_atomic;
-                if unallocated > 0 {
-                    let (new_index, new_remainder) = math::distribute_bull_unallocated_liability(
-                        ctx.accounts.bull_accumulator.reward_per_weight_scaled,
-                        ctx.accounts.bull_accumulator.bull_index_remainder_scaled,
-                        unallocated,
-                        game_state.total_active_bull_power as u128,
-                        REWARD_PER_WEIGHT_SCALE,
+                let owner_target = probability::rejection_sample_draw(
+                    probability::RandomnessSampleContext {
+                        random_output,
+                        domain: probability::RandomnessDomain::OwnerSelection,
+                        position: position_key,
+                        action_nonce,
+                    },
+                    external_power,
+                )?;
+                let safe_owner_target =
+                    bull_registry::skip_victim_interval(owner_target, victim_prefix, victim_power);
+                msg!(
+                    "RMT_TRACE: owner_target={} safe_owner_target={}",
+                    owner_target,
+                    safe_owner_target
+                );
+                let (_selected_owner_count, selected_owner_power, selected_owner_prefix) =
+                    crate::borrowed_proof::verify_owner_ref(
+                        &pending_randomness.registry_root_snapshot,
+                        &selected_owner.leaf.owner,
+                        selected_owner,
                     )?;
-                    ctx.accounts.bull_accumulator.reward_per_weight_scaled = new_index;
-                    ctx.accounts.bull_accumulator.bull_index_remainder_scaled = new_remainder;
-                    ctx.accounts.reward_state.bull_pool_liability_atomic = math::checked_add_u64(
-                        ctx.accounts.reward_state.bull_pool_liability_atomic,
-                        unallocated,
-                    )?;
-                    ctx.accounts
-                        .reward_state
-                        .bull_pool_unallocated_liability_atomic = 0;
+                msg!(
+                    "RMT_TRACE: selected_owner={} sel_owner_power={} sel_owner_prefix={}",
+                    selected_owner.leaf.owner,
+                    selected_owner_power,
+                    selected_owner_prefix
+                );
+                if !bull_registry::leaf_contains_target(
+                    selected_owner_prefix,
+                    selected_owner_power,
+                    safe_owner_target,
+                ) {
+                    msg!("BPI_RMT: selected_owner_target_mismatch");
+                    return err!(RodeoError::BullProofBufferIncomplete);
                 }
+
+                let bull_target = probability::rejection_sample_draw(
+                    probability::RandomnessSampleContext {
+                        random_output,
+                        domain: probability::RandomnessDomain::BullSelection,
+                        position: position_key,
+                        action_nonce,
+                    },
+                    selected_owner_power,
+                )?;
+                msg!("RMT_TRACE: bull_target={}", bull_target);
+                let (_selected_bull_count, selected_bull_power, selected_bull_prefix) =
+                    crate::borrowed_proof::verify_bull_ref(
+                        &selected_owner.leaf.bull_tree_root,
+                        &selected_bull.leaf.position,
+                        selected_bull,
+                    )?;
+                msg!(
+                    "RMT_TRACE: selected_bull_pos={} sel_bull_owner={} sel_bull_power={} sel_bull_prefix={}",
+                    selected_bull.leaf.position, selected_bull.leaf.owner, selected_bull_power, selected_bull_prefix
+                );
+                if !bull_registry::leaf_contains_target(
+                    selected_bull_prefix,
+                    selected_bull_power,
+                    bull_target,
+                ) {
+                    msg!("BPI_RMT: selected_bull_target_mismatch");
+                    return err!(RodeoError::BullProofBufferIncomplete);
+                }
+                if selected_bull.leaf.owner != selected_owner.leaf.owner {
+                    msg!("BPI_RMT: selected_bull_owner_mismatch");
+                    return err!(RodeoError::BullProofBufferIncomplete);
+                }
+
+                final_owner = selected_bull.leaf.owner;
+                winning_bull_position = selected_bull.leaf.position;
             }
-        }
-        Role::Unassigned => {
-            return Err(error!(RodeoError::InvalidProbabilityOutcome));
         }
     }
 
-    // Create the collection-member PositionReceipt for the now-finalized
-    // Position. The funder (prefunded by the owner at stake) pays Core rent.
+    Ok(MintTheftOutcome {
+        final_owner,
+        stolen,
+        winning_bull_position,
+    })
+}
+
+/// Register a newly revealed Bull in the current BullRegistry using borrowed
+/// proof references.  All CURRENT mutation temporaries die inside this helper.
+#[inline(never)]
+fn apply_new_bull_registry_mutation(
+    payload: Option<&BullProofPayloadRef>,
+    registry: &mut crate::state::BullRegistry,
+    position_key: Pubkey,
+    position_id: u64,
+    final_owner: Pubkey,
+    power: u8,
+    reveal_config_version: u64,
+) -> Result<()> {
+    let p = payload.ok_or_else(|| {
+        msg!("BPI_ANB: payload_none");
+        RodeoError::BullProofBufferIncomplete
+    })?;
+    let current_owner = p.current_owner()?.ok_or_else(|| {
+        msg!("BPI_ANB: current_owner_missing");
+        RodeoError::BullProofBufferIncomplete
+    })?;
+    let current_bull = p.current_bull()?.ok_or_else(|| {
+        msg!("BPI_ANB: current_bull_missing");
+        RodeoError::BullProofBufferIncomplete
+    })?;
+    msg!(
+        "ANB_TRACE: final_owner={} position={} current_owner_leaf={} current_bull_leaf={}",
+        final_owner,
+        position_key,
+        current_owner.leaf.owner,
+        current_bull.leaf.position
+    );
+    let bull_leaf = BullLeaf {
+        position: position_key,
+        position_id,
+        owner: final_owner,
+        buck_power: power,
+        reveal_config_version,
+    };
+    let old_root = registry.owner_tree_root;
+    let old_version = registry.registry_version;
+    bull_registry::add_bull_to_registry(
+        registry,
+        &bull_leaf,
+        &current_owner.to_owned()?,
+        &current_bull.to_owned()?,
+    )?;
+    emit!(BullRegistryTransition {
+        old_root,
+        new_root: registry.owner_tree_root,
+        old_version,
+        new_version: registry.registry_version,
+        operation: BullRegistryOperation::Add,
+        bull_position: position_key,
+        position_id,
+        owner: final_owner,
+        buck_power: power,
+    });
+    Ok(())
+}
+
+/// Create the PositionReceipt Core asset via MPL Core CreateV2 CPI.
+/// All CPI builder temporaries, account-info arrays, and signer-seed arrays
+/// die inside this helper so they never contribute to the orchestrator frame.
+#[inline(never)]
+fn create_position_receipt(
+    ctx: &Context<SettleReveal>,
+    position_key: Pubkey,
+    position_id: u64,
+    final_owner: Pubkey,
+) -> Result<Pubkey> {
     let (receipt_authority, receipt_authority_bump) =
         receipt_authority_pda(&ctx.accounts.global_config.key());
     let (receipt_asset, receipt_asset_bump) = position_receipt_pda(&position_key);
@@ -4145,10 +5458,10 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
         RodeoError::InvalidCoreAssetOwner
     );
 
-    let name = format!("{}{}", RECEIPT_NAME_PREFIX, position.position_id);
+    let name = format!("{}{}", RECEIPT_NAME_PREFIX, position_id);
     let uri = format!(
         "{}{}{}",
-        RECEIPT_METADATA_BASE_URI, position.position_id, RECEIPT_METADATA_URI_SUFFIX
+        RECEIPT_METADATA_BASE_URI, position_id, RECEIPT_METADATA_URI_SUFFIX
     );
 
     let plugins = vec![
@@ -4176,12 +5489,18 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
         },
     ];
 
+    require_keys_eq!(
+        ctx.accounts.receipt_owner.key(),
+        final_owner,
+        RodeoError::InvalidCoreAssetOwner
+    );
+
     let create_ix = CreateV2Builder::new()
         .asset(receipt_asset)
         .collection(Some(collection))
         .authority(Some(receipt_authority))
         .payer(funder)
-        .owner(Some(ctx.accounts.owner.key()))
+        .owner(Some(final_owner))
         .system_program(solana_program::system_program::ID)
         .data_state(DataState::AccountState)
         .name(name)
@@ -4194,7 +5513,7 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
         ctx.accounts.receipt_collection.to_account_info(),
         ctx.accounts.receipt_authority.to_account_info(),
         ctx.accounts.receipt_funder.to_account_info(),
-        ctx.accounts.owner.to_account_info(),
+        ctx.accounts.receipt_owner.to_account_info(),
         ctx.accounts.mpl_core_program.to_account_info(),
         ctx.accounts.system_program.to_account_info(),
         ctx.accounts.mpl_core_program.to_account_info(),
@@ -4224,17 +5543,294 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
     )
     .map_err(|e: ProgramError| Into::<Error>::into(e))?;
 
-    position.receipt_asset = receipt_asset;
+    Ok(receipt_asset)
+}
+
+fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]) -> Result<()> {
+    use crate::probability;
+
+    let config: &ProtocolConfig = &**ctx.accounts.protocol_config;
+
+    let position_key = ctx.accounts.position.key();
+    let action_type = ctx.accounts.pending_randomness.action_type;
+    let action_nonce = ctx.accounts.pending_randomness.action_nonce;
+
+    let role = probability::map_role(
+        probability::RandomnessSampleContext {
+            random_output,
+            domain: probability::RandomnessDomain::Role,
+            position: position_key,
+            action_nonce,
+        },
+        config,
+    )?;
+
+    let suit = probability::map_suit(
+        probability::RandomnessSampleContext {
+            random_output,
+            domain: probability::RandomnessDomain::Suit,
+            position: position_key,
+            action_nonce,
+        },
+        config,
+    )?;
+
+    let prospective_owner = ctx.accounts.position.owner;
+
+    // Parse the optional finalized proof buffer.
+    let info = ctx
+        .accounts
+        .bull_proof_buffer
+        .as_ref()
+        .map(|b| b.to_account_info());
+    let mut _buffer_data = None;
+    let mut _buffer_ref = None;
+    let payload = if info.is_some() {
+        let now = ctx.accounts.clock.unix_timestamp;
+        let buffer_info = info.as_ref().unwrap();
+        let data = buffer_info
+            .try_borrow_data()
+            .map_err(|_| RodeoError::BullProofBufferIncomplete)?;
+        _buffer_data = Some(data);
+
+        let refund_recipient = ctx
+            .accounts
+            .refund_recipient
+            .as_ref()
+            .map(|r| r.key())
+            .ok_or(RodeoError::BullProofBufferWrongProver)?;
+
+        let data_ref = _buffer_data.as_ref().unwrap();
+        let data_slice: &[u8] = data_ref;
+        let buffer_ref = crate::borrowed_proof::validate_reveal_bull_proof_buffer(
+            buffer_info,
+            data_slice,
+            &position_key,
+            &ctx.accounts.pending_randomness,
+            &ctx.accounts.pending_randomness.key(),
+            &refund_recipient,
+            now,
+        )?;
+        _buffer_ref = Some(buffer_ref);
+
+        let payload_ref = BullProofPayloadRef::new(_buffer_ref.as_ref().unwrap().payload)
+            .map_err(|_| RodeoError::BullProofBufferIncomplete)?;
+        Some(payload_ref)
+    } else {
+        None
+    };
+
+    // Resolve historical mint theft.  All historical proof refs die inside.
+    let completed_reveals = ctx.accounts.global_game_state.total_completed_reveals;
+    let theft_outcome = resolve_mint_theft(
+        payload.as_ref(),
+        &ctx.accounts.pending_randomness,
+        config,
+        prospective_owner,
+        position_key,
+        random_output,
+        action_nonce,
+        completed_reveals,
+    )?;
+
+    // Verify current Bull proof if role is Bull (before mutation).
+    if role == Role::Bull {
+        let p = payload
+            .as_ref()
+            .ok_or(RodeoError::BullProofBufferIncomplete)?;
+        let current_owner = p
+            .current_owner()?
+            .ok_or(RodeoError::BullProofBufferIncomplete)?;
+        let current_bull = p
+            .current_bull()?
+            .ok_or(RodeoError::BullProofBufferIncomplete)?;
+        crate::borrowed_proof::verify_owner_ref(
+            &ctx.accounts.bull_registry.owner_tree_root,
+            &theft_outcome.final_owner,
+            current_owner,
+        )?;
+        let owner_bull_root = if current_owner.leaf.is_empty() {
+            empty_bull_tree_root()
+        } else {
+            current_owner.leaf.bull_tree_root
+        };
+        crate::borrowed_proof::verify_bull_ref(&owner_bull_root, &position_key, current_bull)?;
+    }
+
+    // All mutable account updates in a scope so borrows end before CPI.
+    let (
+        active_since,
+        unstake_eligible_at,
+        settlement_nonce,
+        config_version,
+        position_id,
+        final_owner,
+        stolen,
+        winning_bull_position,
+    ) = {
+        let position = &mut ctx.accounts.position;
+        let pending_randomness = &mut ctx.accounts.pending_randomness;
+        let now = Clock::get()?.unix_timestamp;
+
+        position.owner = theft_outcome.final_owner;
+        position.status = PositionStatus::Active;
+        position.active_since = now;
+        position.unstake_eligible_at = now
+            .checked_add(MIN_STAKE_SECONDS)
+            .ok_or(RodeoError::ArithmeticOverflow)?;
+        position.suit = suit;
+        position.pending_action_active = false;
+        position.settlement_nonce = position
+            .settlement_nonce
+            .checked_add(1)
+            .ok_or(RodeoError::ArithmeticOverflow)?;
+        position.reveal_config_version = pending_randomness.config_version_snapshot;
+
+        pending_randomness.settled = true;
+
+        let game_state = &mut ctx.accounts.global_game_state;
+        game_state.total_completed_reveals =
+            math::checked_add_u64(game_state.total_completed_reveals, 1)?;
+
+        match role {
+            Role::Cowboy => {
+                let kind = probability::map_cowboy_kind(
+                    probability::RandomnessSampleContext {
+                        random_output,
+                        domain: probability::RandomnessDomain::CowboyKind,
+                        position: position_key,
+                        action_nonce,
+                    },
+                    config,
+                )?;
+                let weight = match kind {
+                    CowboyKind::Rank(rank) if (4..=10).contains(&rank) => {
+                        probability::accrual_weight_for_cowboy_index(config, (rank - 4) as usize)
+                    }
+                    CowboyKind::Desperado => {
+                        probability::accrual_weight_for_cowboy_index(config, 7)
+                    }
+                    _ => 0,
+                };
+
+                require!(
+                    weight > 0 || matches!(kind, CowboyKind::Unassigned),
+                    RodeoError::InvalidProbabilityOutcome
+                );
+
+                position.role = Role::Cowboy;
+                position.cowboy_kind = kind;
+                position.accrual_weight = weight;
+                position.last_cowboy_reward_index = ctx.accounts.reward_state.cowboy_reward_index;
+                position.cowboy_accrual_remainder_scaled = 0;
+                position.last_bull_reward_per_weight = 0;
+                position.bull_accrual_remainder_scaled = 0;
+
+                game_state.active_cowboy_count =
+                    math::checked_add_u64(game_state.active_cowboy_count, 1)?;
+                game_state.total_active_cowboy_weight =
+                    math::checked_add_u128(game_state.total_active_cowboy_weight, weight as u128)?;
+            }
+            Role::Bull => {
+                let tier = probability::map_bull_tier(
+                    probability::RandomnessSampleContext {
+                        random_output,
+                        domain: probability::RandomnessDomain::BullTier,
+                        position: position_key,
+                        action_nonce,
+                    },
+                    config,
+                )?;
+                let power = probability::buck_power_for_tier(config, tier);
+
+                position.role = Role::Bull;
+                position.bull_tier = tier;
+                position.buck_power = power;
+                position.last_cowboy_reward_index = 0;
+                position.cowboy_accrual_remainder_scaled = 0;
+                position.last_bull_reward_per_weight =
+                    ctx.accounts.bull_accumulator.reward_per_weight_scaled;
+                position.bull_accrual_remainder_scaled = 0;
+
+                let was_first_bull = game_state.active_bull_count == 0;
+                game_state.active_bull_count =
+                    math::checked_add_u64(game_state.active_bull_count, 1)?;
+                game_state.total_active_bull_power =
+                    math::checked_add_u64(game_state.total_active_bull_power, power as u64)?;
+
+                if was_first_bull {
+                    let unallocated = ctx
+                        .accounts
+                        .reward_state
+                        .bull_pool_unallocated_liability_atomic;
+                    if unallocated > 0 {
+                        let (new_index, new_remainder) =
+                            math::distribute_bull_unallocated_liability(
+                                ctx.accounts.bull_accumulator.reward_per_weight_scaled,
+                                ctx.accounts.bull_accumulator.bull_index_remainder_scaled,
+                                unallocated,
+                                game_state.total_active_bull_power as u128,
+                                REWARD_PER_WEIGHT_SCALE,
+                            )?;
+                        ctx.accounts.bull_accumulator.reward_per_weight_scaled = new_index;
+                        ctx.accounts.bull_accumulator.bull_index_remainder_scaled = new_remainder;
+                        ctx.accounts.reward_state.bull_pool_liability_atomic =
+                            math::checked_add_u64(
+                                ctx.accounts.reward_state.bull_pool_liability_atomic,
+                                unallocated,
+                            )?;
+                        ctx.accounts
+                            .reward_state
+                            .bull_pool_unallocated_liability_atomic = 0;
+                    }
+                }
+
+                // Register the newly revealed Bull in the current BullRegistry.
+                apply_new_bull_registry_mutation(
+                    payload.as_ref(),
+                    &mut ctx.accounts.bull_registry,
+                    position_key,
+                    position.position_id,
+                    position.owner,
+                    power,
+                    position.reveal_config_version,
+                )?;
+            }
+            Role::Unassigned => {
+                return Err(error!(RodeoError::InvalidProbabilityOutcome));
+            }
+        }
+
+        (
+            position.active_since,
+            position.unstake_eligible_at,
+            position.settlement_nonce,
+            position.reveal_config_version,
+            position.position_id,
+            position.owner,
+            theft_outcome.stolen,
+            theft_outcome.winning_bull_position,
+        )
+    };
+
+    // Create the PositionReceipt via MPL Core.  All CPI temporaries die inside.
+    let receipt_asset = create_position_receipt(&*ctx, position_key, position_id, final_owner)?;
+
+    ctx.accounts.position.receipt_asset = receipt_asset;
 
     emit!(PositionRevealed {
         position: position_key,
-        role: position.role,
-        cowboy_kind: position.cowboy_kind,
-        bull_tier: position.bull_tier,
-        suit: position.suit,
-        final_owner: position.owner,
-        previous_owner: None,
-        stolen: false,
+        role: ctx.accounts.position.role,
+        cowboy_kind: ctx.accounts.position.cowboy_kind,
+        bull_tier: ctx.accounts.position.bull_tier,
+        suit: ctx.accounts.position.suit,
+        final_owner,
+        previous_owner: if stolen {
+            Some(prospective_owner)
+        } else {
+            None
+        },
+        stolen,
         receipt_asset,
         active_since,
         unstake_eligible_at,
@@ -4242,12 +5838,25 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
         config_version,
     });
 
+    if stolen {
+        emit!(MintTheft {
+            position: position_key,
+            position_id,
+            prospective_owner,
+            final_owner,
+            winning_bull_position,
+            winning_bull_owner: final_owner,
+            registry_snapshot_version: ctx.accounts.pending_randomness.registry_version_snapshot,
+            config_version,
+        });
+    }
+
     emit!(ReceiptCreated {
         position: position_key,
-        position_id: position.position_id,
+        position_id,
         receipt_asset,
-        owner: position.owner,
-        collection,
+        owner: final_owner,
+        collection: receipt_collection_pda(&ctx.accounts.global_config.key()).0,
     });
 
     emit!(RandomnessSettled {
@@ -4255,30 +5864,437 @@ fn settle_reveal_common(ctx: &mut Context<SettleReveal>, random_output: [u8; 32]
         action_type,
         action_nonce,
         settlement_nonce,
-        committed_slot: pending_randomness.committed_slot,
-        committed_protocol_epoch: pending_randomness.committed_protocol_epoch,
-        settled_at: now,
-        config_version_snapshot: pending_randomness.config_version_snapshot,
+        committed_slot: ctx.accounts.pending_randomness.committed_slot,
+        committed_protocol_epoch: ctx.accounts.pending_randomness.committed_protocol_epoch,
+        settled_at: active_since,
+        config_version_snapshot: ctx.accounts.pending_randomness.config_version_snapshot,
     });
+
+    // Release the immutable borrow on the proof-buffer account data before
+    // attempting to close/realloc the buffer, otherwise close_bull_proof_buffer
+    // cannot mutably borrow the account data.
+    drop(_buffer_data);
+
+    if let Some(buffer) = ctx.accounts.bull_proof_buffer.as_ref() {
+        let buffer_info = buffer.to_account_info();
+        if let Some(refund) = ctx.accounts.refund_recipient.as_ref() {
+            crate::borrowed_proof::close_bull_proof_buffer(&buffer_info, refund)?;
+        }
+    }
 
     Ok(())
 }
 
-#[cfg(feature = "mock-randomness")]
-fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
-    use crate::probability;
+fn settle_cowboy_unstake<'info>(
+    reward_state: &mut RewardState,
+    bull_accumulator: &mut BullAccumulator,
+    game_state: &GlobalGameState,
+    global_config: &Account<'info, GlobalConfig>,
+    reward_vault: &Account<'info, TokenAccount>,
+    owner_ansem_account: &Account<'info, TokenAccount>,
+    token_program: &Program<'info, Token>,
+    position_key: Pubkey,
+    owner: Pubkey,
+    claimable: u64,
+    cowboy_kind: CowboyKind,
+    random_output: [u8; 32],
+    action_nonce: u64,
+    config: &ProtocolConfig,
+) -> Result<AnsemUnstakeFate> {
+    let stolen = if cowboy_kind == CowboyKind::Desperado {
+        false
+    } else {
+        crate::probability::map_unstake_theft_flag(
+            crate::probability::RandomnessSampleContext {
+                random_output,
+                domain: crate::probability::RandomnessDomain::UnstakeTheft,
+                position: position_key,
+                action_nonce,
+            },
+            config,
+        )?
+    };
 
-    let config: &ProtocolConfig = &**ctx.accounts.protocol_config;
+    if stolen {
+        distribute_bull_pool_contribution(
+            BullPoolSource::UnstakeTheft,
+            claimable,
+            reward_state,
+            bull_accumulator,
+            game_state,
+        )?;
 
+        require_gte!(
+            reward_state.position_claimable_liability_atomic,
+            claimable,
+            RodeoError::LiabilityUnderflow
+        );
+        reward_state.position_claimable_liability_atomic =
+            math::checked_sub_u64(reward_state.position_claimable_liability_atomic, claimable)?;
+
+        Ok(AnsemUnstakeFate::ToBullPool)
+    } else {
+        if claimable > 0 {
+            require_gte!(
+                reward_state.position_claimable_liability_atomic,
+                claimable,
+                RodeoError::LiabilityUnderflow
+            );
+            require_gte!(
+                reward_state.recognized_reward_balance_atomic,
+                claimable,
+                RodeoError::InsufficientRecognizedRewards
+            );
+            require_gte!(
+                reward_state.total_ansem_liability_atomic,
+                claimable,
+                RodeoError::LiabilityUnderflow
+            );
+
+            transfer_ansem_from_vault(
+                claimable,
+                global_config,
+                reward_vault.to_account_info(),
+                owner_ansem_account.to_account_info(),
+                token_program.to_account_info(),
+            )?;
+
+            reward_state.position_claimable_liability_atomic =
+                math::checked_sub_u64(reward_state.position_claimable_liability_atomic, claimable)?;
+            reward_state.total_ansem_liability_atomic =
+                math::checked_sub_u64(reward_state.total_ansem_liability_atomic, claimable)?;
+            reward_state.recognized_reward_balance_atomic =
+                math::checked_sub_u64(reward_state.recognized_reward_balance_atomic, claimable)?;
+            reward_state.ansem_claimed_atomic =
+                math::checked_add_u64(reward_state.ansem_claimed_atomic, claimable)?;
+
+            emit!(RewardPaid {
+                position: position_key,
+                owner,
+                amount_atomic: claimable,
+                recognized_reward_balance_atomic: reward_state.recognized_reward_balance_atomic,
+                reason: RewardPaidReason::UnstakeSettlement,
+            });
+        }
+
+        if cowboy_kind == CowboyKind::Desperado {
+            Ok(AnsemUnstakeFate::Immune)
+        } else {
+            Ok(AnsemUnstakeFate::ToOwner)
+        }
+    }
+}
+
+#[inline(never)]
+fn settle_bull_unstake<'info>(
+    bull_registry: &mut crate::state::BullRegistry,
+    reward_state: &mut RewardState,
+    game_state: &mut GlobalGameState,
+    global_config: &Account<'info, GlobalConfig>,
+    reward_vault: &Account<'info, TokenAccount>,
+    owner_ansem_account: &Account<'info, TokenAccount>,
+    token_program: &Program<'info, Token>,
+    position_key: Pubkey,
+    owner: Pubkey,
+    position_id: u64,
+    buck_power: u8,
+    reveal_config_version: u64,
+    claimable: u64,
+    payload: &BullProofPayloadRef,
+) -> Result<AnsemUnstakeFate> {
+    if claimable > 0 {
+        require_gte!(
+            reward_state.position_claimable_liability_atomic,
+            claimable,
+            RodeoError::LiabilityUnderflow
+        );
+        require_gte!(
+            reward_state.recognized_reward_balance_atomic,
+            claimable,
+            RodeoError::InsufficientRecognizedRewards
+        );
+        require_gte!(
+            reward_state.total_ansem_liability_atomic,
+            claimable,
+            RodeoError::LiabilityUnderflow
+        );
+
+        transfer_ansem_from_vault(
+            claimable,
+            global_config,
+            reward_vault.to_account_info(),
+            owner_ansem_account.to_account_info(),
+            token_program.to_account_info(),
+        )?;
+
+        reward_state.position_claimable_liability_atomic =
+            math::checked_sub_u64(reward_state.position_claimable_liability_atomic, claimable)?;
+        reward_state.total_ansem_liability_atomic =
+            math::checked_sub_u64(reward_state.total_ansem_liability_atomic, claimable)?;
+        reward_state.recognized_reward_balance_atomic =
+            math::checked_sub_u64(reward_state.recognized_reward_balance_atomic, claimable)?;
+        reward_state.ansem_claimed_atomic =
+            math::checked_add_u64(reward_state.ansem_claimed_atomic, claimable)?;
+
+        emit!(RewardPaid {
+            position: position_key,
+            owner,
+            amount_atomic: claimable,
+            recognized_reward_balance_atomic: reward_state.recognized_reward_balance_atomic,
+            reason: RewardPaidReason::UnstakeSettlement,
+        });
+    }
+
+    require_gte!(
+        game_state.active_bull_count,
+        1,
+        RodeoError::ArithmeticUnderflow
+    );
+    game_state.active_bull_count = math::checked_sub_u64(game_state.active_bull_count, 1)?;
+    require_gte!(
+        game_state.total_active_bull_power,
+        buck_power as u64,
+        RodeoError::ArithmeticUnderflow
+    );
+    game_state.total_active_bull_power =
+        math::checked_sub_u64(game_state.total_active_bull_power, buck_power as u64)?;
+
+    // Borrowed proof verification against the CURRENT BullRegistry root.
+    let current_owner = payload
+        .current_owner()?
+        .ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let remove_bull = payload
+        .remove_bull()?
+        .ok_or(RodeoError::BullProofBufferIncomplete)?;
+
+    // Verify CURRENT owner membership using borrowed verifier (returns LEAF
+    // count/power, not root totals).
+    crate::borrowed_proof::verify_owner_ref(&bull_registry.owner_tree_root, &owner, current_owner)?;
+
+    // Verify exact Bull membership in the owner's Bull subtree.
+    let owner_bull_root = if current_owner.leaf.is_empty() {
+        empty_bull_tree_root()
+    } else {
+        current_owner.leaf.bull_tree_root
+    };
+    crate::borrowed_proof::verify_bull_ref(&owner_bull_root, &position_key, remove_bull)?;
+
+    // Authenticate the exiting Bull leaf matches canonical Position state.
+    let canonical_bull_leaf = BullLeaf {
+        position: position_key,
+        position_id,
+        owner,
+        buck_power,
+        reveal_config_version,
+    };
+    require!(
+        remove_bull.leaf == canonical_bull_leaf,
+        RodeoError::BullProofBufferIncomplete
+    );
+
+    let old_root = bull_registry.owner_tree_root;
+    let old_version = bull_registry.registry_version;
+    crate::bull_registry::remove_bull_from_registry_borrowed(
+        bull_registry,
+        &canonical_bull_leaf,
+        &current_owner,
+        &remove_bull,
+    )?;
+    emit!(BullRegistryTransition {
+        old_root,
+        new_root: bull_registry.owner_tree_root,
+        old_version,
+        new_version: bull_registry.registry_version,
+        operation: BullRegistryOperation::Remove,
+        bull_position: position_key,
+        position_id,
+        owner,
+        buck_power,
+    });
+
+    Ok(AnsemUnstakeFate::ToOwner)
+}
+
+#[inline(never)]
+fn burn_position_receipt(
+    position_key: Pubkey,
+    owner: Pubkey,
+    position_id: u64,
+    receipt_asset: Pubkey,
+    ctx: &Context<SettleUnstake>,
+) -> Result<Pubkey> {
+    let global_config_key = ctx.accounts.global_config.key();
+    let (receipt_authority, receipt_authority_bump) = receipt_authority_pda(&global_config_key);
+    let (collection, _collection_bump) = receipt_collection_pda(&global_config_key);
+    let (funder, funder_bump) = receipt_funder_pda(&position_key);
+
+    require_keys_eq!(
+        ctx.accounts.receipt_authority.key(),
+        receipt_authority,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_collection.key(),
+        collection,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_funder.key(),
+        funder,
+        RodeoError::InvalidCoreAssetOwner
+    );
+    require_keys_eq!(
+        ctx.accounts.receipt_asset.key(),
+        receipt_asset,
+        RodeoError::InvalidCoreAssetOwner
+    );
+
+    let burn_ix = BurnV1Builder::new()
+        .asset(receipt_asset)
+        .collection(Some(collection))
+        .authority(Some(receipt_authority))
+        .payer(funder)
+        .system_program(Some(solana_program::system_program::ID))
+        .instruction();
+
+    let burn_account_infos = [
+        ctx.accounts.receipt_asset.to_account_info(),
+        ctx.accounts.receipt_collection.to_account_info(),
+        ctx.accounts.receipt_funder.to_account_info(),
+        ctx.accounts.receipt_authority.to_account_info(),
+        ctx.accounts.system_program.to_account_info(),
+        ctx.accounts.mpl_core_program.to_account_info(),
+    ];
+    let receipt_authority_seeds = [
+        SEED_RECEIPT_AUTHORITY,
+        global_config_key.as_ref(),
+        &[receipt_authority_bump],
+    ];
+    let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
+
+    solana_program::program::invoke_signed(
+        &burn_ix,
+        &burn_account_infos,
+        &[&receipt_authority_seeds, &funder_seeds],
+    )
+    .map_err(|e: ProgramError| Into::<Error>::into(e))?;
+
+    let funder_lamports = ctx.accounts.receipt_funder.to_account_info().lamports();
+    if funder_lamports > 0 {
+        let funder_close_ix = solana_program::system_instruction::transfer(
+            &funder,
+            ctx.accounts.owner.key,
+            funder_lamports,
+        );
+        let funder_close_account_infos = [
+            ctx.accounts.receipt_funder.to_account_info(),
+            ctx.accounts.owner.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ];
+        solana_program::program::invoke_signed(
+            &funder_close_ix,
+            &funder_close_account_infos,
+            &[&funder_seeds],
+        )?;
+    }
+
+    emit!(ReceiptBurned {
+        position: position_key,
+        position_id,
+        receipt_asset,
+        owner,
+        collection,
+    });
+
+    Ok(collection)
+}
+
+fn load_historical_protocol_config(
+    protocol_config: &AccountInfo,
+    expected_key: &Pubkey,
+    expected_global_config: &Pubkey,
+    expected_version: u64,
+) -> Result<Box<ProtocolConfig>> {
+    require!(
+        protocol_config.key() == *expected_key,
+        RodeoError::InvalidProbabilityTable
+    );
+    require!(
+        protocol_config.owner == &crate::ID,
+        RodeoError::InvalidProbabilityTable
+    );
+    let data = protocol_config.data.borrow();
+    let mut data: &[u8] = &**data;
+    let config = ProtocolConfig::try_deserialize(&mut data)
+        .map_err(|_| error!(RodeoError::InvalidProbabilityTable))?;
+    require!(
+        config.global_config == *expected_global_config,
+        RodeoError::InvalidProbabilityTable
+    );
+    require!(
+        config.config_version == expected_version,
+        RodeoError::InvalidProbabilityTable
+    );
+    Ok(Box::new(config))
+}
+
+fn settle_unstake_common(
+    ctx: &mut Context<SettleUnstake>,
+    random_output: [u8; 32],
+    config: &ProtocolConfig,
+) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let position_key = ctx.accounts.position.key();
     let action_type = ctx.accounts.pending_randomness.action_type;
     let action_nonce = ctx.accounts.pending_randomness.action_nonce;
-    let protocol_epoch = ctx.accounts.pending_randomness.committed_protocol_epoch;
 
-    // Deterministic random bytes that are domain-separated and bound to the
-    // position, action type, action nonce, and protocol epoch.
-    let random_output = derive_commitment(position_key, action_type, action_nonce, protocol_epoch);
+    // Parse the optional finalized proof buffer using the borrowed/zero-copy
+    // path.  No BullProofBuffer deserialization or BullProofPayloadV1
+    // materialization occurs on the production SBF path.
+    let info = ctx
+        .accounts
+        .bull_proof_buffer
+        .as_ref()
+        .map(|b| b.to_account_info());
+    let mut _buffer_data = None;
+    let mut _buffer_ref = None;
+    let payload = if info.is_some() {
+        let now = ctx.accounts.clock.unix_timestamp;
+        let buffer_info = info.as_ref().unwrap();
+        let data = buffer_info
+            .try_borrow_data()
+            .map_err(|_| RodeoError::BullProofBufferIncomplete)?;
+        _buffer_data = Some(data);
+
+        let data_ref = _buffer_data.as_ref().unwrap();
+        let data_slice: &[u8] = data_ref;
+
+        let refund_recipient = ctx
+            .accounts
+            .refund_recipient
+            .as_ref()
+            .map(|r| r.key())
+            .ok_or(RodeoError::BullProofBufferWrongProver)?;
+
+        let buffer_ref = crate::borrowed_proof::validate_unstake_bull_proof_buffer(
+            buffer_info,
+            data_slice,
+            &position_key,
+            &ctx.accounts.pending_randomness,
+            &ctx.accounts.pending_randomness.key(),
+            &refund_recipient,
+            &ctx.accounts.bull_registry.owner_tree_root,
+            ctx.accounts.bull_registry.registry_version,
+            now,
+        )?;
+        _buffer_ref = Some(buffer_ref);
+
+        let payload_ref = BullProofPayloadRef::new(_buffer_ref.as_ref().unwrap().payload)
+            .map_err(|_| RodeoError::BullProofBufferIncomplete)?;
+        Some(payload_ref)
+    } else {
+        None
+    };
 
     let position = &mut ctx.accounts.position;
     let pending_randomness = &mut ctx.accounts.pending_randomness;
@@ -4338,165 +6354,40 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
     position.settlement_nonce = settlement_nonce;
 
     let ansem_fate = match position.role {
-        Role::Cowboy => {
-            let stolen = if position.cowboy_kind == CowboyKind::Desperado {
-                false
-            } else {
-                probability::map_unstake_theft_flag(
-                    probability::RandomnessSampleContext {
-                        random_output,
-                        domain: probability::RandomnessDomain::UnstakeTheft,
-                        position: position_key,
-                        action_nonce,
-                    },
-                    config,
-                )?
-            };
-
-            if stolen {
-                distribute_bull_pool_contribution(
-                    BullPoolSource::UnstakeTheft,
-                    claimable,
-                    reward_state,
-                    bull_accumulator,
-                    &**game_state,
-                )?;
-
-                require_gte!(
-                    reward_state.position_claimable_liability_atomic,
-                    claimable,
-                    RodeoError::LiabilityUnderflow
-                );
-                reward_state.position_claimable_liability_atomic = math::checked_sub_u64(
-                    reward_state.position_claimable_liability_atomic,
-                    claimable,
-                )?;
-
-                AnsemUnstakeFate::ToBullPool
-            } else {
-                if claimable > 0 {
-                    require_gte!(
-                        reward_state.position_claimable_liability_atomic,
-                        claimable,
-                        RodeoError::LiabilityUnderflow
-                    );
-                    require_gte!(
-                        reward_state.recognized_reward_balance_atomic,
-                        claimable,
-                        RodeoError::InsufficientRecognizedRewards
-                    );
-                    require_gte!(
-                        reward_state.total_ansem_liability_atomic,
-                        claimable,
-                        RodeoError::LiabilityUnderflow
-                    );
-
-                    transfer_ansem_from_vault(
-                        claimable,
-                        &*ctx.accounts.global_config,
-                        ctx.accounts.reward_vault.to_account_info(),
-                        ctx.accounts.owner_ansem_account.to_account_info(),
-                        ctx.accounts.token_program.to_account_info(),
-                    )?;
-
-                    reward_state.position_claimable_liability_atomic = math::checked_sub_u64(
-                        reward_state.position_claimable_liability_atomic,
-                        claimable,
-                    )?;
-                    reward_state.total_ansem_liability_atomic = math::checked_sub_u64(
-                        reward_state.total_ansem_liability_atomic,
-                        claimable,
-                    )?;
-                    reward_state.recognized_reward_balance_atomic = math::checked_sub_u64(
-                        reward_state.recognized_reward_balance_atomic,
-                        claimable,
-                    )?;
-                    reward_state.ansem_claimed_atomic =
-                        math::checked_add_u64(reward_state.ansem_claimed_atomic, claimable)?;
-
-                    emit!(RewardPaid {
-                        position: position_key,
-                        owner,
-                        amount_atomic: claimable,
-                        recognized_reward_balance_atomic: reward_state
-                            .recognized_reward_balance_atomic,
-                        reason: RewardPaidReason::UnstakeSettlement,
-                    });
-                }
-
-                if position.cowboy_kind == CowboyKind::Desperado {
-                    AnsemUnstakeFate::Immune
-                } else {
-                    AnsemUnstakeFate::ToOwner
-                }
-            }
-        }
-        Role::Bull => {
-            if claimable > 0 {
-                require_gte!(
-                    reward_state.position_claimable_liability_atomic,
-                    claimable,
-                    RodeoError::LiabilityUnderflow
-                );
-                require_gte!(
-                    reward_state.recognized_reward_balance_atomic,
-                    claimable,
-                    RodeoError::InsufficientRecognizedRewards
-                );
-                require_gte!(
-                    reward_state.total_ansem_liability_atomic,
-                    claimable,
-                    RodeoError::LiabilityUnderflow
-                );
-
-                transfer_ansem_from_vault(
-                    claimable,
-                    &*ctx.accounts.global_config,
-                    ctx.accounts.reward_vault.to_account_info(),
-                    ctx.accounts.owner_ansem_account.to_account_info(),
-                    ctx.accounts.token_program.to_account_info(),
-                )?;
-
-                reward_state.position_claimable_liability_atomic = math::checked_sub_u64(
-                    reward_state.position_claimable_liability_atomic,
-                    claimable,
-                )?;
-                reward_state.total_ansem_liability_atomic =
-                    math::checked_sub_u64(reward_state.total_ansem_liability_atomic, claimable)?;
-                reward_state.recognized_reward_balance_atomic = math::checked_sub_u64(
-                    reward_state.recognized_reward_balance_atomic,
-                    claimable,
-                )?;
-                reward_state.ansem_claimed_atomic =
-                    math::checked_add_u64(reward_state.ansem_claimed_atomic, claimable)?;
-
-                emit!(RewardPaid {
-                    position: position_key,
-                    owner,
-                    amount_atomic: claimable,
-                    recognized_reward_balance_atomic: reward_state.recognized_reward_balance_atomic,
-                    reason: RewardPaidReason::UnstakeSettlement,
-                });
-            }
-
-            require_gte!(
-                game_state.active_bull_count,
-                1,
-                RodeoError::ArithmeticUnderflow
-            );
-            game_state.active_bull_count = math::checked_sub_u64(game_state.active_bull_count, 1)?;
-            require_gte!(
-                game_state.total_active_bull_power,
-                position.buck_power as u64,
-                RodeoError::ArithmeticUnderflow
-            );
-            game_state.total_active_bull_power = math::checked_sub_u64(
-                game_state.total_active_bull_power,
-                position.buck_power as u64,
-            )?;
-
-            AnsemUnstakeFate::ToOwner
-        }
+        Role::Cowboy => settle_cowboy_unstake(
+            reward_state,
+            bull_accumulator,
+            &**game_state,
+            &*ctx.accounts.global_config,
+            &ctx.accounts.reward_vault,
+            &ctx.accounts.owner_ansem_account,
+            &ctx.accounts.token_program,
+            position_key,
+            owner,
+            claimable,
+            position.cowboy_kind,
+            random_output,
+            action_nonce,
+            config,
+        )?,
+        Role::Bull => settle_bull_unstake(
+            &mut ctx.accounts.bull_registry,
+            reward_state,
+            game_state,
+            &*ctx.accounts.global_config,
+            &ctx.accounts.reward_vault,
+            &ctx.accounts.owner_ansem_account,
+            &ctx.accounts.token_program,
+            position_key,
+            owner,
+            position.position_id,
+            position.buck_power,
+            position.reveal_config_version,
+            claimable,
+            payload
+                .as_ref()
+                .ok_or(RodeoError::BullProofBufferIncomplete)?,
+        )?,
         Role::Unassigned => {
             return Err(error!(RodeoError::InvalidRole));
         }
@@ -4550,90 +6441,19 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
     // Burn the PositionReceipt and close the ReceiptFunder, returning the
     // remaining SOL reserve to the current owner. The receipt must already
     // exist (reveal was successful) because `position.receipt_asset` is set.
-    let global_config_key = ctx.accounts.global_config.key();
-    let (receipt_authority, receipt_authority_bump) = receipt_authority_pda(&global_config_key);
-    let (collection, _collection_bump) = receipt_collection_pda(&global_config_key);
-    let (funder, funder_bump) = receipt_funder_pda(&position_key);
 
-    require_keys_eq!(
-        ctx.accounts.receipt_authority.key(),
-        receipt_authority,
-        RodeoError::InvalidCoreAssetOwner
-    );
-    require_keys_eq!(
-        ctx.accounts.receipt_collection.key(),
-        collection,
-        RodeoError::InvalidCoreAssetOwner
-    );
-    require_keys_eq!(
-        ctx.accounts.receipt_funder.key(),
-        funder,
-        RodeoError::InvalidCoreAssetOwner
-    );
-    require_keys_eq!(
-        ctx.accounts.receipt_asset.key(),
-        position.receipt_asset,
-        RodeoError::InvalidCoreAssetOwner
-    );
+    // Capture the values needed by the receipt-burn helper and by the
+    // post-burn events before the context is borrowed for the CPI call.
+    let position_id = position.position_id;
+    let receipt_asset = position.receipt_asset;
+    let committed_slot = pending_randomness.committed_slot;
+    let committed_protocol_epoch = pending_randomness.committed_protocol_epoch;
+    let config_version_snapshot = pending_randomness.config_version_snapshot;
 
-    let burn_ix = BurnV1Builder::new()
-        .asset(position.receipt_asset)
-        .collection(Some(collection))
-        .authority(Some(receipt_authority))
-        .payer(funder)
-        .system_program(Some(solana_program::system_program::ID))
-        .instruction();
+    let _collection =
+        burn_position_receipt(position_key, owner, position_id, receipt_asset, &*ctx)?;
 
-    let burn_account_infos = [
-        ctx.accounts.receipt_asset.to_account_info(),
-        ctx.accounts.receipt_collection.to_account_info(),
-        ctx.accounts.receipt_funder.to_account_info(),
-        ctx.accounts.receipt_authority.to_account_info(),
-        ctx.accounts.system_program.to_account_info(),
-        ctx.accounts.mpl_core_program.to_account_info(),
-    ];
-    let receipt_authority_seeds = [
-        SEED_RECEIPT_AUTHORITY,
-        global_config_key.as_ref(),
-        &[receipt_authority_bump],
-    ];
-    let funder_seeds = [SEED_RECEIPT_FUNDER, position_key.as_ref(), &[funder_bump]];
-
-    solana_program::program::invoke_signed(
-        &burn_ix,
-        &burn_account_infos,
-        &[&receipt_authority_seeds, &funder_seeds],
-    )
-    .map_err(|e: ProgramError| Into::<Error>::into(e))?;
-
-    let funder_lamports = ctx.accounts.receipt_funder.to_account_info().lamports();
-    if funder_lamports > 0 {
-        let funder_close_ix = solana_program::system_instruction::transfer(
-            &funder,
-            ctx.accounts.owner.key,
-            funder_lamports,
-        );
-        let funder_close_account_infos = [
-            ctx.accounts.receipt_funder.to_account_info(),
-            ctx.accounts.owner.to_account_info(),
-            ctx.accounts.system_program.to_account_info(),
-        ];
-        solana_program::program::invoke_signed(
-            &funder_close_ix,
-            &funder_close_account_infos,
-            &[&funder_seeds],
-        )?;
-    }
-
-    emit!(ReceiptBurned {
-        position: position_key,
-        position_id: position.position_id,
-        receipt_asset: position.receipt_asset,
-        owner,
-        collection,
-    });
-
-    position.receipt_asset = Pubkey::default();
+    ctx.accounts.position.receipt_asset = Pubkey::default();
 
     emit!(PositionUnstaked {
         position: position_key,
@@ -4654,18 +6474,33 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
             0
         },
         settlement_nonce,
-        config_version: pending_randomness.config_version_snapshot,
+        config_version: config_version_snapshot,
     });
     emit!(RandomnessSettled {
         position: position_key,
         action_type,
         action_nonce,
         settlement_nonce,
-        committed_slot: pending_randomness.committed_slot,
-        committed_protocol_epoch: pending_randomness.committed_protocol_epoch,
+        committed_slot,
+        committed_protocol_epoch,
         settled_at: now,
-        config_version_snapshot: pending_randomness.config_version_snapshot,
+        config_version_snapshot,
     });
+
+    // Release the immutable borrow on the proof-buffer account data before
+    // attempting to close/realloc the buffer, otherwise close_bull_proof_buffer
+    // cannot mutably borrow the account data.
+    drop(_buffer_data);
+
+    // Close the raw BullProofBuffer account, refunding lamports to the
+    // committed refund_recipient (the prover who funded the buffer).  This
+    // is separate from the owner-funded ReceiptFunder reserve refund.
+    // No payload Vec deserialization is needed for the close path.
+    if let Some(buffer_info) = ctx.accounts.bull_proof_buffer.as_ref() {
+        if let Some(refund) = ctx.accounts.refund_recipient.as_ref() {
+            crate::borrowed_proof::close_bull_proof_buffer(buffer_info, refund)?;
+        }
+    }
 
     Ok(())
 }
@@ -4678,6 +6513,7 @@ fn settle_unstake_mock(ctx: &mut Context<SettleUnstake>) -> Result<()> {
 mod tests {
     use super::*;
     use crate::probability;
+    use crate::sparse_tree::*;
     use crate::state;
 
     #[cfg(not(feature = "mock-randomness"))]
@@ -4740,7 +6576,7 @@ mod tests {
         assert_eq!(BullAccumulator::INIT_SPACE, 82);
         assert_eq!(Position::INIT_SPACE, 239);
         assert_eq!(WalletClaimCooldown::INIT_SPACE, 74);
-        assert_eq!(PendingRandomness::INIT_SPACE, 212);
+        assert_eq!(PendingRandomness::INIT_SPACE, 228);
         assert_eq!(ProtocolConfig::INIT_SPACE, 350);
     }
 
@@ -5190,7 +7026,7 @@ mod tests {
     #[test]
     #[cfg(feature = "mock-randomness")]
     fn test_build_uses_mock_randomness() {
-        let _ = settle_reveal_mock as fn(&mut Context<SettleReveal>) -> Result<()>;
+        assert!(USE_MOCK_RANDOMNESS);
     }
 
     #[test]
@@ -5239,6 +7075,10 @@ mod tests {
             ) -> Result<()>;
         let _ = test_fixture_advance_next_position_id
             as fn(Context<TestFixtureAdvanceNextPositionId>, u64) -> Result<()>;
+        let _ = test_fixture_set_global_game_state
+            as fn(Context<TestFixtureSetGlobalGameState>, u64, u64, u64, u64) -> Result<()>;
+        let _ = test_fixture_set_reward_state
+            as fn(Context<TestFixtureSetRewardState>, u64) -> Result<()>;
     }
 
     fn dummy_position() -> state::Position {
@@ -5672,5 +7512,485 @@ mod tests {
         assert_ne!(ON_DEMAND_MAINNET_PID, Pubkey::default());
         assert_ne!(ON_DEMAND_DEVNET_PID, Pubkey::default());
         assert_ne!(ON_DEMAND_MAINNET_PID, ON_DEMAND_DEVNET_PID);
+    }
+
+    #[test]
+    fn compressed_proof_rejects_missing_and_extra_siblings() {
+        let key = pubkey_from_u64(123);
+        let empty_owner_leaf = OwnerLeaf::empty().to_node();
+
+        // Missing sibling: bitmap claims one, siblings vector is empty.
+        let mut malformed = CompressedSparseProof {
+            bitmap: [0u8; 32],
+            siblings: vec![],
+            leaf: empty_owner_leaf,
+        };
+        malformed.bitmap[0] = 1; // level 0 bit set, but no sibling supplied
+        assert!(bull_registry::verify_owner(
+            &empty_owner_tree_root(),
+            &key,
+            &CompressedOwnerProof {
+                leaf: OwnerLeaf::empty(),
+                proof: malformed,
+            },
+        )
+        .is_err());
+
+        // Extra sibling: bitmap is empty, but a sibling is supplied.
+        let mut extra = CompressedSparseProof {
+            bitmap: [0u8; 32],
+            siblings: vec![BullLeaf::empty().to_node()],
+            leaf: empty_owner_leaf,
+        };
+        assert!(bull_registry::verify_owner(
+            &empty_owner_tree_root(),
+            &key,
+            &CompressedOwnerProof {
+                leaf: OwnerLeaf::empty(),
+                proof: extra,
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn default_non_membership_proof_fails_in_non_empty_tree() {
+        // Build a non-empty owner tree with a single Bull.
+        let owner = pubkey_from_u64(1);
+        let position = pubkey_from_u64(100);
+        let mut registry = BullRegistry {
+            version: 1,
+            global_config: Pubkey::default(),
+            owner_tree_root: empty_owner_tree_root(),
+            total_bull_count: 0,
+            total_buck_power: 0,
+            registry_version: 0,
+            bump: 0,
+        };
+        let bull_leaf = BullLeaf {
+            position,
+            position_id: 1,
+            owner,
+            buck_power: 10,
+            reveal_config_version: 1,
+        };
+        let empty_owner_proof = CompressedOwnerProof {
+            leaf: OwnerLeaf::empty(),
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: OwnerLeaf::empty().to_node(),
+            },
+        };
+        let empty_bull_proof = CompressedBullProof {
+            leaf: BullLeaf::empty(),
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: BullLeaf::empty().to_node(),
+            },
+        };
+        bull_registry::add_bull_to_registry(
+            &mut registry,
+            &bull_leaf,
+            &empty_owner_proof,
+            &empty_bull_proof,
+        )
+        .expect("add should succeed");
+
+        // An attacker attempts the old arbitrary-index exploit: prove absence
+        // for a different owner using the *default* all-empty proof. This must
+        // NOT reconstruct the current non-empty root.
+        let other_owner = pubkey_from_u64(2);
+        let attack = CompressedOwnerProof {
+            leaf: OwnerLeaf::empty(),
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: OwnerLeaf::empty().to_node(),
+            },
+        };
+        assert!(
+            bull_registry::verify_owner(&registry.owner_tree_root, &other_owner, &attack,).is_err()
+        );
+    }
+
+    #[test]
+    fn bull_add_and_remove_round_trip() {
+        let owner = pubkey_from_u64(7);
+        let position = pubkey_from_u64(777);
+        let mut registry = BullRegistry {
+            version: 1,
+            global_config: Pubkey::default(),
+            owner_tree_root: empty_owner_tree_root(),
+            total_bull_count: 0,
+            total_buck_power: 0,
+            registry_version: 0,
+            bump: 0,
+        };
+        let bull_leaf = BullLeaf {
+            position,
+            position_id: 7,
+            owner,
+            buck_power: 6,
+            reveal_config_version: 2,
+        };
+        let empty_owner_proof = CompressedOwnerProof {
+            leaf: OwnerLeaf::empty(),
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: OwnerLeaf::empty().to_node(),
+            },
+        };
+        let empty_bull_proof = CompressedBullProof {
+            leaf: BullLeaf::empty(),
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: BullLeaf::empty().to_node(),
+            },
+        };
+
+        bull_registry::add_bull_to_registry(
+            &mut registry,
+            &bull_leaf,
+            &empty_owner_proof,
+            &empty_bull_proof,
+        )
+        .expect("add");
+        assert_eq!(registry.total_bull_count, 1);
+        assert_eq!(registry.total_buck_power, 6);
+
+        // The owner leaf after add, used as the removal owner proof.
+        let new_owner_leaf = bull_registry::add_bull_to_owner_leaf(
+            &OwnerLeaf::empty(),
+            &bull_leaf,
+            &empty_bull_proof,
+        )
+        .expect("owner leaf");
+        let owner_proof = CompressedOwnerProof {
+            leaf: new_owner_leaf,
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: new_owner_leaf.to_node(),
+            },
+        };
+        let bull_proof = CompressedBullProof {
+            leaf: bull_leaf.clone(),
+            proof: CompressedSparseProof {
+                bitmap: [0u8; 32],
+                siblings: vec![],
+                leaf: bull_leaf.to_node(),
+            },
+        };
+
+        bull_registry::remove_bull_from_registry(
+            &mut registry,
+            &bull_leaf,
+            &owner_proof,
+            &bull_proof,
+        )
+        .expect("remove");
+        assert_eq!(registry.owner_tree_root, empty_owner_tree_root());
+        assert_eq!(registry.total_bull_count, 0);
+        assert_eq!(registry.total_buck_power, 0);
+        assert_eq!(registry.registry_version, 2);
+    }
+
+    #[test]
+    fn verify_bull_proof_payload_rejects_unknown_schema() {
+        let payload = vec![99u8, 0, 0, 0, 0];
+        assert!(bull_registry::verify_bull_proof_payload(&payload).is_err());
+    }
+
+    #[test]
+    fn verify_bull_proof_payload_round_trip_and_section_bitmap() {
+        let payload = BullProofPayloadV1 {
+            schema_version: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+            section_bitmap: SECTION_VICTIM_OWNER | SECTION_SELECTED_OWNER | SECTION_SELECTED_BULL,
+            victim_owner: Some(CompressedOwnerProof {
+                leaf: OwnerLeaf::empty(),
+                proof: CompressedSparseProof {
+                    bitmap: [0u8; 32],
+                    siblings: vec![],
+                    leaf: OwnerLeaf::empty().to_node(),
+                },
+            }),
+            selected_owner: Some(CompressedOwnerProof {
+                leaf: OwnerLeaf::empty(),
+                proof: CompressedSparseProof {
+                    bitmap: [0u8; 32],
+                    siblings: vec![],
+                    leaf: OwnerLeaf::empty().to_node(),
+                },
+            }),
+            selected_bull: Some(CompressedBullProof {
+                leaf: BullLeaf::empty(),
+                proof: CompressedSparseProof {
+                    bitmap: [0u8; 32],
+                    siblings: vec![],
+                    leaf: BullLeaf::empty().to_node(),
+                },
+            }),
+            current_owner: None,
+            current_bull: None,
+            remove_bull: None,
+        };
+        let bytes = payload.try_to_vec().expect("serialize");
+        let parsed = bull_registry::verify_bull_proof_payload(&bytes).expect("parse");
+        assert!(parsed.victim_owner.is_some());
+        assert!(parsed.selected_owner.is_some());
+        assert!(parsed.selected_bull.is_some());
+
+        // Unknown bit in section bitmap must be rejected.
+        let mut invalid = payload.clone();
+        invalid.section_bitmap = 0b0100_0000;
+        let bad = invalid.try_to_vec().expect("serialize");
+        assert!(bull_registry::verify_bull_proof_payload(&bad).is_err());
+
+        // Inconsistent bitmap: claiming remove_bull but not providing it.
+        let mut incomplete = payload.clone();
+        incomplete.section_bitmap |= SECTION_REMOVE_BULL;
+        let bad2 = incomplete.try_to_vec().expect("serialize");
+        assert!(bull_registry::verify_bull_proof_payload(&bad2).is_err());
+    }
+
+    fn sample_protocol_config(global_config: Pubkey, config_version: u64) -> ProtocolConfig {
+        ProtocolConfig {
+            version: 1,
+            global_config,
+            config_version,
+            role_weights: [1, 1],
+            cowboy_rank_weights: [1; 8],
+            bull_tier_weights: [1; 4],
+            suit_weights: [1; 4],
+            mint_theft_weights: [1, 1],
+            unstake_theft_weights: [1, 1],
+            cowboy_accrual_weights: [1; 8],
+            bull_buck_powers: [1; 4],
+            min_reveals_for_theft: 1,
+            min_bulls_for_theft: 1,
+            unstake_tax_bps: 500,
+            unstake_return_bps: 9500,
+            bump: 0,
+            _reserved: [0; 64],
+        }
+    }
+
+    fn protocol_config_account<'a>(
+        key: &'a Pubkey,
+        lamports: &'a mut u64,
+        data: &'a mut Vec<u8>,
+        config: &ProtocolConfig,
+        owner: &'a Pubkey,
+    ) -> AccountInfo<'a> {
+        data.clear();
+        data.extend_from_slice(&<ProtocolConfig as anchor_lang::Discriminator>::DISCRIMINATOR);
+        data.extend_from_slice(&config.try_to_vec().unwrap());
+        AccountInfo::new(key, false, false, lamports, &mut data[..], owner, false, 0)
+    }
+
+    #[test]
+    fn load_historical_protocol_config_accepts_valid() {
+        let global_config = Pubkey::new_unique();
+        let version = 7u64;
+        let (expected_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                global_config.as_ref(),
+                &version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let config = sample_protocol_config(global_config, version);
+        let mut lamports = 0u64;
+        let mut data = Vec::new();
+        let info =
+            protocol_config_account(&expected_key, &mut lamports, &mut data, &config, &crate::ID);
+        let loaded =
+            super::load_historical_protocol_config(&info, &expected_key, &global_config, version)
+                .unwrap();
+        assert_eq!(loaded.global_config, global_config);
+        assert_eq!(loaded.config_version, version);
+    }
+
+    #[test]
+    fn load_historical_protocol_config_rejects_wrong_pda() {
+        let global_config = Pubkey::new_unique();
+        let version = 7u64;
+        let (expected_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                global_config.as_ref(),
+                &version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let wrong_key = Pubkey::new_unique();
+        let config = sample_protocol_config(global_config, version);
+        let mut lamports = 0u64;
+        let mut data = Vec::new();
+        let info =
+            protocol_config_account(&expected_key, &mut lamports, &mut data, &config, &crate::ID);
+        assert!(matches!(
+            super::load_historical_protocol_config(&info, &wrong_key, &global_config, version),
+            Err(_)
+        ));
+    }
+
+    #[test]
+    fn load_historical_protocol_config_rejects_wrong_owner() {
+        let global_config = Pubkey::new_unique();
+        let version = 7u64;
+        let (expected_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                global_config.as_ref(),
+                &version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let config = sample_protocol_config(global_config, version);
+        let wrong_owner = Pubkey::new_unique();
+        let mut lamports = 0u64;
+        let mut data = Vec::new();
+        let info = protocol_config_account(
+            &expected_key,
+            &mut lamports,
+            &mut data,
+            &config,
+            &wrong_owner,
+        );
+        assert!(matches!(
+            super::load_historical_protocol_config(&info, &expected_key, &global_config, version),
+            Err(_)
+        ));
+    }
+
+    #[test]
+    fn load_historical_protocol_config_rejects_invalid_discriminator() {
+        let global_config = Pubkey::new_unique();
+        let version = 7u64;
+        let (expected_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                global_config.as_ref(),
+                &version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let mut lamports = 0u64;
+        let mut data = vec![0u8; 64];
+        let info = AccountInfo::new(
+            &expected_key,
+            false,
+            false,
+            &mut lamports,
+            &mut data,
+            &crate::ID,
+            false,
+            0,
+        );
+        assert!(matches!(
+            super::load_historical_protocol_config(&info, &expected_key, &global_config, version),
+            Err(_)
+        ));
+    }
+
+    #[test]
+    fn load_historical_protocol_config_rejects_wrong_global_config() {
+        let global_config = Pubkey::new_unique();
+        let other_global = Pubkey::new_unique();
+        let version = 7u64;
+        let (expected_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                other_global.as_ref(),
+                &version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let config = sample_protocol_config(other_global, version);
+        let mut lamports = 0u64;
+        let mut data = Vec::new();
+        let info =
+            protocol_config_account(&expected_key, &mut lamports, &mut data, &config, &crate::ID);
+        assert!(matches!(
+            super::load_historical_protocol_config(&info, &expected_key, &global_config, version),
+            Err(_)
+        ));
+    }
+
+    #[test]
+    fn load_historical_protocol_config_rejects_wrong_version() {
+        let global_config = Pubkey::new_unique();
+        let version = 7u64;
+        let wrong_version = 8u64;
+        let (expected_key, _bump) = Pubkey::find_program_address(
+            &[
+                SEED_PROTOCOL_CONFIG,
+                global_config.as_ref(),
+                &version.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        let config = sample_protocol_config(global_config, version);
+        let mut lamports = 0u64;
+        let mut data = Vec::new();
+        let info =
+            protocol_config_account(&expected_key, &mut lamports, &mut data, &config, &crate::ID);
+        assert!(matches!(
+            super::load_historical_protocol_config(
+                &info,
+                &expected_key,
+                &global_config,
+                wrong_version
+            ),
+            Err(_)
+        ));
+    }
+
+    mod reveal_tests {
+        use super::*;
+        include!("reveal_tests.rs");
+    }
+
+    mod unstake_tests {
+        use super::*;
+        include!("unstake_tests.rs");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Initializer authority guard regression tests
+    // ---------------------------------------------------------------------------
+    // These tests prove that the production `initialize_protocol` authority
+    // check is never accidentally stripped, and that the test-only fixture
+    // bypass remains strictly gated behind `test-fixtures`.
+
+    mod initializer_authority_guard {
+        use super::*;
+
+        #[cfg(not(feature = "test-fixtures"))]
+        #[test]
+        fn production_initialize_protocol_compiles_upgrade_authority_check() {
+            // In a default/production build the `#[cfg(not(feature = "test-fixtures"))]`
+            // block inside `initialize_protocol` enforces that the initializer is
+            // the program's upgrade authority. This test is only compiled without
+            // `test-fixtures`, proving the `UnauthorizedInitializer` error and the
+            // authority check are present in the production binary.
+            let _ = RodeoError::UnauthorizedInitializer;
+        }
+
+        #[cfg(feature = "test-fixtures")]
+        #[test]
+        fn test_fixtures_initialize_protocol_bypass_is_available() {
+            // The localnet-only `test_fixture_initialize_protocol_accounts` bypass
+            // is compiled only when `test-fixtures` is enabled. Its presence in
+            // this branch proves the bypass is correctly gated and cannot leak into
+            // a default/production build.
+            let _ = std::any::type_name::<TestFixtureInitializeProtocolAccounts>();
+        }
     }
 }

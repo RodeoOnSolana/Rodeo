@@ -5,32 +5,32 @@ use crate::RodeoError;
 
 pub fn checked_add_u64(a: u64, b: u64) -> Result<u64> {
     a.checked_add(b)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))
+        .ok_or_else(|| error!(RodeoError::ArithmeticOverflow))
 }
 
 pub fn checked_sub_u64(a: u64, b: u64) -> Result<u64> {
     a.checked_sub(b)
-        .ok_or(error!(RodeoError::ArithmeticUnderflow))
+        .ok_or_else(|| error!(RodeoError::ArithmeticUnderflow))
 }
 
 pub fn checked_mul_u64(a: u64, b: u64) -> Result<u64> {
     a.checked_mul(b)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))
+        .ok_or_else(|| error!(RodeoError::ArithmeticOverflow))
 }
 
 pub fn checked_mul_u128(a: u128, b: u128) -> Result<u128> {
     a.checked_mul(b)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))
+        .ok_or_else(|| error!(RodeoError::ArithmeticOverflow))
 }
 
 pub fn checked_add_u128(a: u128, b: u128) -> Result<u128> {
     a.checked_add(b)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))
+        .ok_or_else(|| error!(RodeoError::ArithmeticOverflow))
 }
 
 pub fn checked_sub_u128(a: u128, b: u128) -> Result<u128> {
     a.checked_sub(b)
-        .ok_or(error!(RodeoError::ArithmeticUnderflow))
+        .ok_or_else(|| error!(RodeoError::ArithmeticUnderflow))
 }
 
 pub fn floor_mul_div_u128(a: u128, b: u128, c: u128) -> Result<u128> {
@@ -45,9 +45,9 @@ pub fn ceil_mul_div_u128(a: u128, b: u128, c: u128) -> Result<u128> {
     let numerator = product
         .checked_add(
             c.checked_sub(1)
-                .ok_or(error!(RodeoError::ArithmeticOverflow))?,
+                .ok_or_else(|| error!(RodeoError::ArithmeticOverflow))?,
         )
-        .ok_or(error!(RodeoError::ArithmeticOverflow))?;
+        .ok_or_else(|| error!(RodeoError::ArithmeticOverflow))?;
     Ok(numerator / c)
 }
 
@@ -55,7 +55,7 @@ pub fn floor_bps(amount: u64, bps: u64) -> Result<u64> {
     require!(bps <= BPS_DENOMINATOR, RodeoError::InvalidBps);
     let numerator = (amount as u128)
         .checked_mul(bps as u128)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))?;
+        .ok_or_else(|| error!(RodeoError::ArithmeticOverflow))?;
     Ok(u128_to_u64(numerator / BPS_DENOMINATOR as u128)?)
 }
 
@@ -74,7 +74,7 @@ pub fn whole_to_atomic(whole: u64, decimals: u8) -> Result<u64> {
     require_gte!(RODEO_DECIMALS_MAX, decimals, RodeoError::InvalidDecimals);
     let multiplier = 10u64
         .checked_pow(decimals as u32)
-        .ok_or(error!(RodeoError::InvalidDecimals))?;
+        .ok_or_else(|| error!(RodeoError::InvalidDecimals))?;
     checked_mul_u64(whole, multiplier)
 }
 
@@ -91,12 +91,12 @@ pub fn increment_cowboy_index(
     let emission_u128 = emission as u128;
     let numerator = checked_mul_u128(emission_u128, scale)?
         .checked_add(remainder)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))?;
+        .ok_or_else(|| error!(RodeoError::ArithmeticOverflow))?;
     let increment = numerator / total_weight;
     let new_remainder = numerator % total_weight;
     let new_index = current_index
         .checked_add(increment)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))?;
+        .ok_or_else(|| error!(RodeoError::ArithmeticOverflow))?;
     Ok((new_index, new_remainder))
 }
 
@@ -113,12 +113,12 @@ pub fn increment_bull_index(
     let contribution_u128 = contribution as u128;
     let numerator = checked_mul_u128(contribution_u128, scale)?
         .checked_add(remainder)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))?;
+        .ok_or_else(|| error!(RodeoError::ArithmeticOverflow))?;
     let increment = numerator / total_power;
     let new_remainder = numerator % total_power;
     let new_index = current_index
         .checked_add(increment)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))?;
+        .ok_or_else(|| error!(RodeoError::ArithmeticOverflow))?;
     Ok((new_index, new_remainder))
 }
 
@@ -153,10 +153,10 @@ pub fn accrue_cowboy(
     require!(current_index >= last_index, RodeoError::ArithmeticUnderflow);
     let delta = current_index
         .checked_sub(last_index)
-        .ok_or(error!(RodeoError::ArithmeticUnderflow))?;
+        .ok_or_else(|| error!(RodeoError::ArithmeticUnderflow))?;
     let numerator = checked_mul_u128(delta, weight)?
         .checked_add(remainder)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))?;
+        .ok_or_else(|| error!(RodeoError::ArithmeticOverflow))?;
     let accrued = numerator / scale;
     let new_remainder = numerator % scale;
     Ok((u128_to_u64(accrued)?, new_remainder))
@@ -174,10 +174,10 @@ pub fn accrue_bull(
     require!(current_index >= last_index, RodeoError::ArithmeticUnderflow);
     let delta = current_index
         .checked_sub(last_index)
-        .ok_or(error!(RodeoError::ArithmeticUnderflow))?;
+        .ok_or_else(|| error!(RodeoError::ArithmeticUnderflow))?;
     let numerator = checked_mul_u128(delta, power)?
         .checked_add(remainder)
-        .ok_or(error!(RodeoError::ArithmeticOverflow))?;
+        .ok_or_else(|| error!(RodeoError::ArithmeticOverflow))?;
     let accrued = numerator / scale;
     let new_remainder = numerator % scale;
     Ok((u128_to_u64(accrued)?, new_remainder))

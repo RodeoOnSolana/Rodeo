@@ -44,6 +44,8 @@ describe("event schema parity", () => {
       "receiptBurned",
       "receiptCreated",
       "suitRewardClaimed",
+      "sparseTreeBenchmarked",
+      "positionReceiptParsed",
     ]);
     for (const name of declaredNames) {
       if (offChainOnlyNames.has(name)) continue;

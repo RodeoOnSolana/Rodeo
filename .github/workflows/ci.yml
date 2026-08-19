@@ -14,27 +14,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  SOLANA_VERSION: v2.2.20
+  ANCHOR_VERSION: 0.31.1
+  RUST_VERSION: 1.85.1
+  SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install/active_release
+  MPL_CORE_EXPECTED_SHA256: f03e75373ae9cae07b5875f7818c55147b73c5607ca0f96968bab93cd583dc6e
+
 jobs:
-  verify:
+  phase0-static:
+    name: static
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-      # Bumped from v2.1.0 (minimum pinned patch bump within the 2.2.x
-      # line, not a jump to Agave 3.x/4.x): cargo-build-sbf's bundled
-      # platform-tools under v2.1.0 silently produced a rodeo_core SBF
-      # binary with an oversized SettleUnstake::try_accounts stack frame
-      # (real undefined behavior -- see the stack-safety guard below),
-      # without failing the build; this bump surfaces that class of
-      # diagnostic reliably (fixed on main; see the hotfix history) and is
-      # also required by mpl-core 0.11.2's solana-program/solana-zk-sdk
-      # 2.2.1 dependency. The platform-tools SBF toolchain version itself
-      # is pinned separately via `[workspace.metadata.solana]
-      # tools-version` in Cargo.toml (see docs/mpl-core-integration-proof.md).
-      SOLANA_VERSION: v2.2.20
-      ANCHOR_VERSION: 0.31.1
-      RUST_VERSION: 1.85.1
-      SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install/active_release
-
     steps:
       - uses: actions/checkout@v4
 
@@ -65,7 +56,8 @@ jobs:
           key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-anchor-${{ env.ANCHOR_VERSION }}-solana-${{ env.SOLANA_VERSION }}
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+        run: |
+          sudo apt-get install -y libudev-dev pkg-config || (sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config)
 
       - name: Install Agave CLI
         run: |
@@ -100,11 +92,6 @@ jobs:
           anchor --version
           node --version
           pnpm --version
-          # Reports the SBF platform-tools version and the Rust version it
-          # bundles, which is what `anchor build` / `cargo build-sbf`
-          # actually compiles the on-chain program with (independent of the
-          # workspace's own pinned `RUST_VERSION` above). This is pinned via
-          # `[workspace.metadata.solana] tools-version` in Cargo.toml.
           cargo build-sbf --version
 
       - name: Install JavaScript dependencies
@@ -139,15 +126,6 @@ jobs:
           git clone -b mpl-core-0.11.2-patched --depth 1 https://github.com/RodeoOnSolana/mpl-core /tmp/mpl-core
           cargo test --manifest-path /tmp/mpl-core/Cargo.toml --lib
 
-      - name: Upload generated Cargo lockfile
-        uses: actions/upload-artifact@v4
-        with:
-          name: phase-0-cargo-lock
-          path: Cargo.lock
-
-      - name: Prepare localnet identities
-        run: pnpm program-keys:localnet
-
       - name: Anchor build
         run: |
           chmod +x scripts/check-sbf-stack-safety.sh
@@ -170,22 +148,10 @@ jobs:
             target/idl/*.json
             packages/sdk/src/generated/*.ts
 
-      - name: Configure local validator wallet
+      - name: Verify Metaplex Core program binary
         run: |
-          mkdir -p "$HOME/.config/solana"
-          solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
-          solana config set --url localhost
-
-      # Fetches the live Metaplex Core on-chain program (see
-      # scripts/fetch-mpl-core-program.sh and
-      # docs/mpl-core-integration-proof.md) so it can be loaded into the
-      # local test validator at genesis via Anchor.toml's [[test.genesis]].
-      # Every run's SHA-256 is written to the job summary so an unannounced
-      # mainnet upgrade is always visible rather than silently trusted.
-      - name: Fetch Metaplex Core program binary
-        run: |
-          chmod +x scripts/fetch-mpl-core-program.sh
-          MPL_CORE_EXPECTED_SHA256="${MPL_CORE_EXPECTED_SHA256:-}" scripts/fetch-mpl-core-program.sh
+          chmod +x scripts/verify-mpl-core-program.sh
+          MPL_CORE_EXPECTED_SHA256="${MPL_CORE_EXPECTED_SHA256:-}" scripts/verify-mpl-core-program.sh
 
       - name: Upload Metaplex Core program binary provenance
         uses: actions/upload-artifact@v4
@@ -194,57 +160,270 @@ jobs:
           path: |
             vendor/mpl-core/mpl_core_program.so.sha256
 
-      # Epoch-closure profile: 2-second epochs so close_epochs, batched
-      # closure, and the EpochsNotClosed guard can be exercised quickly.
-      # `require_elapsed_epochs_closed` remains compiled in and active; only
-      # the epoch duration itself is shortened.
+  phase0-epoch:
+    name: epoch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+          rustup override set "$RUST_VERSION"
+
+      - name: Restore Rust, Anchor, and Solana toolchains
+        id: toolchain-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/anchor
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.local/share/solana/install
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-anchor-${{ env.ANCHOR_VERSION }}-solana-${{ env.SOLANA_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get install -y libudev-dev pkg-config || (sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config)
+
+      - name: Install Agave CLI
+        run: |
+          if [ ! -x "$SOLANA_INSTALL_DIR/bin/solana" ]; then
+            sh -c "$(curl -sSfL https://release.anza.xyz/$SOLANA_VERSION/install)"
+          fi
+          echo "$SOLANA_INSTALL_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor CLI
+        run: |
+          if ! command -v anchor >/dev/null || [ "$(anchor --version)" != "anchor-cli $ANCHOR_VERSION" ]; then
+            cargo install anchor-cli --version "$ANCHOR_VERSION" --locked
+          fi
+
+      - name: Save Rust, Anchor, and Solana toolchains
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/bin/anchor
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.local/share/solana/install
+          key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
+
+      - name: Report toolchain
+        run: |
+          rustc --version
+          cargo --version
+          solana --version
+          solana-test-validator --version
+          anchor --version
+          node --version
+          pnpm --version
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript build
+        run: pnpm build
+
+      - name: Verify Metaplex Core program binary
+        run: |
+          chmod +x scripts/verify-mpl-core-program.sh
+          MPL_CORE_EXPECTED_SHA256="${MPL_CORE_EXPECTED_SHA256:-}" scripts/verify-mpl-core-program.sh
+
+      - name: Configure local validator wallet
+        run: |
+          mkdir -p "$HOME/.config/solana"
+          solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
+          solana config set --url localhost
+
+      - name: Build auxiliary test program binaries
+        run: |
+          scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_market
+          scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_router
+
       - name: Build epoch-profile test program binary
-        run: scripts/check-sbf-stack-safety.sh anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-epoch,test-short-claim-cooldown,test-fixtures
+        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-epoch,test-short-claim-cooldown,test-fixtures
 
       - name: Anchor localnet integration tests (epoch profile)
-        run: RODEO_TEST_SUITE=epoch anchor test --skip-build --no-idl
-
-      # `anchor test` starts its own solana-test-validator and normally
-      # tears it down on exit, but ensure no stray process/port survives
-      # before the next profile's validator starts on the same port.
-      - name: Ensure no stray validator process survives between profiles
-        if: always()
+        id: epoch-suite
+        timeout-minutes: 45
         run: |
-          pkill -f solana-test-validator || true
-          sleep 2
+          set -u -o pipefail
+          set +e
+          chmod +x scripts/ci-localnet-health.sh
+          scripts/ci-localnet-health.sh "http://127.0.0.1:8899" /tmp/phase0-epoch-health.log .anchor/test-ledger &
+          HEALTH_PID=$!
+          RODEO_TEST_SUITE=epoch anchor test --skip-build --no-idl 2>&1 | tee /tmp/phase0-epoch.log
+          TEST_EXIT=${PIPESTATUS[0]}
+          kill $HEALTH_PID 2>/dev/null || true
+          wait $HEALTH_PID 2>/dev/null || true
+          mkdir -p phase0-epoch-logs
+          cp /tmp/phase0-epoch*.log .anchor/test-ledger/test-ledger-log.txt phase0-epoch-logs/ 2>/dev/null || true
+          exit $TEST_EXIT
 
-      # Claim/recognition profile: production-length epochs, so a real epoch
-      # can never elapse mid-test. `require_elapsed_epochs_closed` remains
-      # compiled in and active but never trips. Deterministic claim-ready
-      # state is established via the test-only `test-fixtures` instructions
-      # instead of waiting on organic epoch emissions.
-      - name: Build claim-profile test program binary
-        run: scripts/check-sbf-stack-safety.sh anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-claim-cooldown,test-fixtures
-
-      - name: Anchor localnet integration tests (claim profile)
-        run: RODEO_TEST_SUITE=claim anchor test --skip-build --no-idl
-
-      - name: Ensure no stray validator process survives between profiles
-        if: always()
-        run: |
-          pkill -f solana-test-validator || true
-          sleep 2
-
-      # MPL Core integration-proof profile: proves the real Metaplex Core
-      # program (loaded via [[test.genesis]]) is present and executable on
-      # the local validator. This profile does not exercise any Rodeo
-      # receipt creation/transfer/burn logic yet -- that is scoped to a
-      # follow-up PR (see docs/mpl-core-integration-proof.md).
-      - name: Build mpl-core-profile test program binary
-        run: scripts/check-sbf-stack-safety.sh anchor build --no-idl --program-name rodeo_core -- --features mock-randomness,test-fixtures
-
-      - name: Anchor localnet integration tests (mpl-core profile)
-        run: RODEO_TEST_SUITE=mplcore anchor test --skip-build --no-idl
-
-      - name: Upload test-validator ledger log
+      - name: Upload epoch logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-validator-ledger-log
-          path: .anchor/test-ledger/test-ledger-log.txt
+          name: phase0-epoch-logs-${{ github.sha }}
+          path: phase0-epoch-logs/
           if-no-files-found: warn
+
+      - name: Ensure no stray validator process survives
+        if: always()
+        run: |
+          pkill -f solana-test-validator || true
+          sleep 2
+
+  phase0-claim:
+    name: claim
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+          rustup override set "$RUST_VERSION"
+
+      - name: Restore Rust, Anchor, and Solana toolchains
+        id: toolchain-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/anchor
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.local/share/solana/install
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-anchor-${{ env.ANCHOR_VERSION }}-solana-${{ env.SOLANA_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get install -y libudev-dev pkg-config || (sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config)
+
+      - name: Install Agave CLI
+        run: |
+          if [ ! -x "$SOLANA_INSTALL_DIR/bin/solana" ]; then
+            sh -c "$(curl -sSfL https://release.anza.xyz/$SOLANA_VERSION/install)"
+          fi
+          echo "$SOLANA_INSTALL_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor CLI
+        run: |
+          if ! command -v anchor >/dev/null || [ "$(anchor --version)" != "anchor-cli $ANCHOR_VERSION" ]; then
+            cargo install anchor-cli --version "$ANCHOR_VERSION" --locked
+          fi
+
+      - name: Save Rust, Anchor, and Solana toolchains
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/bin/anchor
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.local/share/solana/install
+          key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
+
+      - name: Report toolchain
+        run: |
+          rustc --version
+          cargo --version
+          solana --version
+          solana-test-validator --version
+          anchor --version
+          node --version
+          pnpm --version
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript build
+        run: pnpm build
+
+      - name: Verify Metaplex Core program binary
+        run: |
+          chmod +x scripts/verify-mpl-core-program.sh
+          MPL_CORE_EXPECTED_SHA256="${MPL_CORE_EXPECTED_SHA256:-}" scripts/verify-mpl-core-program.sh
+
+      - name: Configure local validator wallet
+        run: |
+          mkdir -p "$HOME/.config/solana"
+          solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
+          solana config set --url localhost
+
+      - name: Build auxiliary test program binaries
+        run: |
+          scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_market
+          scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_router
+
+      - name: Build claim-profile test program binary
+        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-claim-cooldown,test-fixtures
+
+      - name: Anchor localnet integration tests (claim profile)
+        id: claim-suite
+        timeout-minutes: 45
+        run: |
+          set -u -o pipefail
+          set +e
+          chmod +x scripts/ci-localnet-health.sh
+          scripts/ci-localnet-health.sh "http://127.0.0.1:8899" /tmp/phase0-claim-health.log .anchor/test-ledger &
+          HEALTH_PID=$!
+          RODEO_TEST_SUITE=claim anchor test --skip-build --no-idl 2>&1 | tee /tmp/phase0-claim.log
+          TEST_EXIT=${PIPESTATUS[0]}
+          kill $HEALTH_PID 2>/dev/null || true
+          wait $HEALTH_PID 2>/dev/null || true
+          mkdir -p phase0-claim-logs
+          cp /tmp/phase0-claim*.log .anchor/test-ledger/test-ledger-log.txt phase0-claim-logs/ 2>/dev/null || true
+          exit $TEST_EXIT
+
+      - name: Upload claim logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase0-claim-logs-${{ github.sha }}
+          path: phase0-claim-logs/
+          if-no-files-found: warn
+
+      - name: Ensure no stray validator process survives
+        if: always()
+        run: |
+          pkill -f solana-test-validator || true
+          sleep 2
+
+  verify:
+    name: verify
+    runs-on: ubuntu-24.04
+    needs: [phase0-static, phase0-epoch, phase0-claim]
+    if: always()
+    steps:
+      - name: Phase 0 verification summary
+        run: |
+          if [ "${{ needs.phase0-static.result }}" != "success" ] || [ "${{ needs.phase0-epoch.result }}" != "success" ] || [ "${{ needs.phase0-claim.result }}" != "success" ]; then
+            echo "::error::Phase 0 failed: static=${{ needs.phase0-static.result }}, epoch=${{ needs.phase0-epoch.result }}, claim=${{ needs.phase0-claim.result }}"
+            exit 1
+          fi
+          echo "Phase 0 verification complete"

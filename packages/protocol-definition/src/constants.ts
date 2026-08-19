@@ -72,6 +72,8 @@ export enum RandomnessDomain {
   CowboyKind = 5,
   BullTier = 6,
   Suit = 7,
+  OwnerSelection = 8,
+  BullSelection = 9,
 }
 
 export const SEED_GLOBAL_CONFIG = Buffer.from("global-config");

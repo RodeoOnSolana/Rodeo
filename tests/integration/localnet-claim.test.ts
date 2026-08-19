@@ -1,14 +1,18 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Idl } from "@coral-xyz/anchor";
 import {
   PROTOCOL_CONFIG_V1,
   PROTOCOL_CONFIG_V2,
   RandomnessDomain,
+  mapBullTier,
   mapCowboyKind,
+  mapMintTheftFlag,
   mapRole,
+  mapSuit,
   mapUnstakeTheftFlag,
+  rejectionSampleDraw,
 } from "@rodeo/protocol-definition";
 import { AnchorProvider, BN, Program, setProvider, web3 } from "@coral-xyz/anchor";
 import {
@@ -18,11 +22,51 @@ import {
   createMint,
   createTransferInstruction,
   getAccount,
+  getAssociatedTokenAddressSync,
   getMint,
   mintTo,
   setAuthority,
 } from "@solana/spl-token";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  BullRegistryTracker,
+  deriveBullRegistryPda,
+  deriveBullProofBufferPda,
+  getLamportBalance,
+  accountExists,
+  stageRevealProofForBull,
+  closeBullProofBuffer,
+  stageBullProofBuffer,
+  type StagedBullProof,
+} from "./bull-registry-tracker.js";
+import {
+  emptyOwnerTreeRoot,
+  ownerProof,
+  bullProof,
+  buildUnstakePayload,
+  buildRevealPayload,
+  buildRevealWithVictimPayload,
+  buildTheftRevealPayload,
+  buildFullTheftRevealPayload,
+  buildRegistry,
+  BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+  SECTION_VICTIM_OWNER,
+  SECTION_CURRENT_OWNER,
+  SECTION_CURRENT_BULL,
+  serializeBullProofPayload,
+  verifyOwnerProof,
+  verifyBullProof,
+  findOwnerByTarget,
+  findBullByTarget,
+  sparseProofPrefix,
+  skipVictimInterval,
+  leafContainsTarget,
+  PREFIX_BULL_OWNER_NODE,
+  type BullLeaf,
+  type RegistryEntry,
+  type BuiltRegistry,
+} from "./sparse-tree.js";
+
 
 const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new web3.PublicKey(
   "BPFLoaderUpgradeab1e11111111111111111111111",
@@ -37,11 +81,43 @@ interface AccountFetcher<T> {
   fetchNullable(address: web3.PublicKey): Promise<T | null>;
 }
 
+
+interface BullRegistryAccount {
+  version: number;
+  globalConfig: web3.PublicKey;
+  ownerTreeRoot: number[];
+  totalBullCount: BN;
+  totalBuckPower: BN;
+  registryVersion: BN;
+  bump: number;
+}
+
+interface BullProofBufferAccount {
+  version: number;
+  schemaVersion: number;
+  actionType: { reveal?: {}; unstake?: {} };
+  pendingRandomness: web3.PublicKey;
+  position: web3.PublicKey;
+  snapshotRoot: number[];
+  snapshotVersion: BN;
+  snapshotTotalCount: BN;
+  snapshotTotalPower: BN;
+  refundRecipient: web3.PublicKey;
+  expiryTimestamp: BN;
+  expectedPayloadLength: number;
+  finalized: boolean;
+  consumed: boolean;
+  payload: number[];
+  bump: number;
+}
+
 interface RodeoCoreAccountNamespace {
   globalConfig: AccountFetcher<GlobalConfigAccount>;
   rewardState: AccountFetcher<RewardStateAccount>;
   globalGameState: AccountFetcher<GlobalGameStateAccount>;
   bullAccumulator: AccountFetcher<BullAccumulatorAccount>;
+  bullRegistry: AccountFetcher<BullRegistryAccount>;
+  bullProofBuffer: AccountFetcher<BullProofBufferAccount>;
   position: AccountFetcher<PositionAccount>;
   pendingRandomness: AccountFetcher<PendingRandomnessAccount>;
   protocolConfig: AccountFetcher<ProtocolConfigAccount>;
@@ -199,7 +275,7 @@ function loadIdl(name: string): Idl {
 }
 
 const expectedProgramIds = {
-  RodeoCore: "EkEPd5wXSi3NQUHewx64cP27tDQ6uTcK5poG6AuWmy8Z",
+  RodeoCore: "CdEU5FfgsPgrPMMLsDAPY29sN4sWqZpMetAXVY633NhA",
   RodeoMarket: "9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n",
   RodeoRouter: "CFQUWHE88YWrtnu9yADgEAB1MrPAYvdAjUbRwbTLafxD",
 } as const;
@@ -435,6 +511,384 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
   const COWBOY_REWARD_INDEX_SCALE = new BN("1000000000000000000");
   const REWARD_PER_WEIGHT_SCALE = new BN("1000000000000000000");
   let nextPositionId = 0;
+  const bullRegistryTracker = new BullRegistryTracker();
+  const positionRevealSnapshots = new Map<string, RegistryEntry[]>();
+
+  function cloneRegistryEntries(entries: RegistryEntry[]): RegistryEntry[] {
+    return entries.map((e) => ({ owner: e.owner, bulls: e.bulls.map((b) => ({ ...b })) }));
+  }
+
+
+  async function syncTrackerWithChain(): Promise<void> {
+    const [registryPda] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+    const chain = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    const built = bullRegistryTracker.buildRegistry();
+    expect(Buffer.from(built.rootNode.hash).equals(
+      Buffer.from(new Uint8Array(chain.ownerTreeRoot)),
+    )).toBe(true);
+    expect(built.rootNode.count).toBe(BigInt(chain.totalBullCount.toString()));
+    expect(built.rootNode.power).toBe(BigInt(chain.totalBuckPower.toString()));
+  }
+
+  async function assertTrackerMatchesChain(): Promise<void> {
+    const [registryPda] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+    const chain = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    const built = bullRegistryTracker.buildRegistry();
+    expect(Buffer.from(built.rootNode.hash).equals(
+      Buffer.from(new Uint8Array(chain.ownerTreeRoot)),
+    )).toBe(true);
+    expect(built.rootNode.count).toBe(BigInt(chain.totalBullCount.toString()));
+    expect(built.rootNode.power).toBe(BigInt(chain.totalBuckPower.toString()));
+  }
+
+  async function revealBullWithProof(
+    positionId: BN,
+    player: web3.Keypair,
+    prover: web3.Keypair,
+  ): Promise<any> {
+    // Synchronize tracker against chain and assert parity before proof generation.
+    await syncTrackerWithChain();
+
+    const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
+
+    // Build the canonical reveal payload deterministically before settlement.
+    // This covers pre-theft Bull insertion, historical mint-theft, and the
+    // combined five-section payload when both are required.
+    const { payload, finalOwner, stolen, selectedBull } = await buildRevealPayloadForPosition(
+      position,
+      pos,
+      pending,
+    );
+    const payloadBytes = serializeBullProofPayload(payload);
+
+    const nonce = new BN(1);
+    const staged = await stageBullProofBuffer(
+      rodeoCoreProgram,
+      globalConfig,
+      position,
+      pendingRandomness,
+      prover,
+      nonce,
+      { reveal: {} },
+      payloadBytes,
+    );
+
+    // Verify staged buffer exists and is finalized but not consumed
+    const bufferInfo = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfo).not.toBeNull();
+    expect(bufferInfo!.data.length).toBeGreaterThan(0);
+    const bufferAccount = await rodeoAccounts(rodeoCoreProgram).bullProofBuffer.fetch(staged.bufferPda);
+    expect(bufferAccount.consumed).toBe(false);
+    expect(bufferAccount.finalized).toBe(true);
+    expect(bufferAccount.refundRecipient.equals(prover.publicKey)).toBe(true);
+
+    // Record pre-state for close/refund evidence.
+    const bufferLamportsBefore = bufferInfo!.lamports;
+    const bufferDataLenBefore = bufferInfo!.data.length;
+    const proverBalanceBeforeSettle = await getLamportBalance(provider, prover.publicKey);
+    const playerBalanceBeforeSettle = await getLamportBalance(provider, player.publicKey);
+
+    // Call production settleReveal with real BullProofBuffer and independent prover/refund
+    try {
+      await settleReveal(positionId, player, {
+        bufferPda: staged.bufferPda,
+        refundRecipient: staged.refundRecipient,
+      });
+    } catch (e: any) {
+      const historicalRegistry = buildHistoricalRegistry(position);
+      const currentRegistry = bullRegistryTracker.buildRegistry();
+      const trace = {
+        positionId: pos.positionId.toString(),
+        position: position.toBase58(),
+        prospectiveOwner: pos.owner.toBase58(),
+        actionNonce: pending.actionNonce.toString(),
+        configVersion: pending.configVersionSnapshot.toString(),
+        committedProtocolEpoch: pending.committedProtocolEpoch.toString(),
+        historicalRoot: Buffer.from(historicalRegistry.rootNode.hash).toString("hex"),
+        historicalCount: historicalRegistry.rootNode.count.toString(),
+        historicalPower: historicalRegistry.rootNode.power.toString(),
+        currentRoot: Buffer.from(currentRegistry.rootNode.hash).toString("hex"),
+        currentCount: currentRegistry.rootNode.count.toString(),
+        currentPower: currentRegistry.rootNode.power.toString(),
+        predictedRole: expectedRevealRole(position, pending.actionNonce, pending.committedProtocolEpoch),
+        bullTier: pos.bullTier.toString(),
+        bullPower: pos.buckPower.toString(),
+        mintTheftStolen: stolen,
+        finalOwner: finalOwner.toBase58(),
+        selectedBullPosition: selectedBull ? selectedBull.position.toBase58() : null,
+        selectedBullOwner: selectedBull ? selectedBull.owner.toBase58() : null,
+        selectedBullPower: selectedBull ? selectedBull.buckPower.toString() : null,
+        sectionBitmap: payload.sectionBitmap,
+        sections: {
+          victimOwner: payload.victimOwner !== null,
+          selectedOwner: payload.selectedOwner !== null,
+          selectedBull: payload.selectedBull !== null,
+          currentOwner: payload.currentOwner !== null,
+          currentBull: payload.currentBull !== null,
+          removeBull: payload.removeBull !== null,
+        },
+        payloadLength: payloadBytes.length,
+      };
+      const dump = {
+        trace,
+        error: String(e),
+        logs: (e as any).logs ?? (e as any).simulationResponse?.logs ?? null,
+      };
+      const tracePath = `/tmp/reveal-bull-trace-${pos.positionId.toString()}.json`;
+      writeFileSync(tracePath, JSON.stringify(dump, null, 2));
+      console.error("REVEAL_BULL_TRACE:", JSON.stringify(trace, null, 2));
+      console.error("REVEAL_BULL_ERROR:", e);
+      console.error("REVEAL_BULL_LOGS:", e.logs ?? e.simulationResponse?.logs ?? null);
+      throw e;
+    }
+
+    // Fetch settled position and update tracker with the actual buck power and
+    // final owner the protocol assigned from randomness.
+    const posAfter = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const actualBull: BullLeaf = {
+      position,
+      positionId: BigInt(positionId.toString()),
+      owner: posAfter.owner,
+      buckPower: posAfter.buckPower,
+      revealConfigVersion: BigInt(posAfter.revealConfigVersion.toString()),
+    };
+    bullRegistryTracker.registerBull(posAfter.owner, actualBull);
+    await assertTrackerMatchesChain();
+
+    return {
+      ...staged,
+      position,
+      pendingRandomness,
+      bufferLamportsBefore,
+      bufferDataLenBefore,
+      bufferAccount,
+      proverBalanceBeforeSettle,
+      playerBalanceBeforeSettle,
+    } as any;
+  }
+
+  async function unstakeBullWithProof(
+    positionId: BN,
+    player: web3.Keypair,
+    prover: web3.Keypair,
+    claimable: BN,
+  ): Promise<any> {
+    // 1. Make the Bull unstake-eligible and credit claimable ANSEM via test fixture.
+    const { position } = await deriveStakeAccounts(positionId);
+    let pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    await fixturePreparePosition(positionId, {
+      roleCode: pos.role.cowboy ? 1 : pos.role.bull ? 2 : 0,
+      cowboyKindCode: pos.cowboyKind.desperado
+        ? 254
+        : pos.cowboyKind.rank
+          ? pos.cowboyKind.rank[0]
+          : 0,
+      accrualWeight: pos.accrualWeight,
+      buckPower: pos.buckPower,
+      claimable,
+      positionClaimableLiabilityDelta: claimable,
+    });
+
+    // Ensure recognized ANSEM reserve covers the claimable amount.
+    await ensureRecognizedReserve(claimable);
+
+    // 2. Request real Bull unstake.
+    const { actionNonce } = await requestUnstake(positionId, player);
+
+    // Re-fetch position after request to capture pending action state.
+    pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(pos.pendingActionActive).toBe(true);
+    expect(pos.pendingActionType.unstake).toBeTruthy();
+
+    // 3. Synchronize tracker and assert parity before proof generation.
+    await syncTrackerWithChain();
+
+    // 4. Build and locally verify the current removal proof.
+    const registry = bullRegistryTracker.buildRegistry();
+    const payload = buildUnstakePayload(registry, player.publicKey, position);
+    expect(payload.schemaVersion).toBe(2);
+    expect(payload.sectionBitmap).toBe(0x28); // CURRENT_OWNER | REMOVE_BULL
+    expect(payload.currentOwner).not.toBeNull();
+    expect(payload.removeBull).not.toBeNull();
+    expect(payload.currentOwner!.leaf.owner.equals(player.publicKey)).toBe(true);
+    expect(payload.currentOwner!.leaf.activeBullCount).toBe(1n);
+    expect(payload.removeBull!.leaf.position.equals(position)).toBe(true);
+    expect(payload.removeBull!.leaf.owner.equals(player.publicKey)).toBe(true);
+    expect(payload.removeBull!.leaf.buckPower).toBe(pos.buckPower);
+    expect(payload.removeBull!.leaf.revealConfigVersion).toBe(BigInt(pos.revealConfigVersion.toString()));
+
+    // Verify the owner proof hashes to the current BullRegistry root.
+    verifyOwnerProof(player.publicKey, payload.currentOwner!, registry.rootNode);
+    // Verify the remove-bull proof hashes to the bull tree root committed by the owner leaf.
+    verifyBullProof(position, payload.removeBull!, {
+      hash: payload.currentOwner!.leaf.bullTreeRoot,
+      count: payload.currentOwner!.leaf.activeBullCount,
+      power: payload.currentOwner!.leaf.totalBuckPower,
+    });
+
+    // 5. Stage the BullProofBuffer with the removal payload.
+    const [pendingRandomness] = deriveRandomness(
+      rodeoCoreProgram.programId,
+      position,
+      1,
+      actionNonce,
+    );
+    const nonce = new BN(2);
+    const payloadBytes = serializeBullProofPayload(payload);
+    const staged = await stageBullProofBuffer(
+      rodeoCoreProgram,
+      globalConfig,
+      position,
+      pendingRandomness,
+      prover,
+      nonce,
+      { unstake: {} },
+      payloadBytes,
+    );
+
+    const bufferInfo = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfo).not.toBeNull();
+    const bufferLamportsBefore = bufferInfo!.lamports;
+    const bufferDataLenBefore = bufferInfo!.data.length;
+    const bufferAccount = await rodeoAccounts(rodeoCoreProgram).bullProofBuffer.fetch(staged.bufferPda);
+    expect(bufferAccount.consumed).toBe(false);
+    expect(bufferAccount.finalized).toBe(true);
+    expect(bufferAccount.refundRecipient.equals(prover.publicKey)).toBe(true);
+
+    // 6. Capture pre-settlement balances and state.
+    const playerRodeoAccount = getAssociatedTokenAddressSync(rodeoMint, player.publicKey);
+    const playerAnsemAccount = await createAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      ansemMint,
+      player.publicKey,
+    );
+    const playerBalanceBeforeSettle = await getLamportBalance(provider, player.publicKey);
+    const proverBalanceBeforeSettle = await getLamportBalance(provider, prover.publicKey);
+    const receiptFunder = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    )[0];
+    const receiptFunderBefore = await getLamportBalance(provider, receiptFunder);
+    const playerRodeoBefore = await getAccount(provider.connection, playerRodeoAccount);
+    const principalVaultBefore = await getAccount(provider.connection, principalVault);
+    const rodeoMintInfoBefore = await getMint(provider.connection, rodeoMint);
+    const playerAnsemBefore = await getAccount(provider.connection, playerAnsemAccount);
+    const rewardVaultBefore = await getAccount(provider.connection, rewardVault);
+
+    // 7. Settle the real Bull unstake with the proof buffer and independent prover refund.
+    await settleUnstake(positionId, actionNonce, payer, {
+      bufferPda: staged.bufferPda,
+      refundRecipient: staged.refundRecipient,
+    }, {
+      ownerRodeoAccount: playerRodeoAccount,
+      ownerAnsemAccount: playerAnsemAccount,
+    });
+
+    const actionNonceOut = actionNonce;
+
+    // 8. Update tracker after successful removal.
+    bullRegistryTracker.unregisterBull(player.publicKey, position);
+    await assertTrackerMatchesChain();
+
+    return {
+      position,
+      pendingRandomness,
+      bufferPda: staged.bufferPda,
+      bufferLamportsBefore,
+      bufferDataLenBefore,
+      payloadBytes,
+      playerBalanceBeforeSettle,
+      proverBalanceBeforeSettle,
+      receiptFunderBefore,
+      playerRodeoBefore,
+      principalVaultBefore,
+      rodeoMintInfoBefore,
+      playerAnsemBefore,
+      rewardVaultBefore,
+      playerRodeoAccount,
+      playerAnsemAccount,
+      receiptFunder,
+      claimable,
+      bullPower: pos.buckPower,
+      actionNonce: actionNonceOut,
+    } as any;
+  }
+
+
+  /**
+   * Build and stage a Bull removal proof for an already-requested Unstake.
+   * Returns the staged buffer plus the position and pending randomness PDAs.
+   */
+  async function buildAndStageUnstakeProof(
+    positionId: BN,
+    actionNonce: BN,
+    player: web3.Keypair,
+    prover: web3.Keypair,
+    nonce: BN,
+  ): Promise<{
+    staged: StagedBullProof;
+    position: web3.PublicKey;
+    pendingRandomness: web3.PublicKey;
+    bullPower: BN;
+    bufferLamportsBefore: number;
+  }> {
+    const { position } = await deriveStakeAccounts(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const [pendingRandomness] = deriveRandomness(
+      rodeoCoreProgram.programId,
+      position,
+      1,
+      actionNonce,
+    );
+
+    // Synchronize tracker and assert parity before proof generation.
+    await syncTrackerWithChain();
+
+    // Build and locally verify the current removal proof.
+    const registry = bullRegistryTracker.buildRegistry();
+    const payload = buildUnstakePayload(registry, player.publicKey, position);
+    expect(payload.schemaVersion).toBe(2);
+    expect(payload.sectionBitmap).toBe(0x28); // CURRENT_OWNER | REMOVE_BULL
+    expect(payload.currentOwner).not.toBeNull();
+    expect(payload.removeBull).not.toBeNull();
+    expect(payload.currentOwner!.leaf.owner.equals(player.publicKey)).toBe(true);
+    expect(payload.currentOwner!.leaf.activeBullCount).toBeGreaterThan(0n);
+    expect(payload.removeBull!.leaf.position.equals(position)).toBe(true);
+    expect(payload.removeBull!.leaf.owner.equals(player.publicKey)).toBe(true);
+    expect(payload.removeBull!.leaf.buckPower).toBe(pos.buckPower);
+    expect(payload.removeBull!.leaf.revealConfigVersion).toBe(BigInt(pos.revealConfigVersion.toString()));
+
+    // Verify the owner proof hashes to the current BullRegistry root.
+    verifyOwnerProof(player.publicKey, payload.currentOwner!, registry.rootNode);
+    // Verify the remove-bull proof hashes to the bull tree root committed by the owner leaf.
+    verifyBullProof(position, payload.removeBull!, {
+      hash: payload.currentOwner!.leaf.bullTreeRoot,
+      count: payload.currentOwner!.leaf.activeBullCount,
+      power: payload.currentOwner!.leaf.totalBuckPower,
+    });
+
+    // Stage the BullProofBuffer with the removal payload.
+    const payloadBytes = serializeBullProofPayload(payload);
+    const staged = await stageBullProofBuffer(
+      rodeoCoreProgram,
+      globalConfig,
+      position,
+      pendingRandomness,
+      prover,
+      nonce,
+      { unstake: {} },
+      payloadBytes,
+    );
+
+    const bufferInfo = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfo).not.toBeNull();
+    const bufferLamportsBefore = bufferInfo!.lamports;
+
+    return { staged, position, pendingRandomness, bullPower: pos.buckPower, bufferLamportsBefore };
+  }
 
   async function deriveStakeAccounts(positionId: BN) {
     const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
@@ -465,6 +919,8 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       globalConfigAccount.currentConfigVersion,
     );
 
+    await syncTrackerWithChain();
+
     try {
       await rodeoCoreProgram.methods
         .stakeAndCommit(positionId, amount)
@@ -492,10 +948,18 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       nextPositionId = gameAfter.nextPositionId.toNumber();
     }
 
+    // Snapshot the BullRegistry state at stake time so that later reveals can
+    // build historical proofs for mint-theft even if the tracker has advanced.
+    positionRevealSnapshots.set(position.toBase58(), cloneRegistryEntries(bullRegistryTracker.getEntries()));
+
     return { position, pendingRandomness, protocolConfig };
   }
 
-  async function settleReveal(positionId: BN, settler = payer) {
+  async function settleReveal(
+    positionId: BN,
+    settler = payer,
+    bullProof?: { bufferPda: web3.PublicKey; refundRecipient: web3.PublicKey } | null,
+  ) {
     const { position, pendingRandomness } = await deriveStakeAccounts(positionId);
     const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     const pendingRandomnessAccount = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(
@@ -514,28 +978,106 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       [Buffer.from("receipt-funder"), position.toBuffer()],
       rodeoCoreProgram.programId,
     );
-    await rodeoCoreProgram.methods
-      .settleReveal()
-      .accounts({
-        settler: settler.publicKey,
+    const [bullRegistryPda] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+
+    // The canonical helper must stage the exact proof payload production needs:
+    // simple current-only before theft eligibility, historical-victim after the
+    // threshold, and the full five-section payload when mint theft is selected.
+    let effectiveBullProof = bullProof;
+    let autoStagedBullProof = false;
+    if (
+      effectiveBullProof === undefined &&
+      expectedRevealRole(position, pendingRandomnessAccount.actionNonce, pendingRandomnessAccount.committedProtocolEpoch) === "bull"
+    ) {
+      await syncTrackerWithChain();
+      const { payload } = await buildRevealPayloadForPosition(position, pos, pendingRandomnessAccount);
+      const payloadBytes = serializeBullProofPayload(payload);
+      const nonce = new BN(1);
+      const staged = await stageBullProofBuffer(
+        rodeoCoreProgram,
         globalConfig,
-        globalGameState,
-        rewardState,
-        bullAccumulator,
         position,
         pendingRandomness,
-        protocolConfig,
-        owner: pos.owner,
-        receiptAsset,
-        receiptCollection,
-        receiptAuthority,
-        receiptFunder,
-        providerRandomnessAccount: web3.SYSVAR_RENT_PUBKEY,
-        mplCoreProgram: MPL_CORE_PROGRAM_ID,
-        systemProgram: web3.SystemProgram.programId,
-        clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
+        settler,
+        nonce,
+        { reveal: {} },
+        payloadBytes,
+      );
+      effectiveBullProof = { bufferPda: staged.bufferPda, refundRecipient: staged.refundRecipient };
+      autoStagedBullProof = true;
+    }
+
+    const accounts: Record<string, web3.PublicKey | null> = {
+      settler: settler.publicKey,
+      globalConfig,
+      globalGameState,
+      rewardState,
+      bullAccumulator,
+      bullRegistry: bullRegistryPda,
+      position,
+      pendingRandomness,
+      protocolConfig,
+      owner: pos.owner,
+      receiptOwner: pos.owner,
+      receiptAsset,
+      receiptCollection,
+      receiptAuthority,
+      receiptFunder,
+      providerRandomnessAccount: web3.SYSVAR_RENT_PUBKEY,
+      mplCoreProgram: MPL_CORE_PROGRAM_ID,
+      systemProgram: web3.SystemProgram.programId,
+      clock: web3.SYSVAR_CLOCK_PUBKEY,
+      // Anchor 0.31.1 resolves an explicitly-null optional account to the
+      // program id, which the instruction builder treats as omitted.  This lets
+      // proofless reveals omit the buffer/refund pair, while Bull reveals supply
+      // both accounts.
+      bullProofBuffer: effectiveBullProof ? effectiveBullProof.bufferPda : null,
+      refundRecipient: effectiveBullProof ? effectiveBullProof.refundRecipient : null,
+    };
+    const preInstructions = effectiveBullProof
+      ? [web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 })]
+      : [];
+    await rodeoCoreProgram.methods
+      .settleReveal()
+      .accounts(accounts as any)
+      .preInstructions(preInstructions)
       .signers([settler])
+      .rpc();
+
+    // If this helper auto-staged and settled a Bull proof, update the
+    // off-chain tracker so later proof generation stays in sync with the
+    // canonical chain state.  Callers that supplied their own proof are
+    // responsible for updating the tracker themselves.
+    if (autoStagedBullProof) {
+      const settledPos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+      if (settledPos.role.bull) {
+      const actualBull: BullLeaf = {
+        position,
+        positionId: BigInt(positionId.toString()),
+        owner: settledPos.owner,
+        buckPower: settledPos.buckPower,
+        revealConfigVersion: BigInt(settledPos.revealConfigVersion.toString()),
+      };
+      bullRegistryTracker.registerBull(settledPos.owner, actualBull);
+    }
+  }
+  }
+
+  async function fixtureSetCompletedReveals(total: number) {
+    const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    await rodeoCoreProgram.methods
+      .testFixtureSetGlobalGameState(
+        new BN(total),
+        game.nextPositionId,
+        game.activeBullCount,
+        game.totalActiveBullPower,
+      )
+      .accounts({
+        authority: payer.publicKey,
+        globalConfig,
+        globalGameState,
+      })
+      .signers([payer])
       .rpc();
   }
 
@@ -818,8 +1360,45 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     if (!positionId.eq(game.nextPositionId)) {
       await fixtureAdvanceNextPositionId(positionId);
     }
-    await stakeAndCommit(positionId);
-    await settleReveal(positionId);
+    const { pendingRandomness } = await stakeAndCommit(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
+
+    // Always stage the canonical reveal payload.  It may be empty for a Cowboy
+    // before the theft threshold, but once the threshold is crossed every reveal
+    // needs at least a victim-owner historical proof.
+    await syncTrackerWithChain();
+    const { payload } = await buildRevealPayloadForPosition(position, pos, pending);
+    const payloadBytes = serializeBullProofPayload(payload);
+    const staged = await stageBullProofBuffer(
+      rodeoCoreProgram,
+      globalConfig,
+      position,
+      pendingRandomness,
+      payer,
+      new BN(1),
+      { reveal: {} },
+      payloadBytes,
+    );
+
+    await settleReveal(positionId, payer, {
+      bufferPda: staged.bufferPda,
+      refundRecipient: staged.refundRecipient,
+    });
+
+    // Update the off-chain tracker only when the chain confirms a Bull.
+    const posAfter = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    if (posAfter.role.bull) {
+      const actualBull: BullLeaf = {
+        position,
+        positionId: BigInt(positionId.toString()),
+        owner: posAfter.owner,
+        buckPower: posAfter.buckPower,
+        revealConfigVersion: BigInt(posAfter.revealConfigVersion.toString()),
+      };
+      bullRegistryTracker.registerBull(posAfter.owner, actualBull);
+      await assertTrackerMatchesChain();
+    }
   }
 
   /**
@@ -943,27 +1522,37 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     return new Uint8Array(createHash("sha256").update(preimage).digest());
   }
 
-  function expectedRevealRole(position: web3.PublicKey, config = PROTOCOL_CONFIG_V1): "cowboy" | "bull" {
-    const randomOutput = deriveMockCommitment(position, 0, new BN(0), new BN(0));
+  function expectedRevealRole(
+    position: web3.PublicKey,
+    actionNonce: BN,
+    protocolEpoch: BN,
+    config = PROTOCOL_CONFIG_V1,
+  ): "cowboy" | "bull" {
+    const randomOutput = deriveMockCommitment(position, 0, actionNonce, protocolEpoch);
     return mapRole(
       {
         randomOutput,
         domain: RandomnessDomain.Role,
         position: position.toBuffer(),
-        actionNonce: 0n,
+        actionNonce: BigInt(actionNonce.toString()),
       },
       config,
     ) as "cowboy" | "bull";
   }
 
-  function expectedCowboyKind(position: web3.PublicKey, config = PROTOCOL_CONFIG_V1): string {
-    const randomOutput = deriveMockCommitment(position, 0, new BN(0), new BN(0));
+  function expectedCowboyKind(
+    position: web3.PublicKey,
+    actionNonce: BN,
+    protocolEpoch: BN,
+    config = PROTOCOL_CONFIG_V1,
+  ): string {
+    const randomOutput = deriveMockCommitment(position, 0, actionNonce, protocolEpoch);
     return mapCowboyKind(
       {
         randomOutput,
         domain: RandomnessDomain.CowboyKind,
         position: position.toBuffer(),
-        actionNonce: 0n,
+        actionNonce: BigInt(actionNonce.toString()),
       },
       config,
     );
@@ -985,6 +1574,246 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       },
       config,
     );
+  }
+
+  function configAtStake(configVersion: BN): typeof PROTOCOL_CONFIG_V1 {
+    if (configVersion.eqn(1)) return PROTOCOL_CONFIG_V1;
+    if (configVersion.eqn(2)) return PROTOCOL_CONFIG_V2;
+    throw new Error(`Unsupported protocol config version ${configVersion.toString()}`);
+  }
+
+  function buildHistoricalRegistry(position: web3.PublicKey): BuiltRegistry {
+    const snapshot = positionRevealSnapshots.get(position.toBase58());
+    if (!snapshot) {
+      throw new Error(`No reveal snapshot for position ${position.toBase58()}`);
+    }
+    return buildRegistry(snapshot);
+  }
+
+  function predictReveal(
+    randomOutput: Uint8Array,
+    position: web3.PublicKey,
+    actionNonce: BN,
+    config: typeof PROTOCOL_CONFIG_V1,
+  ) {
+    const posBytes = position.toBuffer();
+    const nonce = BigInt(actionNonce.toString());
+    const role = mapRole(
+      { randomOutput, domain: RandomnessDomain.Role, position: posBytes, actionNonce: nonce },
+      config,
+    );
+    const suit = mapSuit(
+      { randomOutput, domain: RandomnessDomain.Suit, position: posBytes, actionNonce: nonce },
+      config,
+    );
+    if (role === "cowboy") {
+      const cowboyKind = mapCowboyKind(
+        { randomOutput, domain: RandomnessDomain.CowboyKind, position: posBytes, actionNonce: nonce },
+        config,
+      );
+      return { role, suit, cowboyKind };
+    }
+    const tier = mapBullTier(
+      { randomOutput, domain: RandomnessDomain.BullTier, position: posBytes, actionNonce: nonce },
+      config,
+    );
+    const power = config.bullBuckPowers[Number(tier.replace("tier", "")) - 1];
+    return { role, suit, bullTier: Number(tier.replace("tier", "")), buckPower: power };
+  }
+
+  async function buildRevealPayloadForPosition(
+    positionAddr: web3.PublicKey,
+    pos: PositionAccount,
+    pending: PendingRandomnessAccount,
+  ): Promise<{ payload: any; finalOwner: web3.PublicKey; stolen: boolean; selectedBull: BullLeaf | null }> {
+    const randomOutput = deriveMockCommitment(
+      positionAddr,
+      0,
+      pending.actionNonce,
+      pending.committedProtocolEpoch,
+    );
+    const protocolConfig = configAtStake(pending.configVersionSnapshot);
+    const predicted = predictReveal(randomOutput, positionAddr, pending.actionNonce, protocolConfig);
+
+    const historicalRegistry = buildHistoricalRegistry(positionAddr);
+    const currentRegistry = bullRegistryTracker.buildRegistry();
+
+    const completedReveals = (await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState))
+      .totalCompletedReveals.toNumber();
+    const minRevealsForTheft = Number(protocolConfig.minRevealsForTheft);
+    const minBullsForTheft = Number(protocolConfig.minBullsForTheft);
+
+    let finalOwner = pos.owner;
+    let stolen = false;
+    let selectedBull: BullLeaf | null = null;
+
+    let currentOwnerProof: any = null;
+    let currentBullProof: any = null;
+    if (predicted.role === "bull") {
+      const newBull: BullLeaf = {
+        position: positionAddr,
+        positionId: BigInt(pos.positionId.toString()),
+        owner: finalOwner,
+        buckPower: predicted.buckPower,
+        revealConfigVersion: BigInt(pending.configVersionSnapshot.toString()),
+      };
+      currentOwnerProof = ownerProof(currentRegistry, finalOwner);
+      currentBullProof = bullProof(currentRegistry, finalOwner, positionAddr);
+    }
+
+    if (completedReveals >= minRevealsForTheft) {
+      const vproof = ownerProof(historicalRegistry, pos.owner);
+      const victimPrefix = sparseProofPrefix(pos.owner.toBuffer(), vproof.proof, PREFIX_BULL_OWNER_NODE);
+      const victimCount = vproof.proof.leaf.count;
+      const victimPower = vproof.proof.leaf.power;
+      const externalCount = historicalRegistry.rootNode.count - victimCount;
+      const externalPower = historicalRegistry.rootNode.power - victimPower;
+
+      if (externalCount >= BigInt(minBullsForTheft) && externalPower > 0n) {
+        const theft = mapMintTheftFlag(
+          {
+            randomOutput,
+            domain: RandomnessDomain.MintTheft,
+            position: positionAddr.toBuffer(),
+            actionNonce: BigInt(pending.actionNonce.toString()),
+          },
+          protocolConfig,
+        );
+        if (theft) {
+          const ownerTarget = rejectionSampleDraw(
+            { denominator: externalPower, entries: [{ outcome: "only", weight: externalPower }] },
+            {
+              randomOutput,
+              domain: RandomnessDomain.OwnerSelection,
+              position: positionAddr.toBuffer(),
+              actionNonce: BigInt(pending.actionNonce.toString()),
+            },
+          );
+          const safeOwnerTarget = skipVictimInterval(ownerTarget, victimPrefix, victimPower);
+          const selectedOwner = findOwnerByTarget(historicalRegistry, safeOwnerTarget);
+
+          const oproof = ownerProof(historicalRegistry, selectedOwner);
+          const selectedOwnerPower = oproof.proof.leaf.power;
+          const bullTarget = rejectionSampleDraw(
+            { denominator: selectedOwnerPower, entries: [{ outcome: "only", weight: selectedOwnerPower }] },
+            {
+              randomOutput,
+              domain: RandomnessDomain.BullSelection,
+              position: positionAddr.toBuffer(),
+              actionNonce: BigInt(pending.actionNonce.toString()),
+            },
+          );
+          selectedBull = findBullByTarget(historicalRegistry, selectedOwner, bullTarget);
+          finalOwner = selectedBull.owner;
+          stolen = true;
+
+          if (predicted.role === "bull") {
+            const newBull: BullLeaf = {
+              position: positionAddr,
+              positionId: BigInt(pos.positionId.toString()),
+              owner: finalOwner,
+              buckPower: predicted.buckPower,
+              revealConfigVersion: BigInt(pending.configVersionSnapshot.toString()),
+            };
+            return {
+              payload: buildFullTheftRevealPayload(
+                historicalRegistry,
+                currentRegistry,
+                pos.owner,
+                selectedBull.owner,
+                selectedBull.position,
+                newBull,
+              ),
+              finalOwner,
+              stolen,
+              selectedBull,
+            };
+          }
+
+          return {
+            payload: buildTheftRevealPayload(
+              historicalRegistry,
+              pos.owner,
+              selectedBull.owner,
+              selectedBull.position,
+            ),
+            finalOwner,
+            stolen,
+            selectedBull,
+          };
+        } else {
+          const vproof2 = ownerProof(historicalRegistry, pos.owner);
+          return {
+            payload: {
+              schemaVersion: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+              sectionBitmap:
+                SECTION_VICTIM_OWNER |
+                (predicted.role === "bull" ? SECTION_CURRENT_OWNER | SECTION_CURRENT_BULL : 0),
+              victimOwner: vproof2,
+              selectedOwner: null,
+              selectedBull: null,
+              currentOwner: currentOwnerProof,
+              currentBull: currentBullProof,
+              removeBull: null,
+            },
+            finalOwner,
+            stolen,
+            selectedBull,
+          };
+        }
+      } else {
+        const vproof2 = ownerProof(historicalRegistry, pos.owner);
+        return {
+          payload: {
+            schemaVersion: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+            sectionBitmap:
+              SECTION_VICTIM_OWNER |
+              (predicted.role === "bull" ? SECTION_CURRENT_OWNER | SECTION_CURRENT_BULL : 0),
+            victimOwner: vproof2,
+            selectedOwner: null,
+            selectedBull: null,
+            currentOwner: currentOwnerProof,
+            currentBull: currentBullProof,
+            removeBull: null,
+          },
+          finalOwner,
+          stolen,
+          selectedBull,
+        };
+      }
+    }
+
+    if (predicted.role === "bull") {
+      const newBull: BullLeaf = {
+        position: positionAddr,
+        positionId: BigInt(pos.positionId.toString()),
+        owner: finalOwner,
+        buckPower: predicted.buckPower,
+        revealConfigVersion: BigInt(pending.configVersionSnapshot.toString()),
+      };
+      return {
+        payload: buildRevealPayload(currentRegistry, newBull),
+        finalOwner,
+        stolen,
+        selectedBull,
+      };
+    }
+
+    return {
+      payload: {
+        schemaVersion: BULL_PROOF_PAYLOAD_SCHEMA_VERSION,
+        sectionBitmap: 0,
+        victimOwner: null,
+        selectedOwner: null,
+        selectedBull: null,
+        currentOwner: null,
+        currentBull: null,
+        removeBull: null,
+      },
+      finalOwner,
+      stolen,
+      selectedBull,
+    };
   }
 
   async function prepareUnstakeReadyPositionById(
@@ -1023,17 +1852,22 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     maxAttempts = 1000,
   ): Promise<{ positionId: BN; position: web3.PublicKey; role: string; cowboyKind: string; stolen: boolean }> {
     const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     let candidate = game.nextPositionId.toNumber();
     for (let i = 0; i < maxAttempts; i++) {
       const positionId = new BN(candidate);
       const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
-      const role = expectedRevealRole(position);
+      const role = expectedRevealRole(position, new BN(0), reward.currentEpoch);
       if (role !== "cowboy") {
         candidate++;
         continue;
       }
-      const cowboyKind = expectedCowboyKind(position);
-      const stolen = expectedUnstakeTheftFlag(position, new BN(1), new BN(0));
+      const cowboyKind = expectedCowboyKind(position, new BN(0), reward.currentEpoch);
+      const stolen = expectedUnstakeTheftFlag(
+        position,
+        new BN(1),
+        reward.currentEpoch,
+      );
       if (predicate(positionId, position, role, cowboyKind, stolen)) {
         nextPositionId = candidate + 1;
         return { positionId, position, role, cowboyKind, stolen };
@@ -1045,11 +1879,21 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
 
   async function findBullPosition(maxAttempts = 100): Promise<{ positionId: BN; position: web3.PublicKey }> {
     const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     let candidate = game.nextPositionId.toNumber();
     for (let i = 0; i < maxAttempts; i++) {
       const positionId = new BN(candidate);
       const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
-      if (expectedRevealRole(position) === "bull") {
+      const role = expectedRevealRole(position, new BN(0), reward.currentEpoch);
+      if (role === "bull") {
+        writeFileSync(
+          `/tmp/find-bull-position-${positionId.toString()}.json`,
+          JSON.stringify(
+            { position: position.toBase58(), protocolEpoch: reward.currentEpoch.toString(), actionNonce: "0", role },
+            null,
+            2,
+          ),
+        );
         nextPositionId = candidate + 1;
         return { positionId, position };
       }
@@ -1063,17 +1907,18 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     maxAttempts = 10000,
   ): Promise<{ positionId: BN; position: web3.PublicKey }> {
     const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     let candidate = game.nextPositionId.toNumber();
     const desiredKind =
       cowboyKindCode === 254 ? "desperado" : `rank${cowboyKindCode}`;
     for (let i = 0; i < maxAttempts; i++) {
       const positionId = new BN(candidate);
       const [position] = derivePosition(rodeoCoreProgram.programId, globalConfig, positionId);
-      if (expectedRevealRole(position) !== "cowboy") {
+      if (expectedRevealRole(position, new BN(0), reward.currentEpoch) !== "cowboy") {
         candidate++;
         continue;
       }
-      if (expectedCowboyKind(position) === desiredKind) {
+      if (expectedCowboyKind(position, new BN(0), reward.currentEpoch) === desiredKind) {
         nextPositionId = candidate + 1;
         return { positionId, position };
       }
@@ -1108,6 +1953,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         pendingRandomness,
         rewardState,
         bullAccumulator,
+        providerRandomnessAccount: payer.publicKey,
         systemProgram: web3.SystemProgram.programId,
         rent: web3.SYSVAR_RENT_PUBKEY,
         clock: web3.SYSVAR_CLOCK_PUBKEY,
@@ -1117,14 +1963,45 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     return { position, pendingRandomness, actionNonce };
   }
 
-  async function settleUnstake(positionId: BN, actionNonce: BN, settler = payer) {
+  async function settleUnstake(
+    positionId: BN,
+    actionNonce: BN,
+    settler = payer,
+    bullProof?: { bufferPda: web3.PublicKey; refundRecipient: web3.PublicKey; receiptFunder?: web3.PublicKey },
+    ownerAccounts?: { ownerRodeoAccount: web3.PublicKey; ownerAnsemAccount: web3.PublicKey },
+  ) {
     const { position } = await deriveStakeAccounts(positionId);
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
     const [pendingRandomness] = deriveRandomness(
       rodeoCoreProgram.programId,
       position,
       1,
       actionNonce,
     );
+
+    // Auto-stage a Bull unstake proof when the caller did not supply one and
+    // the position is a Bull. This keeps generic helpers like
+    // prepareUnstakeReadyPosition working with the production proof-buffer path.
+    if (!bullProof && pos.role.bull) {
+      await syncTrackerWithChain();
+      const payload = buildUnstakePayload(bullRegistryTracker.buildRegistry(), pos.owner, position);
+      const payloadBytes = serializeBullProofPayload(payload);
+      const staged = await stageBullProofBuffer(
+        rodeoCoreProgram,
+        globalConfig,
+        position,
+        pendingRandomness,
+        payer,
+        new BN(2),
+        { unstake: {} },
+        payloadBytes,
+      );
+      bullProof = {
+        bufferPda: staged.bufferPda,
+        refundRecipient: staged.refundRecipient,
+      };
+    }
+
     const pendingRandomnessAccount =
       await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
     const [protocolConfig] = deriveProtocolConfig(
@@ -1140,34 +2017,55 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       [Buffer.from("receipt-funder"), position.toBuffer()],
       rodeoCoreProgram.programId,
     );
+    const ownerRodeo = ownerAccounts?.ownerRodeoAccount ?? payerRodeoAccount;
+    const ownerAnsem = ownerAccounts?.ownerAnsemAccount ?? payerAnsemAccount;
+    const [bullRegistryPda] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+    const accounts: Record<string, web3.PublicKey | null> = {
+      settler: settler.publicKey,
+      globalConfig,
+      globalGameState,
+      rewardState,
+      bullAccumulator,
+      bullRegistry: bullRegistryPda,
+      position,
+      pendingRandomness,
+      protocolConfig,
+      principalVault,
+      rodeoMint,
+      ownerRodeoAccount: ownerRodeo,
+      rewardVault,
+      ownerAnsemAccount: ownerAnsem,
+      owner: pos.owner,
+      receiptAsset,
+      receiptCollection,
+      receiptAuthority,
+      receiptFunder: bullProof?.receiptFunder ?? receiptFunder,
+      providerRandomnessAccount: settler.publicKey,
+      mplCoreProgram: MPL_CORE_PROGRAM_ID,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: web3.SystemProgram.programId,
+      clock: web3.SYSVAR_CLOCK_PUBKEY,
+      // Anchor 0.31.1 resolves an explicitly-null optional account to the
+      // program id, which the instruction builder treats as omitted.  This lets
+      // proofless reveals omit the buffer/refund pair, while Bull reveals supply
+      // both accounts.
+      bullProofBuffer: bullProof ? bullProof.bufferPda : null,
+      refundRecipient: bullProof ? bullProof.refundRecipient : null,
+    };
+    const preInstructions = bullProof
+      ? [web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 })]
+      : [];
     await rodeoCoreProgram.methods
       .settleUnstake()
-      .accounts({
-        settler: settler.publicKey,
-        globalConfig,
-        globalGameState,
-        rewardState,
-        bullAccumulator,
-        position,
-        pendingRandomness,
-        protocolConfig,
-        principalVault,
-        rodeoMint,
-        ownerRodeoAccount: payerRodeoAccount,
-        rewardVault,
-        ownerAnsemAccount: payerAnsemAccount,
-        owner: payer.publicKey,
-        receiptAsset,
-        receiptCollection,
-        receiptAuthority,
-        receiptFunder,
-        mplCoreProgram: MPL_CORE_PROGRAM_ID,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: web3.SystemProgram.programId,
-        clock: web3.SYSVAR_CLOCK_PUBKEY,
-      })
+      .accounts(accounts as any)
+      .preInstructions(preInstructions)
       .signers([settler])
       .rpc();
+
+    if (pos.role.bull) {
+      bullRegistryTracker.unregisterBull(pos.owner, position);
+      await assertTrackerMatchesChain();
+    }
   }
 
   async function recoverUnstakeTimeout(positionId: BN, actionNonce: BN, caller = payer) {
@@ -1703,15 +2601,16 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
 
     while (attempts < 20) {
       attempts++;
-      const prep = await prepareUnstakeReadyPosition(new BN(0));
+      const { positionId: candidate } = await findBullPosition();
+      const prep = await prepareUnstakeReadyPositionById(candidate, new BN(0));
       if (prep.role === "bull") {
-        positionId = prep.positionId;
+        positionId = candidate;
         settleInfo = await requestUnstake(positionId);
         break;
       }
       // Close non-bull positions to keep state consistent.
-      const { pendingRandomness, actionNonce } = await requestUnstake(prep.positionId);
-      await settleUnstake(prep.positionId, actionNonce);
+      const { pendingRandomness, actionNonce } = await requestUnstake(candidate);
+      await settleUnstake(candidate, actionNonce);
     }
 
     if (!positionId || !settleInfo) {
@@ -2234,6 +3133,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     randomOutput: Uint8Array;
   }> {
     const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     let candidate = game.nextPositionId.toNumber();
     for (let i = 0; i < maxAttempts; i++) {
       const positionId = new BN(candidate);
@@ -2242,12 +3142,12 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         globalConfig,
         positionId,
       );
-      const role = expectedRevealRole(position, PROTOCOL_CONFIG_V1);
+      const role = expectedRevealRole(position, new BN(0), reward.currentEpoch, PROTOCOL_CONFIG_V1);
       if (role !== "cowboy") {
         candidate++;
         continue;
       }
-      const cowboyKind = expectedCowboyKind(position, PROTOCOL_CONFIG_V1);
+      const cowboyKind = expectedCowboyKind(position, new BN(0), reward.currentEpoch, PROTOCOL_CONFIG_V1);
       if (cowboyKind === "desperado") {
         candidate++;
         continue;
@@ -2255,7 +3155,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       const v1Stolen = expectedUnstakeTheftFlag(
         position,
         new BN(1),
-        new BN(0),
+        reward.currentEpoch,
         PROTOCOL_CONFIG_V1,
       );
       if (v1Stolen) {
@@ -2265,7 +3165,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       const v2Stolen = expectedUnstakeTheftFlag(
         position,
         new BN(1),
-        new BN(0),
+        reward.currentEpoch,
         PROTOCOL_CONFIG_V2,
       );
       if (!v2Stolen) {
@@ -2273,7 +3173,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         continue;
       }
       nextPositionId = candidate + 1;
-      const randomOutput = deriveMockCommitment(position, 1, new BN(1), new BN(0));
+      const randomOutput = deriveMockCommitment(position, 1, new BN(1), reward.currentEpoch);
       return { positionId, position, randomOutput };
     }
     throw new Error("Could not find a V1-safe / V2-stolen Cowboy position");
@@ -2284,6 +3184,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     position: web3.PublicKey;
   }> {
     const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     let candidate = game.nextPositionId.toNumber();
     for (let i = 0; i < maxAttempts; i++) {
       const positionId = new BN(candidate);
@@ -2292,12 +3193,12 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
         globalConfig,
         positionId,
       );
-      const role = expectedRevealRole(position, PROTOCOL_CONFIG_V2);
+      const role = expectedRevealRole(position, new BN(0), reward.currentEpoch, PROTOCOL_CONFIG_V2);
       if (role !== "cowboy") {
         candidate++;
         continue;
       }
-      const cowboyKind = expectedCowboyKind(position, PROTOCOL_CONFIG_V2);
+      const cowboyKind = expectedCowboyKind(position, new BN(0), reward.currentEpoch, PROTOCOL_CONFIG_V2);
       if (cowboyKind === "desperado") {
         candidate++;
         continue;
@@ -2305,7 +3206,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       const stolen = expectedUnstakeTheftFlag(
         position,
         new BN(1),
-        new BN(0),
+        reward.currentEpoch,
         PROTOCOL_CONFIG_V2,
       );
       if (!stolen) {
@@ -2653,6 +3554,9 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     );
 
     const payout = rewardAfterBull.ansemClaimedAtomic.sub(rewardBeforeBull.ansemClaimedAtomic);
+    const orphanedReleased = rewardAfterBull.orphanedRewardReleasedAtomic.sub(
+      rewardBeforeBull.orphanedRewardReleasedAtomic,
+    );
     expect(payout.toString()).toBe(expectedPayout.toString());
     expect(payout.gtn(0)).toBe(true);
 
@@ -2660,7 +3564,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       new BN(ownerAnsemBeforeBull.amount.toString()).add(payout).toString(),
     );
     expect(rewardAfterBull.totalAnsemLiabilityAtomic.toString()).toBe(
-      rewardBeforeBull.totalAnsemLiabilityAtomic.sub(payout).toString(),
+      rewardBeforeBull.totalAnsemLiabilityAtomic.sub(payout).sub(orphanedReleased).toString(),
     );
     expect(rewardAfterBull.recognizedRewardBalanceAtomic.toString()).toBe(
       rewardBeforeBull.recognizedRewardBalanceAtomic.sub(payout).toString(),
@@ -2669,7 +3573,7 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
       rewardBeforeBull.positionClaimableLiabilityAtomic.toString(),
     );
     expect(rewardAfterBull.bullPoolLiabilityAtomic.toString()).toBe(
-      rewardBeforeBull.bullPoolLiabilityAtomic.sub(payout).toString(),
+      rewardBeforeBull.bullPoolLiabilityAtomic.sub(payout).sub(orphanedReleased).toString(),
     );
 
     expect(gameAfterBull.activeBullCount.toString()).toBe(
@@ -3051,5 +3955,1638 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     });
   }, 180_000);
 
-});
 
+
+  it("production Bull reveal: proof-buffer lifecycle, registry mutation, receipt, and refund", async () => {
+    // Independent player (A) and prover (B).
+    const player = web3.Keypair.generate();
+    const prover = web3.Keypair.generate();
+
+    // Fund player for staking and prover for buffer rent/fees.
+    const fundIxA = web3.SystemProgram.transfer({
+      fromPubkey: payer.publicKey,
+      toPubkey: player.publicKey,
+      lamports: 1_000_000_000,
+    });
+    const fundIxB = web3.SystemProgram.transfer({
+      fromPubkey: payer.publicKey,
+      toPubkey: prover.publicKey,
+      lamports: 100_000_000,
+    });
+    await provider.sendAndConfirm(new web3.Transaction().add(fundIxA, fundIxB), [payer]);
+
+    // Fund player RODEO by creating an associated account and transferring
+    // from the payer's prefunded account. The mint authority was revoked in
+    // beforeAll, so mintTo is not available.
+    const playerRodeoAccount = await createAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      rodeoMint,
+      player.publicKey,
+    );
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        createTransferInstruction(payerRodeoAccount, playerRodeoAccount, payer.publicKey, 100_000_000_000n),
+      ),
+      [payer],
+    );
+
+    // Pre-reveal BullRegistry state from chain and tracker parity.
+    const [registryPda] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+    const registryBefore = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    const beforeRoot = new Uint8Array(registryBefore.ownerTreeRoot);
+    const beforeCount = BigInt(registryBefore.totalBullCount.toString());
+    const beforePower = BigInt(registryBefore.totalBuckPower.toString());
+    const beforeVersion = BigInt(registryBefore.registryVersion.toString());
+    await syncTrackerWithChain();
+
+    // Find a position that deterministically reveals as Bull.
+    const { positionId, position } = await findBullPosition();
+
+    // Player stakes the position.
+    await stakeAndCommit(positionId, stakeAmountAtomic, playerRodeoAccount, player);
+
+    // Build, stage, and settle the real production Bull proof.
+    const staged = await revealBullWithProof(positionId, player, prover);
+
+    // Prover/player SOL pre-settlement captured inside revealBullWithProof.
+    const proverBalanceBeforeSettle = staged.proverBalanceBeforeSettle;
+    const playerBalanceBeforeSettle = staged.playerBalanceBeforeSettle;
+
+    const bufferLamportsBefore = staged.bufferLamportsBefore;
+    const bufferDataLenBefore = staged.bufferDataLenBefore;
+    const bufferAccountBefore = staged.bufferAccount;
+    expect(bufferAccountBefore.consumed).toBe(false);
+    expect(bufferAccountBefore.finalized).toBe(true);
+    expect(bufferAccountBefore.refundRecipient.equals(prover.publicKey)).toBe(true);
+    expect(bufferAccountBefore.position.equals(position)).toBe(true);
+
+    // Assert Position is Bull and owner is player A.
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(pos.role.bull).toBeTruthy();
+    expect(pos.owner.equals(player.publicKey)).toBe(true);
+    expect(pos.buckPower).toBeGreaterThan(0);
+    expect(pos.revealConfigVersion.toString()).toBe("1");
+
+    // Assert BullRegistry mutation.
+    const registryAfter = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    expect(BigInt(registryAfter.totalBullCount.toString())).toBe(beforeCount + 1n);
+    expect(BigInt(registryAfter.totalBuckPower.toString())).toBe(beforePower + BigInt(pos.buckPower));
+    expect(BigInt(registryAfter.registryVersion.toString())).toBe(beforeVersion + 1n);
+    expect(Buffer.from(new Uint8Array(registryAfter.ownerTreeRoot)).equals(
+      Buffer.from(bullRegistryTracker.buildRegistry().rootNode.hash),
+    )).toBe(true);
+
+    // Assert tracker matches chain.
+    await assertTrackerMatchesChain();
+
+    // Assert owner membership proof in the resulting tree.
+    const ownerMembershipProof = ownerProof(bullRegistryTracker.buildRegistry(), player.publicKey);
+    expect(ownerMembershipProof.leaf.owner.equals(player.publicKey)).toBe(true);
+    expect(ownerMembershipProof.leaf.activeBullCount).toBe(1n);
+    expect(ownerMembershipProof.leaf.totalBuckPower).toBe(BigInt(pos.buckPower));
+
+    // Assert Bull membership proof in the resulting tree.
+    const bullMembershipProof = bullProof(bullRegistryTracker.buildRegistry(), player.publicKey, position);
+    expect(bullMembershipProof.leaf.position.equals(position)).toBe(true);
+    expect(bullMembershipProof.leaf.buckPower).toBe(pos.buckPower);
+    expect(bullMembershipProof.leaf.owner.equals(player.publicKey)).toBe(true);
+
+    // Assert MPL Core PositionReceipt exists with correct ownership and plugins.
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const receiptInfo = await provider.connection.getAccountInfo(receiptAsset);
+    expect(receiptInfo).not.toBeNull();
+    expect(receiptInfo!.owner.equals(MPL_CORE_PROGRAM_ID)).toBe(true);
+    // TODO: add specific plugin/owner assertions once MPL Core helpers are available.
+
+    // Assert the BullProofBuffer was closed and rent refunded to prover B.
+    const bufferInfoAfter = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoAfter).toBeNull();
+
+    const proverBalanceAfter = await getLamportBalance(provider, prover.publicKey);
+    const playerBalanceAfter = await getLamportBalance(provider, player.publicKey);
+
+    // Prover B must receive the full buffer rent, not just "at least" the seed funding.
+    const proverRefund = proverBalanceAfter - proverBalanceBeforeSettle;
+    const playerBalanceChange = playerBalanceAfter - playerBalanceBeforeSettle;
+    expect(proverRefund).toBe(bufferLamportsBefore);
+    // Prover B receives the entire buffer rent; player A does not.
+    expect(proverBalanceAfter).toBe(proverBalanceBeforeSettle + bufferLamportsBefore);
+    // Player A's balance changes only by small rent refunds/fees (e.g. the
+    // pending-randomness account is closed to them); it does NOT increase by the
+    // much larger buffer rent, which went to the prover.
+    expect(Math.abs(playerBalanceChange)).toBeLessThan(10_000_000);
+    expect(playerBalanceChange).toBeLessThan(bufferLamportsBefore);
+
+    console.log('BullProofBuffer close evidence:', {
+      bufferPda: staged.bufferPda.toBase58(),
+      bufferLamportsBefore,
+      bufferDataLenBefore,
+      bufferFinalized: bufferAccountBefore.finalized,
+      bufferConsumedBefore: bufferAccountBefore.consumed,
+      proverBalanceBeforeSettle,
+      proverBalanceAfter,
+      proverRefund,
+      playerBalanceBeforeSettle,
+      playerBalanceAfter,
+      playerBalanceChange,
+      receiptAsset: receiptAsset.toBase58(),
+    });
+
+    // Attempting to reuse the closed buffer must fail because it no longer exists.
+    await expect(
+      rodeoCoreProgram.methods
+        .settleReveal()
+        .accounts({
+          settler: player.publicKey,
+          globalConfig,
+          globalGameState,
+          rewardState,
+          bullAccumulator,
+          position,
+          pendingRandomness: staged.pendingRandomness,
+          protocolConfig: protocolConfigV1,
+          owner: player.publicKey,
+          receiptOwner: player.publicKey,
+          receiptAsset,
+          receiptCollection,
+          receiptAuthority,
+          receiptFunder: web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("receipt-funder"), position.toBuffer()],
+            rodeoCoreProgram.programId,
+          )[0],
+          providerRandomnessAccount: web3.SYSVAR_RENT_PUBKEY,
+          mplCoreProgram: MPL_CORE_PROGRAM_ID,
+          bullProofBuffer: staged.bufferPda,
+          refundRecipient: prover.publicKey,
+          systemProgram: web3.SystemProgram.programId,
+          clock: web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([player])
+        .rpc(),
+    ).rejects.toThrow();
+  }, 180_000);
+
+  it("production Bull unstake: final-bull removal, receipt burn, and proof-buffer refund", async () => {
+    // Independent player A and prover B.
+    const player = web3.Keypair.generate();
+    const prover = web3.Keypair.generate();
+
+    // Fund player for staking/fees and prover for buffer rent/fees.
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: player.publicKey,
+          lamports: 1_000_000_000,
+        }),
+        web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: prover.publicKey,
+          lamports: 100_000_000,
+        }),
+      ),
+      [payer],
+    );
+
+    // Pre-unstake BullRegistry state and tracker parity.
+    const [registryPda] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+    const registryBefore = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    const beforeRoot = new Uint8Array(registryBefore.ownerTreeRoot);
+    const beforeCount = BigInt(registryBefore.totalBullCount.toString());
+    const beforePower = BigInt(registryBefore.totalBuckPower.toString());
+    const beforeVersion = BigInt(registryBefore.registryVersion.toString());
+    await syncTrackerWithChain();
+
+    // Find a position that deterministically reveals as Bull, stake/reveal it,
+    // then unstake it with a real removal proof.
+    const { positionId, position } = await findBullPosition();
+    const playerRodeoAccount = await createAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      rodeoMint,
+      player.publicKey,
+    );
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        createTransferInstruction(payerRodeoAccount, playerRodeoAccount, payer.publicKey, 100_000_000_000n),
+      ),
+      [payer],
+    );
+    await stakeAndCommit(positionId, stakeAmountAtomic, playerRodeoAccount, player);
+    await revealBullWithProof(positionId, player, prover);
+
+    // Re-capture pre-unstake registry state after the Bull has been revealed.
+    const registryBeforeUnstake = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    const unstakeBeforeCount = BigInt(registryBeforeUnstake.totalBullCount.toString());
+    const unstakeBeforePower = BigInt(registryBeforeUnstake.totalBuckPower.toString());
+    const unstakeBeforeVersion = BigInt(registryBeforeUnstake.registryVersion.toString());
+    expect(unstakeBeforeCount).toBeGreaterThan(0n);
+    expect(unstakeBeforePower).toBeGreaterThan(0n);
+    await syncTrackerWithChain();
+
+    const claimable = new BN(1_000_000_000);
+    const unstake = await unstakeBullWithProof(positionId, player, prover, claimable);
+
+    // BullRegistry post-state: this Bull is removed and the owner tree root
+    // is independently reconstructed by the tracker.
+    const registryAfter = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    expect(BigInt(registryAfter.totalBullCount.toString())).toBe(unstakeBeforeCount - 1n);
+    expect(BigInt(registryAfter.totalBuckPower.toString())).toBe(unstakeBeforePower - BigInt(unstake.bullPower.toString()));
+    expect(BigInt(registryAfter.registryVersion.toString())).toBe(unstakeBeforeVersion + 1n);
+    expect(Buffer.from(new Uint8Array(registryAfter.ownerTreeRoot)).equals(
+      Buffer.from(bullRegistryTracker.buildRegistry().rootNode.hash),
+    )).toBe(true);
+    if (unstakeBeforeCount === 1n) {
+      expect(Buffer.from(new Uint8Array(registryAfter.ownerTreeRoot)).equals(
+        Buffer.from(emptyOwnerTreeRoot()),
+      )).toBe(true);
+    }
+
+    // Independent owner non-membership proof verifies against the resulting root.
+    const resultingRegistry = bullRegistryTracker.buildRegistry();
+    const ownerAbsenceProof = ownerProof(resultingRegistry, player.publicKey);
+    expect(ownerAbsenceProof.leaf.activeBullCount).toBe(0n);
+    expect(ownerAbsenceProof.leaf.totalBuckPower).toBe(0n);
+    verifyOwnerProof(player.publicKey, ownerAbsenceProof, resultingRegistry.rootNode);
+
+    // Position and pending randomness are closed.
+    const [pendingRandomness] = deriveRandomness(
+      rodeoCoreProgram.programId,
+      position,
+      1,
+      new BN(unstake.actionNonce.toString()),
+    );
+    expect(await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(position)).toBeNull();
+    expect(await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetchNullable(pendingRandomness)).toBeNull();
+
+    // MPL Core PositionReceipt is burned / no longer an active receipt.
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const receiptInfo = await provider.connection.getAccountInfo(receiptAsset);
+    // MPL Core BurnV1 leaves a 1-byte tombstone owned by the MPL Core program.
+    // The asset is no longer a usable PositionReceipt (discriminant 0x00).
+    expect(receiptInfo).not.toBeNull();
+    expect(receiptInfo!.owner.equals(MPL_CORE_PROGRAM_ID)).toBe(true);
+    expect(receiptInfo!.data.length).toBe(1);
+    expect(receiptInfo!.data[0]).toBe(0);
+
+    // BullProofBuffer closed and prover B refunded.
+    const bufferInfoAfter = await provider.connection.getAccountInfo(unstake.bufferPda);
+    expect(bufferInfoAfter === null || bufferInfoAfter.lamports === 0).toBe(true);
+    const proverBalanceAfter = await getLamportBalance(provider, prover.publicKey);
+    expect(proverBalanceAfter).toBe(unstake.proverBalanceBeforeSettle + unstake.bufferLamportsBefore);
+
+    // ReceiptFunder cleaned and refunded to the owner (player A).
+    const receiptFunderAfter = await getLamportBalance(provider, unstake.receiptFunder);
+    expect(receiptFunderAfter).toBe(0);
+    const playerBalanceAfter = await getLamportBalance(provider, player.publicKey);
+    expect(playerBalanceAfter - unstake.playerBalanceBeforeSettle).toBeGreaterThanOrEqual(unstake.receiptFunderBefore);
+
+    // RODEO 5/95 exit: 5% burned, 95% returned to owner.
+    const playerRodeoAfter = await getAccount(provider.connection, unstake.playerRodeoAccount);
+    const principalVaultAfter = await getAccount(provider.connection, principalVault);
+    const rodeoMintInfoAfter = await getMint(provider.connection, rodeoMint);
+    const returned = stakeAmountAtomic.muln(9_500).divn(10_000);
+    const burned = stakeAmountAtomic.sub(returned);
+    expect(new BN(playerRodeoAfter.amount.toString()).toString()).toBe(returned.toString());
+    expect(new BN(principalVaultAfter.amount.toString()).toString()).toBe(
+      new BN(unstake.principalVaultBefore.amount.toString()).sub(stakeAmountAtomic).toString(),
+    );
+    expect(rodeoMintInfoAfter.supply.toString()).toBe(
+      (BigInt(unstake.rodeoMintInfoBefore.supply.toString()) - BigInt(burned.toString())).toString(),
+    );
+
+    // Bull ANSEM immunity: all synchronized ANSEM goes to owner, none to bull pool.
+    const playerAnsemAfter = await getAccount(provider.connection, unstake.playerAnsemAccount);
+    expect(new BN(playerAnsemAfter.amount.toString()).toString()).toBe(
+      new BN(unstake.playerAnsemBefore.amount.toString()).add(claimable).toString(),
+    );
+    const rewardVaultAfter = await getAccount(provider.connection, rewardVault);
+    expect(new BN(rewardVaultAfter.amount.toString()).toString()).toBe(
+      new BN(unstake.rewardVaultBefore.amount.toString()).sub(claimable).toString(),
+    );
+
+    // Replay of the same settle_unstake must be rejected.
+    await expect(
+      settleUnstake(positionId, new BN(unstake.actionNonce.toString()), payer, {
+        bufferPda: unstake.bufferPda,
+        refundRecipient: prover.publicKey,
+      }, {
+        ownerRodeoAccount: unstake.playerRodeoAccount,
+        ownerAnsemAccount: unstake.playerAnsemAccount,
+      }),
+    ).rejects.toThrow();
+
+    console.log('Bull unstake final-bull removal evidence:', {
+      positionId: positionId.toString(),
+      position: position.toBase58(),
+      owner: player.publicKey.toBase58(),
+      prover: prover.publicKey.toBase58(),
+      bufferPda: unstake.bufferPda.toBase58(),
+      bufferLamportsBefore: unstake.bufferLamportsBefore,
+      bufferDataLenBefore: unstake.bufferDataLenBefore,
+      proverBalanceBeforeSettle: unstake.proverBalanceBeforeSettle,
+      proverBalanceAfter,
+      proverRefund: unstake.bufferLamportsBefore,
+      playerBalanceBeforeSettle: unstake.playerBalanceBeforeSettle,
+      playerBalanceAfter,
+      receiptFunderBefore: unstake.receiptFunderBefore,
+      receiptFunderLamportsAfter: receiptFunderAfter,
+      registryCountBefore: unstakeBeforeCount.toString(),
+      registryCountAfter: registryAfter.totalBullCount.toString(),
+      registryPowerBefore: unstakeBeforePower.toString(),
+      registryPowerAfter: registryAfter.totalBuckPower.toString(),
+      registryVersionBefore: unstakeBeforeVersion.toString(),
+      registryVersionAfter: registryAfter.registryVersion.toString(),
+      ownerTreeRootAfter: Buffer.from(new Uint8Array(registryAfter.ownerTreeRoot)).toString('hex'),
+      emptyOwnerTreeRoot: Buffer.from(emptyOwnerTreeRoot()).toString('hex'),
+      claimable: claimable.toString(),
+      returned: returned.toString(),
+      burned: burned.toString(),
+      playerAnsemReceived: claimable.toString(),
+      receiptAssetAfter: receiptInfo
+        ? { owner: receiptInfo.owner.toBase58(), lamports: receiptInfo.lamports, dataLen: receiptInfo.data.length }
+        : null,
+    });
+  }, 240_000);
+
+
+
+  it("production Bull unstake: owner-remains removal with a second Bull unchanged", async () => {
+    // Player A owns two live Bulls. Unstake one and assert A remains in the
+    // registry with exactly the remaining Bull.
+    const playerA = web3.Keypair.generate();
+    const proverA = web3.Keypair.generate();
+    const proverB = web3.Keypair.generate();
+
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: playerA.publicKey, lamports: 1_500_000_000 }),
+        web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: proverA.publicKey, lamports: 150_000_000 }),
+        web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: proverB.publicKey, lamports: 100_000_000 }),
+      ),
+      [payer],
+    );
+
+    // Capture registry state before creating A's Bulls.
+    const [registryPda] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+    const registryPre = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    const preCount = BigInt(registryPre.totalBullCount.toString());
+    const prePower = BigInt(registryPre.totalBuckPower.toString());
+    const preVersion = BigInt(registryPre.registryVersion.toString());
+
+    // Create A's first Bull using the production reveal flow.
+    const { positionId: positionId1, position: position1 } = await findBullPosition();
+    const playerARodeoAccount = await createAssociatedTokenAccount(provider.connection, payer, rodeoMint, playerA.publicKey);
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        createTransferInstruction(payerRodeoAccount, playerARodeoAccount, payer.publicKey, 200_000_000_000n),
+      ),
+      [payer],
+    );
+    await stakeAndCommit(positionId1, stakeAmountAtomic, playerARodeoAccount, playerA);
+    await revealBullWithProof(positionId1, playerA, proverA);
+
+    // Create A's second Bull with a different prover.
+    const { positionId: positionId2, position: position2 } = await findBullPosition();
+    await stakeAndCommit(positionId2, stakeAmountAtomic, playerARodeoAccount, playerA);
+    await revealBullWithProof(positionId2, playerA, proverB);
+
+    const pos1 = await rodeoAccounts(rodeoCoreProgram).position.fetch(position1);
+    const pos2 = await rodeoAccounts(rodeoCoreProgram).position.fetch(position2);
+    expect(BigInt(pos1.buckPower)).toBeGreaterThan(0n);
+    expect(BigInt(pos2.buckPower)).toBeGreaterThan(0n);
+
+    const registryBefore = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    const beforeCount = BigInt(registryBefore.totalBullCount.toString());
+    const beforePower = BigInt(registryBefore.totalBuckPower.toString());
+    const beforeVersion = BigInt(registryBefore.registryVersion.toString());
+    expect(beforeCount).toBe(preCount + 2n);
+    expect(beforePower).toBe(prePower + BigInt(pos1.buckPower) + BigInt(pos2.buckPower));
+    expect(beforeVersion).toBe(preVersion + 2n);
+
+    const ownerBullsBefore = bullRegistryTracker.getBulls(playerA.publicKey);
+    expect(ownerBullsBefore.length).toBe(2);
+    expect(ownerBullsBefore.some((b) => b.position.equals(position1))).toBe(true);
+    expect(ownerBullsBefore.some((b) => b.position.equals(position2))).toBe(true);
+
+    // Capture Bull #2 pre-state.
+    const [receiptAsset2] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position2.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const receiptInfo2Before = await provider.connection.getAccountInfo(receiptAsset2);
+    expect(receiptInfo2Before).not.toBeNull();
+    const receipt2OwnerBefore = receiptInfo2Before!.owner;
+    const receipt2DataLenBefore = receiptInfo2Before!.data.length;
+
+    // Prepare and request Unstake for Bull #1.
+    const claimable = new BN(1_000_000_000);
+    await fixturePreparePosition(positionId1, {
+      roleCode: 2,
+      cowboyKindCode: 0,
+      accrualWeight: pos1.accrualWeight,
+      buckPower: pos1.buckPower,
+      claimable,
+      positionClaimableLiabilityDelta: claimable,
+    });
+    await ensureRecognizedReserve(claimable);
+    const { actionNonce: actionNonce1 } = await requestUnstake(positionId1, playerA);
+
+    const playerAAnsemAccount = await createAssociatedTokenAccount(provider.connection, payer, ansemMint, playerA.publicKey);
+
+    // Build and stage the current removal proof for Bull #1.
+    const { staged, bufferLamportsBefore } = await buildAndStageUnstakeProof(
+      positionId1,
+      actionNonce1,
+      playerA,
+      proverA,
+      new BN(2),
+    );
+
+    // Pre-settlement balances.
+    const playerRodeoBefore = await getAccount(provider.connection, playerARodeoAccount);
+    const principalVaultBefore = await getAccount(provider.connection, principalVault);
+    const rodeoMintInfoBefore = await getMint(provider.connection, rodeoMint);
+    const playerAnsemBefore = await getAccount(provider.connection, playerAAnsemAccount);
+    const rewardVaultBefore = await getAccount(provider.connection, rewardVault);
+    const proverBalanceBeforeSettle = await getLamportBalance(provider, proverA.publicKey);
+
+    // Settle Bull #1 unstake.
+    await settleUnstake(positionId1, actionNonce1, payer, {
+      bufferPda: staged.bufferPda,
+      refundRecipient: staged.refundRecipient,
+    }, {
+      ownerRodeoAccount: playerARodeoAccount,
+      ownerAnsemAccount: playerAAnsemAccount,
+    });
+
+    // Update tracker and assert parity.
+    bullRegistryTracker.unregisterBull(playerA.publicKey, position1);
+    await assertTrackerMatchesChain();
+
+    const registryAfter = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    expect(BigInt(registryAfter.totalBullCount.toString())).toBe(beforeCount - 1n);
+    expect(BigInt(registryAfter.totalBuckPower.toString())).toBe(beforePower - BigInt(pos1.buckPower));
+    expect(BigInt(registryAfter.registryVersion.toString())).toBe(beforeVersion + 1n);
+    expect(Buffer.from(new Uint8Array(registryAfter.ownerTreeRoot)).equals(
+      Buffer.from(bullRegistryTracker.buildRegistry().rootNode.hash),
+    )).toBe(true);
+
+    // Owner A remains with exactly Bull #2.
+    const ownerBullsAfter = bullRegistryTracker.getBulls(playerA.publicKey);
+    expect(ownerBullsAfter.length).toBe(1);
+    expect(ownerBullsAfter[0].position.equals(position2)).toBe(true);
+    expect(ownerBullsAfter[0].buckPower).toBe(pos2.buckPower);
+
+    // Bull #1 must be absent.
+    expect(bullRegistryTracker.hasBull(playerA.publicKey, position1)).toBe(false);
+
+    // Bull #2 position unchanged.
+    const pos2After = await rodeoAccounts(rodeoCoreProgram).position.fetch(position2);
+    expect(pos2After.positionId.toString()).toBe(pos2.positionId.toString());
+    expect(pos2After.owner.equals(playerA.publicKey)).toBe(true);
+    expect(pos2After.buckPower).toBe(pos2.buckPower);
+    expect(pos2After.revealConfigVersion.toString()).toBe(pos2.revealConfigVersion.toString());
+    expect(pos2After.role.bull).toBeTruthy();
+
+    // Bull #2 receipt unchanged.
+    const receiptInfo2After = await provider.connection.getAccountInfo(receiptAsset2);
+    expect(receiptInfo2After).not.toBeNull();
+    expect(receiptInfo2After!.owner.equals(receipt2OwnerBefore)).toBe(true);
+    expect(receiptInfo2After!.data.length).toBe(receipt2DataLenBefore);
+
+    // Bull #1 full exit lifecycle.
+    const [pendingRandomness1] = deriveRandomness(
+      rodeoCoreProgram.programId,
+      position1,
+      1,
+      actionNonce1,
+    );
+    expect(await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(position1)).toBeNull();
+    expect(await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetchNullable(pendingRandomness1)).toBeNull();
+
+    const [receiptAsset1] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position1.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const receiptInfo1After = await provider.connection.getAccountInfo(receiptAsset1);
+    expect(receiptInfo1After).not.toBeNull();
+    expect(receiptInfo1After!.owner.equals(MPL_CORE_PROGRAM_ID)).toBe(true);
+    expect(receiptInfo1After!.data.length).toBe(1);
+    expect(receiptInfo1After!.data[0]).toBe(0);
+
+    // Buffer closed and prover refunded.
+    const bufferInfoAfter = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoAfter === null || bufferInfoAfter.lamports === 0).toBe(true);
+    const proverBalanceAfterSettle = await getLamportBalance(provider, proverA.publicKey);
+    expect(proverBalanceAfterSettle).toBe(proverBalanceBeforeSettle + bufferLamportsBefore);
+
+    // RODEO 5/95 and ANSEM immunity.
+    const returned = stakeAmountAtomic.muln(9_500).divn(10_000);
+    const burned = stakeAmountAtomic.sub(returned);
+    const playerRodeoAfter = await getAccount(provider.connection, playerARodeoAccount);
+    const principalVaultAfter = await getAccount(provider.connection, principalVault);
+    const rodeoMintInfoAfter = await getMint(provider.connection, rodeoMint);
+    const playerAnsemAfter = await getAccount(provider.connection, playerAAnsemAccount);
+    const rewardVaultAfter = await getAccount(provider.connection, rewardVault);
+
+    expect(new BN(playerRodeoAfter.amount.toString()).toString()).toBe(
+      new BN(playerRodeoBefore.amount.toString()).add(returned).toString(),
+    );
+    expect(new BN(principalVaultAfter.amount.toString()).toString()).toBe(
+      new BN(principalVaultBefore.amount.toString()).sub(stakeAmountAtomic).toString(),
+    );
+    expect(new BN(rodeoMintInfoAfter.supply.toString()).toString()).toBe(
+      new BN(rodeoMintInfoBefore.supply.toString()).sub(burned).toString(),
+    );
+    expect(new BN(playerAnsemAfter.amount.toString()).toString()).toBe(
+      new BN(playerAnsemBefore.amount.toString()).add(claimable).toString(),
+    );
+    expect(new BN(rewardVaultAfter.amount.toString()).toString()).toBe(
+      new BN(rewardVaultBefore.amount.toString()).sub(claimable).toString(),
+    );
+
+    // Replay rejected.
+    await expect(
+      settleUnstake(positionId1, actionNonce1, payer, {
+        bufferPda: staged.bufferPda,
+        refundRecipient: staged.refundRecipient,
+      }, {
+        ownerRodeoAccount: playerARodeoAccount,
+        ownerAnsemAccount: playerAAnsemAccount,
+      }),
+    ).rejects.toThrow();
+  }, 240_000);
+
+  it("production Bull unstake: stale current proof rejected after another Bull registry mutation, then fresh current proof succeeds", async () => {
+    // Player A owns Bull #1; prover A stages the proof.
+    // Player B owns Bull #2 to mutate the registry between staging and settlement.
+    const playerA = web3.Keypair.generate();
+    const proverA = web3.Keypair.generate();
+    const playerB = web3.Keypair.generate();
+    const proverB = web3.Keypair.generate();
+
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: playerA.publicKey, lamports: 1_000_000_000 }),
+        web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: proverA.publicKey, lamports: 100_000_000 }),
+        web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: playerB.publicKey, lamports: 1_000_000_000 }),
+        web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: proverB.publicKey, lamports: 100_000_000 }),
+      ),
+      [payer],
+    );
+
+    // A stakes and reveals Bull #1.
+    const { positionId: positionIdA, position: positionA } = await findBullPosition();
+    const playerARodeoAccount = await createAssociatedTokenAccount(provider.connection, payer, rodeoMint, playerA.publicKey);
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        createTransferInstruction(payerRodeoAccount, playerARodeoAccount, payer.publicKey, 100_000_000_000n),
+      ),
+      [payer],
+    );
+    await stakeAndCommit(positionIdA, stakeAmountAtomic, playerARodeoAccount, playerA);
+    await revealBullWithProof(positionIdA, playerA, proverA);
+
+    // Make A's Bull unstake-eligible and request Unstake.
+    const posA = await rodeoAccounts(rodeoCoreProgram).position.fetch(positionA);
+    await fixturePreparePosition(positionIdA, {
+      roleCode: 2,
+      cowboyKindCode: 0,
+      accrualWeight: posA.accrualWeight,
+      buckPower: posA.buckPower,
+      claimable: new BN(0),
+      positionClaimableLiabilityDelta: new BN(0),
+    });
+    const { actionNonce: actionNonceA } = await requestUnstake(positionIdA, playerA);
+
+    // Stage a removal proof against the current registry (R1 / V1).
+    const { staged: staleStaged } = await buildAndStageUnstakeProof(
+      positionIdA,
+      actionNonceA,
+      playerA,
+      proverA,
+      new BN(2),
+    );
+
+    // B stakes and reveals Bull #2, moving the registry to R2 / V2.
+    const { positionId: positionIdB, position: positionB } = await findBullPosition();
+    const playerBRodeoAccount = await createAssociatedTokenAccount(provider.connection, payer, rodeoMint, playerB.publicKey);
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        createTransferInstruction(payerRodeoAccount, playerBRodeoAccount, payer.publicKey, 100_000_000_000n),
+      ),
+      [payer],
+    );
+    await stakeAndCommit(positionIdB, stakeAmountAtomic, playerBRodeoAccount, playerB);
+    await revealBullWithProof(positionIdB, playerB, proverB);
+
+    const [registryPda] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+    const staleRegistryBefore = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    const staleBeforeCount = BigInt(staleRegistryBefore.totalBullCount.toString());
+    const staleBeforePower = BigInt(staleRegistryBefore.totalBuckPower.toString());
+    const staleBeforeVersion = BigInt(staleRegistryBefore.registryVersion.toString());
+    expect(staleBeforeCount).toBeGreaterThan(1n);
+    expect(staleBeforePower).toBeGreaterThan(0n);
+
+    const playerAAnsemAccount = await createAssociatedTokenAccount(provider.connection, payer, ansemMint, playerA.publicKey);
+
+    // Settlement with the stale R1 proof must fail because the current registry is now R2.
+    await expect(
+      settleUnstake(positionIdA, actionNonceA, payer, {
+        bufferPda: staleStaged.bufferPda,
+        refundRecipient: staleStaged.refundRecipient,
+      }, {
+        ownerRodeoAccount: playerARodeoAccount,
+        ownerAnsemAccount: playerAAnsemAccount,
+      }),
+    ).rejects.toThrow();
+
+    // Build and stage a FRESH removal proof for A's SAME pending Unstake action
+    // against the CURRENT registry (R2 / V2).
+    const { staged: freshStaged } = await buildAndStageUnstakeProof(
+      positionIdA,
+      actionNonceA,
+      playerA,
+      proverA,
+      new BN(3),
+    );
+
+    // Settlement with the fresh CURRENT proof must succeed.
+    await settleUnstake(positionIdA, actionNonceA, payer, {
+      bufferPda: freshStaged.bufferPda,
+      refundRecipient: freshStaged.refundRecipient,
+    }, {
+      ownerRodeoAccount: playerARodeoAccount,
+      ownerAnsemAccount: playerAAnsemAccount,
+    });
+
+    // Bull #1 is removed; Bull #2 remains.
+    bullRegistryTracker.unregisterBull(playerA.publicKey, positionA);
+    await assertTrackerMatchesChain();
+
+    const registryAfter = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    expect(BigInt(registryAfter.totalBullCount.toString())).toBe(staleBeforeCount - 1n);
+    expect(BigInt(registryAfter.registryVersion.toString())).toBe(staleBeforeVersion + 1n);
+    expect(BigInt(registryAfter.totalBuckPower.toString())).toBe(
+      staleBeforePower - BigInt(posA.buckPower.toString()),
+    );
+    expect(Buffer.from(new Uint8Array(registryAfter.ownerTreeRoot)).equals(
+      Buffer.from(bullRegistryTracker.buildRegistry().rootNode.hash),
+    )).toBe(true);
+
+    // A's position and pending randomness are closed.
+    const [pendingRandomnessA] = deriveRandomness(
+      rodeoCoreProgram.programId,
+      positionA,
+      1,
+      actionNonceA,
+    );
+    expect(await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(positionA)).toBeNull();
+    expect(await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetchNullable(pendingRandomnessA)).toBeNull();
+
+    // A's receipt is burned to the MPL Core tombstone.
+    const [receiptAssetA] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), positionA.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const receiptInfoA = await provider.connection.getAccountInfo(receiptAssetA);
+    expect(receiptInfoA).not.toBeNull();
+    expect(receiptInfoA!.owner.equals(MPL_CORE_PROGRAM_ID)).toBe(true);
+    expect(receiptInfoA!.data.length).toBe(1);
+    expect(receiptInfoA!.data[0]).toBe(0);
+
+    // B's position and receipt remain active.
+    const posB = await rodeoAccounts(rodeoCoreProgram).position.fetch(positionB);
+    expect(posB.owner.equals(playerB.publicKey)).toBe(true);
+    expect(posB.role.bull).toBeTruthy();
+
+    // The stale proof buffer was not consumed; the fresh one was consumed and closed.
+    const staleBufferInfo = await provider.connection.getAccountInfo(staleStaged.bufferPda);
+    expect(staleBufferInfo).not.toBeNull();
+    const staleBufferAccount = await rodeoAccounts(rodeoCoreProgram).bullProofBuffer.fetch(staleStaged.bufferPda);
+    expect(staleBufferAccount.consumed).toBe(false);
+    expect(staleBufferAccount.finalized).toBe(true);
+
+    const freshBufferInfo = await provider.connection.getAccountInfo(freshStaged.bufferPda);
+    expect(freshBufferInfo === null || freshBufferInfo.lamports === 0).toBe(true);
+  }, 240_000);
+
+  it("production Bull unstake: fresh current proof succeeds after another Bull registry mutation", async () => {
+    // Player A owns Bull #1 and requests Unstake.
+    // Player B then reveals Bull #2, so A's proof must be built against R2/V2.
+    const playerA = web3.Keypair.generate();
+    const proverA = web3.Keypair.generate();
+    const playerB = web3.Keypair.generate();
+    const proverB = web3.Keypair.generate();
+
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: playerA.publicKey, lamports: 1_000_000_000 }),
+        web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: proverA.publicKey, lamports: 100_000_000 }),
+        web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: playerB.publicKey, lamports: 1_000_000_000 }),
+        web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: proverB.publicKey, lamports: 100_000_000 }),
+      ),
+      [payer],
+    );
+
+    const { positionId: positionIdA, position: positionA } = await findBullPosition();
+    const playerARodeoAccount = await createAssociatedTokenAccount(provider.connection, payer, rodeoMint, playerA.publicKey);
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        createTransferInstruction(payerRodeoAccount, playerARodeoAccount, payer.publicKey, 100_000_000_000n),
+      ),
+      [payer],
+    );
+    await stakeAndCommit(positionIdA, stakeAmountAtomic, playerARodeoAccount, playerA);
+    await revealBullWithProof(positionIdA, playerA, proverA);
+
+    const posA = await rodeoAccounts(rodeoCoreProgram).position.fetch(positionA);
+    await fixturePreparePosition(positionIdA, {
+      roleCode: 2,
+      cowboyKindCode: 0,
+      accrualWeight: posA.accrualWeight,
+      buckPower: posA.buckPower,
+      claimable: new BN(0),
+      positionClaimableLiabilityDelta: new BN(0),
+    });
+    const { actionNonce: actionNonceA } = await requestUnstake(positionIdA, playerA);
+
+    // B reveals Bull #2 while A's Unstake is still pending.
+    const { positionId: positionIdB, position: positionB } = await findBullPosition();
+    const playerBRodeoAccount = await createAssociatedTokenAccount(provider.connection, payer, rodeoMint, playerB.publicKey);
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        createTransferInstruction(payerRodeoAccount, playerBRodeoAccount, payer.publicKey, 100_000_000_000n),
+      ),
+      [payer],
+    );
+    await stakeAndCommit(positionIdB, stakeAmountAtomic, playerBRodeoAccount, playerB);
+    await revealBullWithProof(positionIdB, playerB, proverB);
+
+    const [registryPda] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+    const freshRegistryBefore = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    const unstakeBeforeCount = BigInt(freshRegistryBefore.totalBullCount.toString());
+    const unstakeBeforePower = BigInt(freshRegistryBefore.totalBuckPower.toString());
+    const unstakeBeforeVersion = BigInt(freshRegistryBefore.registryVersion.toString());
+    expect(unstakeBeforeCount).toBeGreaterThan(0n);
+    expect(unstakeBeforePower).toBeGreaterThan(0n);
+
+    const playerAAnsemAccount = await createAssociatedTokenAccount(provider.connection, payer, ansemMint, playerA.publicKey);
+
+    // Build and stage a fresh CURRENT removal proof for A's SAME pending action.
+    const { staged: freshStaged } = await buildAndStageUnstakeProof(
+      positionIdA,
+      actionNonceA,
+      playerA,
+      proverA,
+      new BN(2),
+    );
+
+    await settleUnstake(positionIdA, actionNonceA, payer, {
+      bufferPda: freshStaged.bufferPda,
+      refundRecipient: freshStaged.refundRecipient,
+    }, {
+      ownerRodeoAccount: playerARodeoAccount,
+      ownerAnsemAccount: playerAAnsemAccount,
+    });
+
+    bullRegistryTracker.unregisterBull(playerA.publicKey, positionA);
+    await assertTrackerMatchesChain();
+
+    const registryAfter = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    expect(BigInt(registryAfter.totalBullCount.toString())).toBe(unstakeBeforeCount - 1n);
+    expect(BigInt(registryAfter.registryVersion.toString())).toBe(unstakeBeforeVersion + 1n);
+    expect(BigInt(registryAfter.totalBuckPower.toString())).toBe(
+      unstakeBeforePower - BigInt(posA.buckPower.toString()),
+    );
+    expect(Buffer.from(new Uint8Array(registryAfter.ownerTreeRoot)).equals(
+      Buffer.from(bullRegistryTracker.buildRegistry().rootNode.hash),
+    )).toBe(true);
+
+    const [pendingRandomnessA] = deriveRandomness(
+      rodeoCoreProgram.programId,
+      positionA,
+      1,
+      actionNonceA,
+    );
+    expect(await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(positionA)).toBeNull();
+    expect(await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetchNullable(pendingRandomnessA)).toBeNull();
+
+    const posB = await rodeoAccounts(rodeoCoreProgram).position.fetch(positionB);
+    expect(posB.owner.equals(playerB.publicKey)).toBe(true);
+    expect(posB.role.bull).toBeTruthy();
+  }, 240_000);
+
+
+  it("BullProofBuffer atomic rollback on late receipt-burn failure during Bull unstake", async () => {
+    // Independent player A and prover B.
+    const player = web3.Keypair.generate();
+    const prover = web3.Keypair.generate();
+
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: player.publicKey, lamports: 1_500_000_000 }),
+        web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: prover.publicKey, lamports: 100_000_000 }),
+      ),
+      [payer],
+    );
+
+    const { positionId, position } = await findBullPosition();
+    const playerRodeoAccount = await createAssociatedTokenAccount(provider.connection, payer, rodeoMint, player.publicKey);
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        createTransferInstruction(payerRodeoAccount, playerRodeoAccount, payer.publicKey, 100_000_000_000n),
+      ),
+      [payer],
+    );
+    await stakeAndCommit(positionId, stakeAmountAtomic, playerRodeoAccount, player);
+    await revealBullWithProof(positionId, player, prover);
+
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const claimable = new BN(1_000_000_000);
+    await fixturePreparePosition(positionId, {
+      roleCode: 2,
+      cowboyKindCode: 0,
+      accrualWeight: pos.accrualWeight,
+      buckPower: pos.buckPower,
+      claimable,
+      positionClaimableLiabilityDelta: claimable,
+    });
+    await ensureRecognizedReserve(claimable);
+
+    const { actionNonce } = await requestUnstake(positionId, player);
+
+    const playerAnsemAccount = await createAssociatedTokenAccount(provider.connection, payer, ansemMint, player.publicKey);
+
+    const { staged, bufferLamportsBefore } = await buildAndStageUnstakeProof(
+      positionId,
+      actionNonce,
+      player,
+      prover,
+      new BN(2),
+    );
+
+    const [registryPda] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+    const registryBefore = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    const beforeCount = BigInt(registryBefore.totalBullCount.toString());
+    const beforePower = BigInt(registryBefore.totalBuckPower.toString());
+    const beforeVersion = BigInt(registryBefore.registryVersion.toString());
+    const beforeRoot = Buffer.from(new Uint8Array(registryBefore.ownerTreeRoot));
+
+    const positionBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const bufferInfoBefore = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoBefore).not.toBeNull();
+    const bufferAccountBefore = await rodeoAccounts(rodeoCoreProgram).bullProofBuffer.fetch(staged.bufferPda);
+    expect(bufferAccountBefore.consumed).toBe(false);
+    expect(bufferAccountBefore.finalized).toBe(true);
+
+    const [receiptFunder] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const receiptFunderBefore = await provider.connection.getAccountInfo(receiptFunder);
+    expect(receiptFunderBefore).not.toBeNull();
+
+    const proverBalanceBefore = await getLamportBalance(provider, prover.publicKey);
+    const playerRodeoBefore = await getAccount(provider.connection, playerRodeoAccount);
+    const principalVaultBefore = await getAccount(provider.connection, principalVault);
+    const rodeoMintInfoBefore = await getMint(provider.connection, rodeoMint);
+    const playerAnsemBefore = await getAccount(provider.connection, playerAnsemAccount);
+    const rewardVaultBefore = await getAccount(provider.connection, rewardVault);
+
+    // Record the real ReceiptFunder lamports before we force a late failure.
+    const receiptFunderLamportsBefore = receiptFunderBefore!.lamports;
+
+    // Force a late downstream failure by supplying an invalid receipt_funder
+    // account. The proof and economic logic are valid, but burn_position_receipt
+    // validates the funder PDA and will reject the wrong key.
+    await expect(
+      settleUnstake(positionId, actionNonce, payer, {
+        bufferPda: staged.bufferPda,
+        refundRecipient: staged.refundRecipient,
+        receiptFunder: payer.publicKey,
+      }, {
+        ownerRodeoAccount: playerRodeoAccount,
+        ownerAnsemAccount: playerAnsemAccount,
+      }),
+    ).rejects.toThrow();
+
+    // Full rollback assertions.
+    const bufferInfoAfterFailure = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoAfterFailure).not.toBeNull();
+    expect(bufferInfoAfterFailure!.lamports).toBe(bufferLamportsBefore);
+    expect(bufferInfoAfterFailure!.data.length).toBe(bufferInfoBefore!.data.length);
+    const bufferAccountAfterFailure = await rodeoAccounts(rodeoCoreProgram).bullProofBuffer.fetch(
+      staged.bufferPda,
+    );
+    expect(bufferAccountAfterFailure.consumed).toBe(false);
+    expect(bufferAccountAfterFailure.finalized).toBe(true);
+    expect(bufferAccountAfterFailure.refundRecipient.equals(prover.publicKey)).toBe(true);
+    expect(bufferAccountAfterFailure.expectedPayloadLength).toBe(bufferAccountBefore.expectedPayloadLength);
+
+    const registryAfterFailure = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    expect(BigInt(registryAfterFailure.totalBullCount.toString())).toBe(beforeCount);
+    expect(BigInt(registryAfterFailure.totalBuckPower.toString())).toBe(beforePower);
+    expect(BigInt(registryAfterFailure.registryVersion.toString())).toBe(beforeVersion);
+    expect(Buffer.from(new Uint8Array(registryAfterFailure.ownerTreeRoot)).equals(beforeRoot)).toBe(true);
+
+    const positionAfterFailure = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(positionAfterFailure.status).toEqual(positionBefore.status);
+    expect(positionAfterFailure.pendingActionActive).toBe(positionBefore.pendingActionActive);
+    expect(positionAfterFailure.role).toEqual(positionBefore.role);
+    expect(positionAfterFailure.owner.equals(positionBefore.owner)).toBe(true);
+    expect(positionAfterFailure.receiptAsset.toBase58()).toBe(positionBefore.receiptAsset.toBase58());
+
+    const proverBalanceAfterFailure = await getLamportBalance(provider, prover.publicKey);
+    expect(proverBalanceAfterFailure).toBe(proverBalanceBefore);
+
+    const receiptFunderAfterFailure = await provider.connection.getAccountInfo(receiptFunder);
+    expect(receiptFunderAfterFailure).not.toBeNull();
+    expect(receiptFunderAfterFailure!.lamports).toBe(receiptFunderLamportsBefore);
+
+    const playerRodeoAfterFailure = await getAccount(provider.connection, playerRodeoAccount);
+    const principalVaultAfterFailure = await getAccount(provider.connection, principalVault);
+    const rodeoMintInfoAfterFailure = await getMint(provider.connection, rodeoMint);
+    const playerAnsemAfterFailure = await getAccount(provider.connection, playerAnsemAccount);
+    const rewardVaultAfterFailure = await getAccount(provider.connection, rewardVault);
+
+    expect(new BN(playerRodeoAfterFailure.amount.toString()).toString()).toBe(
+      new BN(playerRodeoBefore.amount.toString()).toString(),
+    );
+    expect(new BN(principalVaultAfterFailure.amount.toString()).toString()).toBe(
+      new BN(principalVaultBefore.amount.toString()).toString(),
+    );
+    expect(new BN(rodeoMintInfoAfterFailure.supply.toString()).toString()).toBe(
+      new BN(rodeoMintInfoBefore.supply.toString()).toString(),
+    );
+    expect(new BN(playerAnsemAfterFailure.amount.toString()).toString()).toBe(
+      new BN(playerAnsemBefore.amount.toString()).toString(),
+    );
+    expect(new BN(rewardVaultAfterFailure.amount.toString()).toString()).toBe(
+      new BN(rewardVaultBefore.amount.toString()).toString(),
+    );
+
+    // Retry with the SAME valid BullProofBuffer and the correct funder PDA.
+    await settleUnstake(positionId, actionNonce, payer, {
+      bufferPda: staged.bufferPda,
+      refundRecipient: staged.refundRecipient,
+    }, {
+      ownerRodeoAccount: playerRodeoAccount,
+      ownerAnsemAccount: playerAnsemAccount,
+    });
+
+    // Post-success final assertions.
+    const bufferInfoAfterSuccess = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoAfterSuccess).toBeNull();
+
+    const positionAfterSuccess = await rodeoAccounts(rodeoCoreProgram).position.fetchNullable(position);
+    expect(positionAfterSuccess).toBeNull();
+
+    bullRegistryTracker.unregisterBull(player.publicKey, position);
+    await assertTrackerMatchesChain();
+
+    const registryAfterSuccess = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    expect(BigInt(registryAfterSuccess.totalBullCount.toString())).toBe(beforeCount - 1n);
+    expect(BigInt(registryAfterSuccess.registryVersion.toString())).toBe(beforeVersion + 1n);
+    expect(BigInt(registryAfterSuccess.totalBuckPower.toString())).toBe(
+      beforePower - BigInt(pos.buckPower),
+    );
+    expect(Buffer.from(new Uint8Array(registryAfterSuccess.ownerTreeRoot)).equals(
+      Buffer.from(bullRegistryTracker.buildRegistry().rootNode.hash),
+    )).toBe(true);
+
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const receiptInfoAfterSuccess = await provider.connection.getAccountInfo(receiptAsset);
+    expect(receiptInfoAfterSuccess).not.toBeNull();
+    expect(receiptInfoAfterSuccess!.owner.equals(MPL_CORE_PROGRAM_ID)).toBe(true);
+    expect(receiptInfoAfterSuccess!.data.length).toBe(1);
+    expect(receiptInfoAfterSuccess!.data[0]).toBe(0);
+
+    const proverBalanceAfterSuccess = await getLamportBalance(provider, prover.publicKey);
+    expect(proverBalanceAfterSuccess).toBe(proverBalanceBefore + bufferLamportsBefore);
+  }, 240_000);
+
+  it("BullProofBuffer atomic rollback on late CreateV2 funder failure", async () => {
+    // Independent player A and prover B.
+    const player = web3.Keypair.generate();
+    const prover = web3.Keypair.generate();
+
+    // Fund both wallets.
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: player.publicKey,
+          lamports: 1_000_000_000,
+        }),
+        web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: prover.publicKey,
+          lamports: 100_000_000,
+        }),
+      ),
+      [payer],
+    );
+
+    const playerRodeoAccount = await createAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      rodeoMint,
+      player.publicKey,
+    );
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        createTransferInstruction(payerRodeoAccount, playerRodeoAccount, payer.publicKey, 100_000_000_000n),
+      ),
+      [payer],
+    );
+
+    // Pre-failure registry/tracker parity.
+    const [registryPda] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+    const registryBefore = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    const beforeRoot = new Uint8Array(registryBefore.ownerTreeRoot);
+    const beforeCount = BigInt(registryBefore.totalBullCount.toString());
+    const beforePower = BigInt(registryBefore.totalBuckPower.toString());
+    const beforeVersion = BigInt(registryBefore.registryVersion.toString());
+    await syncTrackerWithChain();
+
+    // Find a fresh Bull position and stake it.
+    const { positionId, position } = await findBullPosition();
+    await stakeAndCommit(positionId, stakeAmountAtomic, playerRodeoAccount, player);
+
+    const { pendingRandomness } = await deriveStakeAccounts(positionId);
+
+    // Build and stage a valid real reveal proof buffer.  We do NOT call the
+    // helper that also settles, because the rollback test needs to inspect
+    // pre-failure state and then intentionally break the downstream CreateV2 payer.
+    await syncTrackerWithChain();
+    const posForPayload = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
+    const { payload } = await buildRevealPayloadForPosition(position, posForPayload, pending);
+    const payloadBytes = serializeBullProofPayload(payload);
+    const staged = await stageBullProofBuffer(
+      rodeoCoreProgram,
+      globalConfig,
+      position,
+      pendingRandomness,
+      prover,
+      new BN(1),
+      { reveal: {} },
+      payloadBytes,
+    );
+
+    // Capture pre-failure state explicitly.
+    const positionBefore = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const bufferInfoBefore = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoBefore).not.toBeNull();
+    const bufferAccountBefore = await rodeoAccounts(rodeoCoreProgram).bullProofBuffer.fetch(
+      staged.bufferPda,
+    );
+    expect(bufferAccountBefore.consumed).toBe(false);
+    expect(bufferAccountBefore.finalized).toBe(true);
+    const proverBalanceBefore = await getLamportBalance(provider, prover.publicKey);
+    const receiptFunder = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt-funder"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    )[0];
+
+    // stakeAndCommit prefunds the ReceiptFunder with RECEIPT_RESERVE_LAMPORTS.
+    // Close that PDA and recreate it with the bare rent-exempt minimum for 0 bytes.
+    // This is a valid System-Program-owned PDA, but it cannot pay the MPL Core
+    // asset rent in settle_reveal, causing a late CreateV2 CPI failure.
+    await rodeoCoreProgram.methods
+      .testFixtureCloseReceiptFunder()
+      .accounts({
+        authority: payer.publicKey,
+        position,
+        funder: receiptFunder,
+        beneficiary: payer.publicKey,
+        systemProgram: web3.SystemProgram.programId,
+      })
+      .signers([payer])
+      .rpc();
+
+    const funderLamportsBeforeFailure = new BN(await provider.connection.getMinimumBalanceForRentExemption(0));
+    await rodeoCoreProgram.methods
+      .testFixtureCreateReceiptFunder(funderLamportsBeforeFailure)
+      .accounts({
+        authority: payer.publicKey,
+        position,
+        funder: receiptFunder,
+        systemProgram: web3.SystemProgram.programId,
+      })
+      .signers([payer])
+      .rpc();
+
+    const funderInfoBeforeFailure = await provider.connection.getAccountInfo(receiptFunder);
+    expect(funderInfoBeforeFailure).not.toBeNull();
+    expect(funderInfoBeforeFailure!.lamports).toBe(funderLamportsBeforeFailure.toNumber());
+    expect(funderInfoBeforeFailure!.data.length).toBe(0);
+
+    // Attempt the real production settle_reveal. It MUST fail because the
+    // ReceiptFunder cannot pay MPL Core asset rent.
+    await expect(
+      settleReveal(positionId, player, {
+        bufferPda: staged.bufferPda,
+        refundRecipient: staged.refundRecipient,
+      }),
+    ).rejects.toThrow();
+
+    // Full rollback assertions.
+    const bufferInfoAfterFailure = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoAfterFailure).not.toBeNull();
+    expect(bufferInfoAfterFailure!.lamports).toBe(bufferInfoBefore!.lamports);
+    expect(bufferInfoAfterFailure!.data.length).toBe(bufferInfoBefore!.data.length);
+    const bufferAccountAfterFailure = await rodeoAccounts(rodeoCoreProgram).bullProofBuffer.fetch(
+      staged.bufferPda,
+    );
+    expect(bufferAccountAfterFailure.consumed).toBe(false);
+    expect(bufferAccountAfterFailure.finalized).toBe(true);
+    expect(bufferAccountAfterFailure.refundRecipient.equals(prover.publicKey)).toBe(true);
+    expect(bufferAccountAfterFailure.expectedPayloadLength).toBe(
+      bufferAccountBefore.expectedPayloadLength,
+    );
+
+    const registryAfterFailure = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    expect(BigInt(registryAfterFailure.totalBullCount.toString())).toBe(beforeCount);
+    expect(BigInt(registryAfterFailure.totalBuckPower.toString())).toBe(beforePower);
+    expect(BigInt(registryAfterFailure.registryVersion.toString())).toBe(beforeVersion);
+    expect(Buffer.from(new Uint8Array(registryAfterFailure.ownerTreeRoot)).equals(Buffer.from(beforeRoot))).toBe(true);
+
+    const positionAfterFailure = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(positionAfterFailure.status).toEqual(positionBefore.status);
+    expect(positionAfterFailure.pendingActionActive).toBe(positionBefore.pendingActionActive);
+    expect(positionAfterFailure.role).toEqual(positionBefore.role);
+    expect(positionAfterFailure.owner.equals(positionBefore.owner)).toBe(true);
+    expect(positionAfterFailure.receiptAsset.equals(web3.PublicKey.default)).toBe(true);
+
+    const proverBalanceAfterFailure = await getLamportBalance(provider, prover.publicKey);
+    expect(proverBalanceAfterFailure).toBe(proverBalanceBefore);
+
+    const receiptFunderAfterFailure = await provider.connection.getAccountInfo(receiptFunder);
+    expect(receiptFunderAfterFailure).not.toBeNull();
+    expect(receiptFunderAfterFailure!.lamports).toBe(funderLamportsBeforeFailure.toNumber());
+
+    // Retry fix: fund the ReceiptFunder to the standard reserve so the same
+    // valid BullProofBuffer can now pay the MPL Core CreateV2.
+    const receiptFunderReserve = 5_500_000;
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: receiptFunder,
+          lamports: receiptFunderReserve,
+        }),
+      ),
+      [payer],
+    );
+
+    // Retry with the SAME valid BullProofBuffer. It must now succeed.
+    await settleReveal(positionId, player, {
+      bufferPda: staged.bufferPda,
+      refundRecipient: staged.refundRecipient,
+    });
+
+    // Post-success final assertions.
+    const bufferInfoAfterSuccess = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoAfterSuccess).toBeNull();
+
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    expect(pos.role.bull).toBeTruthy();
+    expect(pos.owner.equals(player.publicKey)).toBe(true);
+    expect(pos.buckPower).toBeGreaterThan(0);
+
+    const actualBull: BullLeaf = {
+      position,
+      positionId: BigInt(positionId.toString()),
+      owner: player.publicKey,
+      buckPower: pos.buckPower,
+      revealConfigVersion: BigInt(pos.revealConfigVersion.toString()),
+    };
+    bullRegistryTracker.registerBull(player.publicKey, actualBull);
+
+    const registryAfterSuccess = await rodeoAccounts(rodeoCoreProgram).bullRegistry.fetch(registryPda);
+    expect(BigInt(registryAfterSuccess.totalBullCount.toString())).toBe(beforeCount + 1n);
+    expect(BigInt(registryAfterSuccess.totalBuckPower.toString())).toBe(
+      beforePower + BigInt(pos.buckPower),
+    );
+    expect(BigInt(registryAfterSuccess.registryVersion.toString())).toBe(beforeVersion + 1n);
+    await assertTrackerMatchesChain();
+
+    const [receiptAsset] = web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("receipt"), position.toBuffer()],
+      rodeoCoreProgram.programId,
+    );
+    const receiptInfoAfterSuccess = await provider.connection.getAccountInfo(receiptAsset);
+    expect(receiptInfoAfterSuccess).not.toBeNull();
+    expect(receiptInfoAfterSuccess!.owner.equals(MPL_CORE_PROGRAM_ID)).toBe(true);
+
+    const proverBalanceAfterSuccess = await getLamportBalance(provider, prover.publicKey);
+    expect(proverBalanceAfterSuccess).toBe(proverBalanceBefore + bufferInfoBefore!.lamports);
+
+    console.log('BullProofBuffer rollback evidence:', {
+      positionId: positionId.toString(),
+      bufferPda: staged.bufferPda.toBase58(),
+      bufferLamportsBefore: bufferInfoBefore!.lamports,
+      bufferLamportsAfterFailure: bufferInfoAfterFailure!.lamports,
+      bufferLamportsAfterSuccess: 0,
+      funderLamportsBeforeFailure,
+      proverBalanceBefore,
+      proverBalanceAfterFailure,
+      proverBalanceAfterSuccess,
+      registryCountBefore: beforeCount.toString(),
+      registryCountAfterFailure: registryAfterFailure.totalBullCount.toString(),
+      registryCountAfterSuccess: registryAfterSuccess.totalBullCount.toString(),
+    });
+  }, 180_000);
+
+  // === BullProofBuffer TTL / cleanup regression tests ===
+
+  it("recover_reveal_timeout with a staged BullProofBuffer closes pending randomness and refunds the buffer to prover B", async () => {
+    const prover = web3.Keypair.generate();
+
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: prover.publicKey,
+          lamports: 100_000_000,
+        }),
+      ),
+      [payer],
+    );
+
+    await syncTrackerWithChain();
+    const { positionId, position } = await findBullPosition();
+
+    await stakeAndCommit(positionId, stakeAmountAtomic, payerRodeoAccount, payer);
+
+    const { pendingRandomness } = await deriveStakeAccounts(positionId);
+    const bullLeaf: BullLeaf = {
+      position,
+      positionId: BigInt(positionId.toString()),
+      owner: payer.publicKey,
+      buckPower: 0,
+      revealConfigVersion: 1n,
+    };
+
+    const nonce = new BN(1);
+    const staged = await stageRevealProofForBull(
+      rodeoCoreProgram,
+      globalConfig,
+      position,
+      pendingRandomness,
+      prover,
+      nonce,
+      bullRegistryTracker,
+      bullLeaf,
+    );
+
+    const bufferLamportsBefore = await getLamportBalance(provider, staged.bufferPda);
+    const proverBalanceBefore = await getLamportBalance(provider, prover.publicKey);
+
+    // The action reaches its timeout; recovery is available but the buffer is not consumed.
+    await sleep(2_500);
+    await recoverRevealTimeout(positionId, payer, payer);
+
+    const pendingInfo = await provider.connection.getAccountInfo(pendingRandomness);
+    expect(pendingInfo).toBeNull();
+
+    // Settlement must fail because the pending randomness is gone.
+    await expect(
+      settleReveal(positionId, payer, {
+        bufferPda: staged.bufferPda,
+        refundRecipient: staged.refundRecipient,
+      }),
+    ).rejects.toThrow();
+
+    // The buffer is not consumed, so close is only allowed once it has expired.
+    // Wait out the remaining TTL; the committed refund_recipient cannot be changed.
+    const bufferAccount = await rodeoAccounts(rodeoCoreProgram).bullProofBuffer.fetch(staged.bufferPda);
+    const now = Math.floor(Date.now() / 1000);
+    const waitMs = Math.max(0, (Number(bufferAccount.expiryTimestamp) - now) * 1000 + 2_000);
+    await sleep(waitMs);
+
+    // A third party (payer) can close the now-expired buffer; the program
+    // enforces the refund goes to the committed refund_recipient (prover B).
+    await closeBullProofBuffer(
+      rodeoCoreProgram,
+      staged.bufferPda,
+      prover.publicKey,
+      staged.refundRecipient,
+      nonce,
+    );
+
+    const bufferInfoAfter = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoAfter).toBeNull();
+
+    const proverBalanceAfter = await getLamportBalance(provider, prover.publicKey);
+    const proverRefund = proverBalanceAfter - proverBalanceBefore;
+    expect(proverRefund).toBe(bufferLamportsBefore);
+
+    console.log("recover+close buffer evidence:", {
+      positionId: positionId.toString(),
+      bufferPda: staged.bufferPda.toBase58(),
+      bufferLamportsBefore,
+      proverRefund,
+    });
+  }, 180_000);
+
+  it("expired BullProofBuffer rejects settlement and refunds prover B on close", async () => {
+    const prover = web3.Keypair.generate();
+
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: prover.publicKey,
+          lamports: 100_000_000,
+        }),
+      ),
+      [payer],
+    );
+
+    await syncTrackerWithChain();
+    const { positionId, position } = await findBullPosition();
+
+    await stakeAndCommit(positionId, stakeAmountAtomic, payerRodeoAccount, payer);
+
+    const { pendingRandomness } = await deriveStakeAccounts(positionId);
+    const bullLeaf: BullLeaf = {
+      position,
+      positionId: BigInt(positionId.toString()),
+      owner: payer.publicKey,
+      buckPower: 0,
+      revealConfigVersion: 1n,
+    };
+
+    const nonce = new BN(1);
+    const staged = await stageRevealProofForBull(
+      rodeoCoreProgram,
+      globalConfig,
+      position,
+      pendingRandomness,
+      prover,
+      nonce,
+      bullRegistryTracker,
+      bullLeaf,
+    );
+
+    const bufferLamportsBefore = await getLamportBalance(provider, staged.bufferPda);
+    const proverBalanceBefore = await getLamportBalance(provider, prover.publicKey);
+
+    // Advance time until the buffer expiry has passed.
+    const bufferAccount = await rodeoAccounts(rodeoCoreProgram).bullProofBuffer.fetch(staged.bufferPda);
+    const now = Math.floor(Date.now() / 1000);
+    const waitMs = Math.max(0, (Number(bufferAccount.expiryTimestamp) - now) * 1000 + 2_000);
+    await sleep(waitMs);
+
+    // Settlement must be rejected because the buffer has expired.
+    await expect(
+      settleReveal(positionId, payer, {
+        bufferPda: staged.bufferPda,
+        refundRecipient: staged.refundRecipient,
+      }),
+    ).rejects.toThrow();
+
+    // A third party closes the expired buffer and the refund goes to prover B.
+    await closeBullProofBuffer(
+      rodeoCoreProgram,
+      staged.bufferPda,
+      prover.publicKey,
+      staged.refundRecipient,
+      nonce,
+    );
+
+    const bufferInfoAfter = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoAfter).toBeNull();
+
+    const proverBalanceAfter = await getLamportBalance(provider, prover.publicKey);
+    expect(proverBalanceAfter - proverBalanceBefore).toBe(bufferLamportsBefore);
+  }, 120_000);
+
+  it("initialize_bull_proof is allowed after the action timeout and can still settle before recovery", async () => {
+    const prover = web3.Keypair.generate();
+
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: prover.publicKey,
+          lamports: 100_000_000,
+        }),
+      ),
+      [payer],
+    );
+
+    await syncTrackerWithChain();
+
+    // Reset the completed-reveals counter so the simple current-owner/bull
+    // reveal payload can settle a Bull without requiring a full historical
+    // mint-theft proof.  This fixture isolates the action-timeout behavior
+    // under test from unrelated post-threshold payload requirements.
+    const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+    await rodeoCoreProgram.methods
+      .testFixtureSetGlobalGameState(
+        new BN(0),
+        gameBefore.nextPositionId,
+        gameBefore.activeBullCount,
+        gameBefore.totalActiveBullPower,
+      )
+      .accounts({
+        authority: payer.publicKey,
+        globalConfig,
+        globalGameState,
+      })
+      .signers([payer])
+      .rpc();
+
+    const { positionId, position } = await findBullPosition();
+
+    await stakeAndCommit(positionId, stakeAmountAtomic, payerRodeoAccount, payer);
+
+    const { pendingRandomness } = await deriveStakeAccounts(positionId);
+
+    // Wait for the action timeout to elapse.  The pending action is still active.
+    await sleep(2_500);
+
+    // Initialization after timeout is allowed: the pending action has not been
+    // recovered, so settlement can still occur once the timeout is reached.
+    const bullLeaf: BullLeaf = {
+      position,
+      positionId: BigInt(positionId.toString()),
+      owner: payer.publicKey,
+      buckPower: 0,
+      revealConfigVersion: 1n,
+    };
+
+    const nonce = new BN(1);
+    const staged = await stageRevealProofForBull(
+      rodeoCoreProgram,
+      globalConfig,
+      position,
+      pendingRandomness,
+      prover,
+      nonce,
+      bullRegistryTracker,
+      bullLeaf,
+    );
+
+    // Settlement succeeds because the timeout has passed and the buffer has not expired.
+    await settleReveal(positionId, payer, {
+      bufferPda: staged.bufferPda,
+      refundRecipient: staged.refundRecipient,
+    });
+
+    const bufferInfoAfter = await provider.connection.getAccountInfo(staged.bufferPda);
+    expect(bufferInfoAfter).toBeNull();
+
+    // Register the newly revealed Bull so the global tracker stays in sync
+    // with the on-chain registry for the remaining tests in this suite.
+    const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+    const actualBull: BullLeaf = {
+      position,
+      positionId: BigInt(positionId.toString()),
+      owner: payer.publicKey,
+      buckPower: pos.buckPower,
+      revealConfigVersion: BigInt(pos.revealConfigVersion.toString()),
+    };
+    bullRegistryTracker.registerBull(payer.publicKey, actualBull);
+    await assertTrackerMatchesChain();
+  }, 120_000);
+
+  it("initialize_bull_proof is rejected once the pending action has been recovered", async () => {
+    const prover = web3.Keypair.generate();
+
+    await provider.sendAndConfirm(
+      new web3.Transaction().add(
+        web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: prover.publicKey,
+          lamports: 100_000_000,
+        }),
+      ),
+      [payer],
+    );
+
+    const { positionId, position } = await findBullPosition();
+
+    await stakeAndCommit(positionId, stakeAmountAtomic, payerRodeoAccount, payer);
+
+    const { pendingRandomness } = await deriveStakeAccounts(positionId);
+
+    // Wait for timeout, then recover the action.  The pending randomness account is closed.
+    await sleep(2_500);
+    await recoverRevealTimeout(positionId, payer, payer);
+
+    const pendingInfo = await provider.connection.getAccountInfo(pendingRandomness);
+    expect(pendingInfo).toBeNull();
+
+    const [bullRegistry] = deriveBullRegistryPda(rodeoCoreProgram.programId, globalConfig);
+    const [bufferPda] = deriveBullProofBufferPda(
+      rodeoCoreProgram.programId,
+      pendingRandomness,
+      prover.publicKey,
+      new BN(2),
+    );
+
+    // Trying to initialize a buffer against the closed pending randomness
+    // (and now-inactive position) must fail.
+    await expect(
+      rodeoCoreProgram.methods
+        .initializeBullProof({ reveal: {} }, 0, new BN(2))
+        .accounts({
+          prover: prover.publicKey,
+          globalConfig,
+          position,
+          pendingRandomness,
+          bullProofBuffer: bufferPda,
+          bullRegistry,
+          systemProgram: web3.SystemProgram.programId,
+          rent: web3.SYSVAR_RENT_PUBKEY,
+        })
+        .signers([prover])
+        .rpc(),
+    ).rejects.toThrow();
+  }, 120_000);
+
+  describe("Focused reveal proof requirements", () => {
+    it("proofless pre-threshold non-Desperado Cowboy settles with null buffer and refund recipient", async () => {
+      const { positionId } = await findCowboyPosition(5);
+      const { position } = await stakeAndCommit(positionId);
+      await fixtureSetCompletedReveals(0);
+      await settleReveal(positionId, payer, null);
+      const settled = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+      expect(settled.role.cowboy).toBeTruthy();
+      expect(settled.pendingActionActive).toBe(false);
+    }, 90_000);
+
+    it("pre-threshold Bull without a BullProofBuffer is rejected", async () => {
+      const { positionId } = await findBullPosition();
+      await stakeAndCommit(positionId);
+      await fixtureSetCompletedReveals(0);
+      await expect(settleReveal(positionId, payer, null)).rejects.toThrow(
+        /BullProofBufferIncomplete/,
+      );
+    }, 90_000);
+
+    it("pre-threshold Bull with a correct current-insertion proof settles", async () => {
+      const { positionId } = await findBullPosition();
+      const { position } = await stakeAndCommit(positionId);
+      await fixtureSetCompletedReveals(0);
+      await settleReveal(positionId, payer);
+      const settled = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+      expect(settled.role.bull).toBeTruthy();
+      expect(settled.pendingActionActive).toBe(false);
+    }, 90_000);
+
+    it("post-threshold Cowboy without a historical victim proof is rejected", async () => {
+      const { positionId } = await findCowboyPosition(5);
+      const { position } = await stakeAndCommit(positionId);
+      await fixtureSetCompletedReveals(50);
+      await expect(settleReveal(positionId, payer, null)).rejects.toThrow(
+        /BullProofBufferIncomplete/,
+      );
+    }, 90_000);
+
+    it("post-threshold Cowboy with a canonical historical victim proof settles", async () => {
+      const { positionId } = await findCowboyPosition(5);
+      const { position, pendingRandomness } = await stakeAndCommit(positionId);
+      await fixtureSetCompletedReveals(50);
+      await syncTrackerWithChain();
+      const pos = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+      const pending = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(pendingRandomness);
+      const { payload } = await buildRevealPayloadForPosition(position, pos, pending);
+      const payloadBytes = serializeBullProofPayload(payload);
+      const staged = await stageBullProofBuffer(
+        rodeoCoreProgram,
+        globalConfig,
+        position,
+        pendingRandomness,
+        payer,
+        new BN(1),
+        { reveal: {} },
+        payloadBytes,
+      );
+      await settleReveal(positionId, payer, {
+        bufferPda: staged.bufferPda,
+        refundRecipient: staged.refundRecipient,
+      });
+      const settled = await rodeoAccounts(rodeoCoreProgram).position.fetch(position);
+      expect(settled.role.cowboy).toBeTruthy();
+      expect(settled.pendingActionActive).toBe(false);
+    }, 120_000);
+  });
+
+});
