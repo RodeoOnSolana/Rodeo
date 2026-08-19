@@ -22,6 +22,7 @@ pub struct GlobalConfig {
     pub treasury_council: Pubkey,
     pub emergency_guardians: Pubkey,
     pub current_config_version: u64,
+    pub current_claim_policy_version: u64,
     pub bump: u8,
     pub principal_vault_bump: u8,
     pub reward_vault_bump: u8,
@@ -227,6 +228,29 @@ pub struct ClaimCredit {
     pub bump: u8,
 }
 
+/// Canonical claim-policy account.  One PDA per policy version stores the
+/// immutable split ratios that apply to both direct Position claims and
+/// wallet-level ClaimCredit claims.
+#[account]
+#[derive(InitSpace)]
+pub struct ClaimPolicy {
+    pub version: u8,
+    pub policy_version: u64,
+    /// Basis points paid to the owner for a NormalCowboy claim.
+    pub normal_cowboy_owner_bps: u64,
+    /// Basis points routed to the Bull pool for a NormalCowboy claim.
+    pub normal_cowboy_bull_pool_bps: u64,
+    /// Basis points paid to the owner for a Desperado claim.
+    pub desperado_owner_bps: u64,
+    /// Basis points routed to the Bull pool for a Desperado claim.
+    pub desperado_bull_pool_bps: u64,
+    /// Basis points paid to the owner for a Bull claim (always 10_000).
+    pub bull_owner_bps: u64,
+    /// Basis points routed to the Bull pool for a Bull claim (always 0).
+    pub bull_bull_pool_bps: u64,
+    pub bump: u8,
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct PendingRandomness {
@@ -263,13 +287,18 @@ pub enum PositionStatus {
     TransferReady,
 }
 
-/// Stable, append-only discriminant for randomness actions.
+/// Stable, append-only discriminant for actions that stage BullProofBuffers.
 /// Variants must never be reordered. Existing discriminants:
-/// Reveal = 0, Unstake = 1.
+/// Reveal = 0, Unstake = 1, PrepareTransfer = 2, ActivatePosition = 3,
+/// NativeTransferRemove = 4, NativeTransferAdd = 5.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
 pub enum ActionType {
     Reveal,
     Unstake,
+    PrepareTransfer,
+    ActivatePosition,
+    NativeTransferRemove,
+    NativeTransferAdd,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
