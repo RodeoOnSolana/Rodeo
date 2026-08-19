@@ -240,21 +240,30 @@ jobs:
           chmod +x scripts/verify-mpl-core-program.sh
           MPL_CORE_EXPECTED_SHA256="${MPL_CORE_EXPECTED_SHA256:-}" scripts/verify-mpl-core-program.sh
 
-      - name: Run epoch localnet suite
+      - name: Configure local validator wallet
+        run: |
+          mkdir -p "$HOME/.config/solana"
+          solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
+          solana config set --url localhost
+
+      - name: Build epoch-profile test program binary
+        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-epoch,test-short-claim-cooldown,test-fixtures
+
+      - name: Anchor localnet integration tests (epoch profile)
         id: epoch-suite
         timeout-minutes: 45
         run: |
           set -u -o pipefail
           set +e
-          chmod +x scripts/run-localnet-suite.sh scripts/ci-localnet-health.sh
-          scripts/ci-localnet-health.sh "http://127.0.0.1:8899" /tmp/phase0-epoch-health.log /tmp/rodeo-localnet-suite-ledger-epoch- &
+          chmod +x scripts/ci-localnet-health.sh
+          scripts/ci-localnet-health.sh "http://127.0.0.1:8899" /tmp/phase0-epoch-health.log .anchor/test-ledger &
           HEALTH_PID=$!
-          RODEO_LOCALNET_PORT=8899 scripts/run-localnet-suite.sh epoch 2>&1 | tee /tmp/phase0-epoch.log
+          RODEO_TEST_SUITE=epoch anchor test --skip-build --no-idl 2>&1 | tee /tmp/phase0-epoch.log
           TEST_EXIT=${PIPESTATUS[0]}
           kill $HEALTH_PID 2>/dev/null || true
           wait $HEALTH_PID 2>/dev/null || true
           mkdir -p phase0-epoch-logs
-          cp /tmp/phase0-epoch*.log /tmp/rodeo-epoch*.log phase0-epoch-logs/ 2>/dev/null || true
+          cp /tmp/phase0-epoch*.log .anchor/test-ledger/test-ledger-log.txt phase0-epoch-logs/ 2>/dev/null || true
           exit $TEST_EXIT
 
       - name: Upload epoch logs
@@ -352,21 +361,30 @@ jobs:
           chmod +x scripts/verify-mpl-core-program.sh
           MPL_CORE_EXPECTED_SHA256="${MPL_CORE_EXPECTED_SHA256:-}" scripts/verify-mpl-core-program.sh
 
-      - name: Run claim localnet suite
+      - name: Configure local validator wallet
+        run: |
+          mkdir -p "$HOME/.config/solana"
+          solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
+          solana config set --url localhost
+
+      - name: Build claim-profile test program binary
+        run: scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_core -- --features mock-randomness,test-short-timeout,test-short-claim-cooldown,test-fixtures
+
+      - name: Anchor localnet integration tests (claim profile)
         id: claim-suite
         timeout-minutes: 45
         run: |
           set -u -o pipefail
           set +e
-          chmod +x scripts/run-localnet-suite.sh scripts/ci-localnet-health.sh
-          scripts/ci-localnet-health.sh "http://127.0.0.1:8899" /tmp/phase0-claim-health.log /tmp/rodeo-localnet-suite-ledger-claim- &
+          chmod +x scripts/ci-localnet-health.sh
+          scripts/ci-localnet-health.sh "http://127.0.0.1:8899" /tmp/phase0-claim-health.log .anchor/test-ledger &
           HEALTH_PID=$!
-          RODEO_LOCALNET_PORT=8899 scripts/run-localnet-suite.sh claim 2>&1 | tee /tmp/phase0-claim.log
+          RODEO_TEST_SUITE=claim anchor test --skip-build --no-idl 2>&1 | tee /tmp/phase0-claim.log
           TEST_EXIT=${PIPESTATUS[0]}
           kill $HEALTH_PID 2>/dev/null || true
           wait $HEALTH_PID 2>/dev/null || true
           mkdir -p phase0-claim-logs
-          cp /tmp/phase0-claim*.log /tmp/rodeo-claim*.log phase0-claim-logs/ 2>/dev/null || true
+          cp /tmp/phase0-claim*.log .anchor/test-ledger/test-ledger-log.txt phase0-claim-logs/ 2>/dev/null || true
           exit $TEST_EXIT
 
       - name: Upload claim logs
