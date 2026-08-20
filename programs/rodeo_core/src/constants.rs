@@ -1,3 +1,5 @@
+use anchor_lang::prelude::{Pubkey, pubkey};
+
 pub const RODEO_DECIMALS_MAX: u8 = 9;
 pub const RODEO_TOTAL_SUPPLY_WHOLE: u64 = 1_000_000_000;
 pub const STAKE_AMOUNT_WHOLE_RODEO: u64 = 100_000;
@@ -100,6 +102,11 @@ pub const SEED_RECEIPT_AUTHORITY: &[u8] = b"receipt-authority";
 pub const SEED_POSITION_RECEIPT: &[u8] = b"receipt";
 pub const SEED_RECEIPT_COLLECTION: &[u8] = b"receipt-collection";
 pub const SEED_RECEIPT_FUNDER: &[u8] = b"receipt-funder";
+
+/// Canonical Rodeo Marketplace program ID and authority seeds.
+/// Only this program's market_authority PDA may invoke seller-offline native transfers.
+pub const RODEO_MARKET_PROGRAM_ID: Pubkey = pubkey!("9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n");
+pub const SEED_MARKET_AUTHORITY: &[u8] = b"market-authority";
 
 // PositionReceipt v1 configuration. The reserve covers the measured MPL
 // Core `CreateV2` rent for a collection-member frozen receipt plus a small

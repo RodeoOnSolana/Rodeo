@@ -29,6 +29,11 @@ import {
 } from "@solana/spl-token";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  buildTestFixtureCloseReceiptFunderIx,
+  buildTestFixtureCreateReceiptFunderIx,
+  buildTestFixtureSetGlobalGameStateIx,
+} from "./fixture-instructions.js";
+import {
   BullRegistryTracker,
   deriveBullRegistryPda,
   deriveBullProofBufferPda,
@@ -1065,20 +1070,16 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
 
   async function fixtureSetCompletedReveals(total: number) {
     const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
-    await rodeoCoreProgram.methods
-      .testFixtureSetGlobalGameState(
-        new BN(total),
-        game.nextPositionId,
-        game.activeBullCount,
-        game.totalActiveBullPower,
-      )
-      .accounts({
-        authority: payer.publicKey,
-        globalConfig,
-        globalGameState,
-      })
-      .signers([payer])
-      .rpc();
+    const ix = buildTestFixtureSetGlobalGameStateIx(
+      payer.publicKey,
+      globalConfig,
+      globalGameState,
+      new BN(total),
+      game.nextPositionId,
+      game.activeBullCount,
+      game.totalActiveBullPower,
+    );
+    await provider.sendAndConfirm(new web3.Transaction().add(ix), [payer]);
   }
 
   async function recoverRevealTimeout(positionId: BN, caller = payer, owner = payer) {
@@ -5065,29 +5066,22 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     // Close that PDA and recreate it with the bare rent-exempt minimum for 0 bytes.
     // This is a valid System-Program-owned PDA, but it cannot pay the MPL Core
     // asset rent in settle_reveal, causing a late CreateV2 CPI failure.
-    await rodeoCoreProgram.methods
-      .testFixtureCloseReceiptFunder()
-      .accounts({
-        authority: payer.publicKey,
-        position,
-        funder: receiptFunder,
-        beneficiary: payer.publicKey,
-        systemProgram: web3.SystemProgram.programId,
-      })
-      .signers([payer])
-      .rpc();
+    const closeFunderIx = buildTestFixtureCloseReceiptFunderIx(
+      payer.publicKey,
+      position,
+      receiptFunder,
+      payer.publicKey,
+    );
+    await provider.sendAndConfirm(new web3.Transaction().add(closeFunderIx), [payer]);
 
     const funderLamportsBeforeFailure = new BN(await provider.connection.getMinimumBalanceForRentExemption(0));
-    await rodeoCoreProgram.methods
-      .testFixtureCreateReceiptFunder(funderLamportsBeforeFailure)
-      .accounts({
-        authority: payer.publicKey,
-        position,
-        funder: receiptFunder,
-        systemProgram: web3.SystemProgram.programId,
-      })
-      .signers([payer])
-      .rpc();
+    const createFunderIx = buildTestFixtureCreateReceiptFunderIx(
+      payer.publicKey,
+      position,
+      receiptFunder,
+      funderLamportsBeforeFailure,
+    );
+    await provider.sendAndConfirm(new web3.Transaction().add(createFunderIx), [payer]);
 
     const funderInfoBeforeFailure = await provider.connection.getAccountInfo(receiptFunder);
     expect(funderInfoBeforeFailure).not.toBeNull();
@@ -5397,20 +5391,16 @@ describe.skipIf(skipClaimSuite)("Anchor localnet workspace (claim profile)", () 
     // mint-theft proof.  This fixture isolates the action-timeout behavior
     // under test from unrelated post-threshold payload requirements.
     const gameBefore = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
-    await rodeoCoreProgram.methods
-      .testFixtureSetGlobalGameState(
-        new BN(0),
-        gameBefore.nextPositionId,
-        gameBefore.activeBullCount,
-        gameBefore.totalActiveBullPower,
-      )
-      .accounts({
-        authority: payer.publicKey,
-        globalConfig,
-        globalGameState,
-      })
-      .signers([payer])
-      .rpc();
+    const resetRevealsIx = buildTestFixtureSetGlobalGameStateIx(
+      payer.publicKey,
+      globalConfig,
+      globalGameState,
+      new BN(0),
+      gameBefore.nextPositionId,
+      gameBefore.activeBullCount,
+      gameBefore.totalActiveBullPower,
+    );
+    await provider.sendAndConfirm(new web3.Transaction().add(resetRevealsIx), [payer]);
 
     const { positionId, position } = await findBullPosition();
 

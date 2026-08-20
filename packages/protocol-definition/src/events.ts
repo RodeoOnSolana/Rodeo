@@ -73,6 +73,46 @@ export type PositionGiftedEvent = ProtocolEventEnvelope<"positionGifted", {
   readonly to: string;
 }>;
 
+export type PositionOwnershipTransferredEvent = ProtocolEventEnvelope<"positionOwnershipTransferred", {
+  readonly position: string;
+  readonly seller: string;
+  readonly buyer: string;
+  readonly claimPolicyVersion: bigint;
+  readonly claimClass: string;
+}>;
+
+export type PositionTransferPreparedEvent = ProtocolEventEnvelope<"positionTransferPrepared", {
+  readonly position: string;
+  readonly owner: string;
+  readonly claimPolicyVersion: bigint;
+  readonly claimClass: string;
+  readonly creditAmount: bigint;
+}>;
+
+export type PositionActivatedEvent = ProtocolEventEnvelope<"positionActivated", {
+  readonly position: string;
+  readonly owner: string;
+  readonly claimPolicyVersion: bigint;
+  readonly claimClass: string;
+}>;
+
+export type ClaimCreditCheckpointedEvent = ProtocolEventEnvelope<"claimCreditCheckpointed", {
+  readonly position: string;
+  readonly wallet: string;
+  readonly claimPolicyVersion: bigint;
+  readonly claimClass: string;
+  readonly amountAtomic: bigint;
+}>;
+
+export type ClaimCreditClaimedEvent = ProtocolEventEnvelope<"claimCreditClaimed", {
+  readonly wallet: string;
+  readonly claimPolicyVersion: bigint;
+  readonly claimClass: string;
+  readonly grossAmount: bigint;
+  readonly ownerAmount: bigint;
+  readonly bullPoolAmount: bigint;
+}>;
+
 export type RewardFundingRecognizedEvent = ProtocolEventEnvelope<"rewardFundingRecognized", {
   readonly amountAtomic: bigint;
   readonly recognizedRewardBalanceAtomic: bigint;
@@ -293,6 +333,11 @@ export type RodeoProtocolEvent =
   | PositionRevealedEvent
   | PositionSoldEvent
   | PositionGiftedEvent
+  | PositionOwnershipTransferredEvent
+  | PositionTransferPreparedEvent
+  | PositionActivatedEvent
+  | ClaimCreditCheckpointedEvent
+  | ClaimCreditClaimedEvent
   | RewardFundingRecognizedEvent
   | RewardPaidEvent
   | SuitRewardClaimedEvent

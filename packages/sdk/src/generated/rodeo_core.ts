@@ -1225,6 +1225,15 @@ export const rodeoCoreIdl = {
           "name": "recipient"
         },
         {
+          "name": "payer",
+          "docs": [
+            "Pays rent for the seller ClaimCredit if it needs to be created.",
+            "Has no economic authority over the credit."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
           "name": "global_config",
           "pda": {
             "seeds": [
@@ -2067,6 +2076,244 @@ export const rodeoCoreIdl = {
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "market_transfer_position",
+      "discriminator": [
+        16,
+        177,
+        217,
+        21,
+        67,
+        148,
+        39,
+        229
+      ],
+      "accounts": [
+        {
+          "name": "seller",
+          "docs": [
+            "seller has already authorized the sale through a Rodeo Listing, and the",
+            "Rodeo market_authority PDA signs on her behalf."
+          ]
+        },
+        {
+          "name": "buyer",
+          "docs": [
+            "receipt to this account without requiring its signature."
+          ]
+        },
+        {
+          "name": "market_authority",
+          "docs": [
+            "The canonical Rodeo marketplace authority PDA.  It can only sign through",
+            "the rodeo_market program after validating the seller-signed Listing."
+          ],
+          "signer": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                132,
+                159,
+                121,
+                150,
+                58,
+                201,
+                84,
+                239,
+                223,
+                6,
+                241,
+                126,
+                114,
+                194,
+                241,
+                240,
+                86,
+                127,
+                46,
+                55,
+                173,
+                169,
+                72,
+                132,
+                49,
+                179,
+                109,
+                75,
+                107,
+                174,
+                182,
+                115
+              ]
+            }
+          }
+        },
+        {
+          "name": "payer",
+          "docs": [
+            "Pays rent for the seller ClaimCredit when it is created.  Has no",
+            "economic authority over the credit: wallet, bump, and claim class are",
+            "bound to the seller."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              },
+              {
+                "kind": "account",
+                "path": "position.position_id",
+                "account": "Position"
+              }
+            ]
+          }
+        },
+        {
+          "name": "reward_state",
+          "writable": true
+        },
+        {
+          "name": "bull_accumulator",
+          "writable": true
+        },
+        {
+          "name": "bull_registry",
+          "writable": true
+        },
+        {
+          "name": "global_game_state",
+          "writable": true
+        },
+        {
+          "name": "bull_proof_buffer",
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "receipt_asset",
+          "writable": true
+        },
+        {
+          "name": "receipt_collection",
+          "writable": true
+        },
+        {
+          "name": "receipt_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116,
+                  45,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "global_config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "seller_claim_credit",
+          "writable": true
+        },
+        {
+          "name": "mpl_core_program",
+          "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
     },
     {
       "name": "native_transfer_position",

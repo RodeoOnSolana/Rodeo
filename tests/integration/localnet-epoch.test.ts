@@ -649,11 +649,25 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
 
     const allowedExtraPrefixes = ["test_fixture_", "benchmark_"];
     const allowedExtraInstructions = [
+      // Bull proof buffer lifecycle
       "append_bull_proof",
       "close_bull_proof",
       "expand_bull_proof_buffer",
       "finalize_bull_proof",
       "initialize_bull_proof",
+      // Native transfer Bull proof buffer lifecycle (Phase 4A)
+      "append_transfer_bull_proof",
+      "close_transfer_bull_proof",
+      "finalize_transfer_bull_proof",
+      "initialize_transfer_bull_proof",
+      // Phase 4A Architecture F ownership/transfer surface
+      "activate_position",
+      "claim_credit",
+      "gift_position",
+      "market_transfer_position",
+      "native_transfer_position",
+      "prepare_transfer",
+      // Fixture helpers
       "set_current_config_version_fixture",
       "create_protocol_config_v2_fixture",
       "test_set_pause_flags",
@@ -694,6 +708,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       "BullAccumulator",
       "BullProofBuffer",
       "BullRegistry",
+      "ClaimCredit",
       "Position",
       "PendingRandomness",
       "WalletClaimCooldown",
@@ -1029,7 +1044,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           rewardVault,
           clock: web3.SYSVAR_CLOCK_PUBKEY,
         })
-        .rpc(),
+        .rpc({ commitment: "processed", skipPreflight: true }),
     );
     const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
     expect(reward.recognizedRewardBalanceAtomic.gtn(0)).toBe(true);
@@ -1453,12 +1468,13 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
   }
 
   async function ensureEpochsClosed() {
+    const batch = 16;
     for (let i = 0; i < 100; i++) {
       const before = (
         await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState)
       ).currentEpoch;
       try {
-        await closeEpochsRaw(8);
+        await closeEpochsRaw(batch);
       } catch (err) {
         if (isNoElapsedEpoch(err)) return;
         throw err;
@@ -1468,7 +1484,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       ).currentEpoch;
       // If fewer than the max batch was processed, there were no more elapsed
       // epochs at the moment the transaction executed.
-      if (after.sub(before).toNumber() < 8) return;
+      if (after.sub(before).toNumber() < batch) return;
     }
   }
 
@@ -1503,7 +1519,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     );
   }
 
-  async function runWhenEpochsClosed<T>(op: () => Promise<T>, maxAttempts = 8): Promise<T> {
+  async function runWhenEpochsClosed<T>(op: () => Promise<T>, maxAttempts = 24): Promise<T> {
     let lastErr: unknown;
     for (let i = 0; i < maxAttempts; i++) {
       await ensureEpochsClosed();
@@ -1570,14 +1586,14 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     expect(sim.value.err).not.toBeNull();
 
     const customCode = extractCustomProgramError(sim.value.err);
-    expect(customCode).toBe(6027);
+    expect(customCode).toBe(6028);
 
     expect(sim.value.logs).not.toBeNull();
     const hasEpochsNotClosed = (sim.value.logs ?? []).some(
       (log: string) =>
         log.includes("EpochsNotClosed") ||
         log.includes("All elapsed epochs must be closed") ||
-        log.includes("custom program error: 0x178b"),
+        log.includes("custom program error: 0x178c"),
     );
     expect(hasEpochsNotClosed).toBe(true);
   }
@@ -2634,7 +2650,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           rewardVault,
           clock: web3.SYSVAR_CLOCK_PUBKEY,
         })
-        .rpc(),
+        .rpc({ commitment: "processed", skipPreflight: true }),
     );
 
     const rewardAfter = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
@@ -2908,7 +2924,7 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
           rewardVault,
           clock: web3.SYSVAR_CLOCK_PUBKEY,
         })
-        .rpc(),
+        .rpc({ commitment: "processed", skipPreflight: true }),
     );
 
     const recognized = await recognizedPromise;
@@ -3162,6 +3178,63 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     );
     await fixtureSetCurrentConfigVersion(protocolConfigV1);
 
+    const logState = async (tag: string, positionKey: web3.PublicKey, extra?: any) => {
+      let pos: any | null = null;
+      try {
+        pos = await (rodeoCoreProgram.account as any).position.fetch(positionKey);
+      } catch (_err) {
+        /* Position account may have been closed by settle_unstake */
+      }
+      const reward = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+      const game = await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
+      const out: Record<string, any> = {
+        tag,
+        ...(pos
+          ? {
+              positionId: pos.positionId.toString(),
+              owner: pos.owner.toBase58(),
+              role: pos.role,
+              cowboyKind: JSON.stringify(pos.cowboyKind),
+              configVersion: pos.revealConfigVersion.toString(),
+              accrualWeight: pos.accrualWeight,
+              buckPower: pos.buckPower,
+              openedAt: pos.openedAt.toString(),
+              activeSince: pos.activeSince.toString(),
+              unstakeEligibleAt: pos.unstakeEligibleAt.toString(),
+              lastCowboyRewardIndex: pos.lastCowboyRewardIndex.toString(),
+              cowboyAccrualRemainderScaled: pos.cowboyAccrualRemainderScaled.toString(),
+              claimableAnsemAtomic: pos.claimableAnsemAtomic.toString(),
+              pendingActionActive: pos.pendingActionActive,
+              pendingActionType: JSON.stringify(pos.pendingActionType),
+              pendingActionNonce: pos.pendingActionNonce.toString(),
+              nextActionNonce: pos.nextActionNonce.toString(),
+              settlementNonce: pos.settlementNonce.toString(),
+              stateVersion: pos.stateVersion.toString(),
+            }
+          : { positionClosed: true }),
+        rewardCurrentEpoch: reward.currentEpoch.toString(),
+        rewardEpochStartedAt: reward.epochStartedAt.toString(),
+        rewardLastClosedEpochTimestamp: reward.lastClosedEpochTimestamp.toString(),
+        totalAnsemLiabilityAtomic: reward.totalAnsemLiabilityAtomic.toString(),
+        cowboyUnmaterializedLiabilityAtomic: reward.cowboyUnmaterializedLiabilityAtomic.toString(),
+        positionClaimableLiabilityAtomic: reward.positionClaimableLiabilityAtomic.toString(),
+        bullPoolLiabilityAtomic: reward.bullPoolLiabilityAtomic.toString(),
+        bullPoolUnallocatedLiabilityAtomic: reward.bullPoolUnallocatedLiabilityAtomic.toString(),
+        recognizedRewardBalanceAtomic: reward.recognizedRewardBalanceAtomic.toString(),
+        ansemEmittedAtomic: reward.ansemEmittedAtomic.toString(),
+        ansemClaimedAtomic: reward.ansemClaimedAtomic.toString(),
+        orphanedRewardReleasedAtomic: reward.orphanedRewardReleasedAtomic.toString(),
+        cowboyRewardIndex: reward.cowboyRewardIndex.toString(),
+        cowboyIndexRemainderScaled: reward.cowboyIndexRemainderScaled.toString(),
+        cowboyOrphanedAccrualRemainderScaled: reward.cowboyOrphanedAccrualRemainderScaled.toString(),
+        gameActiveCowboyCount: game.activeCowboyCount.toString(),
+        gameTotalActiveCowboyWeight: game.totalActiveCowboyWeight.toString(),
+        gameActiveBullCount: game.activeBullCount.toString(),
+      };
+      if (extra !== undefined) Object.assign(out, extra);
+      console.log("[DIAGNOSTIC]", JSON.stringify(out, null, 2));
+    };
+
     await ensureEpochsClosed();
     await fixtureRecognizeRewards(new BN(100_000_000_000_000));
 
@@ -3209,6 +3282,8 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const gameBeforeRequest =
       await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
 
+    await logState("A before request_unstake", position);
+
     const requestInfo = await runWhenEpochsClosed(() => requestUnstake(positionId));
     const positionAddr = requestInfo.position;
 
@@ -3219,6 +3294,13 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     const pendingAfterRequest = await rodeoAccounts(rodeoCoreProgram).pendingRandomness.fetch(
       requestInfo.pendingRandomness,
     );
+
+    await logState("B after request_unstake", positionAddr, {
+      pendingActionNonce: pendingAfterRequest.actionNonce.toString(),
+      pendingCommittedSlot: pendingAfterRequest.committedSlot.toString(),
+      pendingCommittedProtocolEpoch: pendingAfterRequest.committedProtocolEpoch.toString(),
+      pendingTimeoutTimestamp: pendingAfterRequest.timeoutTimestamp.toString(),
+    });
 
     expect(positionAfterRequest.pendingActionActive).toBe(true);
     expect(positionAfterRequest.pendingActionType).toHaveProperty("unstake");
@@ -3314,12 +3396,32 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
         .div(scale);
       expectedSynchronized = preRequestClaimable.add(postRequestAccrual);
 
+      await logState("C before settle_unstake", positionAddr, {
+        preRequestClaimable: preRequestClaimable.toString(),
+        requestRemainder: requestRemainder.toString(),
+        lastCowboyIndexAtRequest: lastCowboyIndexAtRequest.toString(),
+        rewardBeforeSettleCowboyRewardIndex: rewardBeforeSettle.cowboyRewardIndex.toString(),
+        indexDelta: indexDelta.toString(),
+        postRequestAccrual: postRequestAccrual.toString(),
+        expectedSynchronized: expectedSynchronized.toString(),
+      });
+
       await settleUnstake(positionId, requestInfo.actionNonce);
     });
 
     const positionUnstaked = await positionUnstakedPromise;
+
+    await logState("D after settle_unstake", positionAddr, {
+      synchronizedAnsem: positionUnstaked.synchronizedAnsem.toString(),
+      ansemPaidToOwner: positionUnstaked.ansemPaidToOwner.toString(),
+      ansemRoutedToBullPool: positionUnstaked.ansemRoutedToBullPool.toString(),
+      ansemFate: JSON.stringify(positionUnstaked.ansemFate),
+    });
+
     const ansemAfterSettle = await getAccount(provider.connection, payerAnsemAccount);
     const rewardAfterSettle = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+    const gameAfterSettle =
+      await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
 
     // settleUnstake() calls ensureEpochsClosed() itself, so the global
     // cowboyRewardIndex used by the program may be higher than the pre-settle
@@ -3331,9 +3433,6 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       .add(requestRemainder)
       .div(scale);
     expectedSynchronized = preRequestClaimable.add(postSettleAccrual);
-
-    const gameAfterSettle =
-      await rodeoAccounts(rodeoCoreProgram).globalGameState.fetch(globalGameState);
 
     expect(positionUnstaked.synchronizedAnsem.toString()).toBe(expectedSynchronized.toString());
     expect(positionUnstaked.ansemPaidToOwner.toString()).toBe(expectedSynchronized.toString());

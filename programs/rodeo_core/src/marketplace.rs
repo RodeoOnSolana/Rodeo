@@ -62,6 +62,13 @@ pub fn policy_bps(class: ClaimClass) -> (u64, u64) {
     }
 }
 
+pub fn market_authority_pda() -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[SEED_MARKET_AUTHORITY],
+        &crate::constants::RODEO_MARKET_PROGRAM_ID,
+    )
+}
+
 pub fn claim_credit_pda(
     wallet: &Pubkey,
     claim_policy_version: u64,
@@ -178,7 +185,7 @@ pub fn settle_claim_amount<'info>(
 fn set_receipt_frozen<'info>(
     receipt_asset: &UncheckedAccount<'info>,
     receipt_collection: &UncheckedAccount<'info>,
-    payer: &Signer<'info>,
+    payer: &AccountInfo<'info>,
     receipt_authority: &UncheckedAccount<'info>,
     mpl_core_program: &UncheckedAccount<'info>,
     system_program: &Program<'info, System>,
@@ -188,7 +195,7 @@ fn set_receipt_frozen<'info>(
     UpdatePluginV1CpiBuilder::new(&mpl_core_program.to_account_info())
         .asset(&receipt_asset.to_account_info())
         .collection(Some(&receipt_collection.to_account_info()))
-        .payer(&payer.to_account_info())
+        .payer(payer)
         .authority(Some(&receipt_authority.to_account_info()))
         .system_program(&system_program.to_account_info())
         .plugin(Plugin::PermanentFreezeDelegate(
@@ -201,9 +208,9 @@ fn set_receipt_frozen<'info>(
 fn transfer_receipt_via_delegate<'info>(
     receipt_asset: &UncheckedAccount<'info>,
     receipt_collection: &UncheckedAccount<'info>,
-    payer: &Signer<'info>,
+    payer: &AccountInfo<'info>,
     receipt_authority: &UncheckedAccount<'info>,
-    new_owner: &UncheckedAccount<'info>,
+    new_owner: &AccountInfo<'info>,
     mpl_core_program: &UncheckedAccount<'info>,
     system_program: &Program<'info, System>,
     receipt_authority_seeds: &[&[u8]],
@@ -211,9 +218,9 @@ fn transfer_receipt_via_delegate<'info>(
     TransferV1CpiBuilder::new(&mpl_core_program.to_account_info())
         .asset(&receipt_asset.to_account_info())
         .collection(Some(&receipt_collection.to_account_info()))
-        .payer(&payer.to_account_info())
+        .payer(payer)
         .authority(Some(&receipt_authority.to_account_info()))
-        .new_owner(&new_owner.to_account_info())
+        .new_owner(new_owner)
         .system_program(Some(&system_program.to_account_info()))
         .invoke_signed(&[receipt_authority_seeds])?;
     Ok(())
@@ -479,13 +486,30 @@ pub struct NativeTransferPosition<'info> {
 }
 
 #[derive(Accounts)]
-pub struct GiftPosition<'info> {
-    #[account(mut)]
-    pub seller: Signer<'info>,
+pub struct MarketTransferPosition<'info> {
+    /// CHECK: The current Position owner.  Does NOT sign this instruction; the
+    /// seller has already authorized the sale through a Rodeo Listing, and the
+    /// Rodeo market_authority PDA signs on her behalf.
+    pub seller: UncheckedAccount<'info>,
 
-    /// CHECK: The recipient address.
-    #[account()]
-    pub recipient: UncheckedAccount<'info>,
+    /// CHECK: The buyer address; the PermanentTransferDelegate CPI transfers the
+    /// receipt to this account without requiring its signature.
+    pub buyer: UncheckedAccount<'info>,
+
+    /// The canonical Rodeo marketplace authority PDA.  It can only sign through
+    /// the rodeo_market program after validating the seller-signed Listing.
+    #[account(
+        seeds = [SEED_MARKET_AUTHORITY],
+        bump,
+        seeds::program = crate::constants::RODEO_MARKET_PROGRAM_ID,
+    )]
+    pub market_authority: Signer<'info>,
+
+    /// Pays rent for the seller ClaimCredit when it is created.  Has no
+    /// economic authority over the credit: wallet, bump, and claim class are
+    /// bound to the seller.
+    #[account(mut)]
+    pub payer: Signer<'info>,
 
     #[account(
         seeds = [SEED_GLOBAL_CONFIG],
@@ -536,7 +560,84 @@ pub struct GiftPosition<'info> {
 
     #[account(
         init_if_needed,
-        payer = seller,
+        payer = payer,
+        space = 8 + ClaimCredit::INIT_SPACE,
+        seeds = [SEED_CLAIM_CREDIT, seller.key().as_ref(), &CLAIM_POLICY_VERSION_V1, &[claim_class_of_position(&position) as u8]],
+        bump,
+    )]
+    pub seller_claim_credit: Box<Account<'info, ClaimCredit>>,
+
+    /// CHECK: MPL Core program; constrained to canonical ID.
+    #[account(address = mpl_core::ID)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct GiftPosition<'info> {
+    #[account(mut)]
+    pub seller: Signer<'info>,
+
+    /// CHECK: The recipient address.
+    #[account()]
+    pub recipient: UncheckedAccount<'info>,
+
+    /// Pays rent for the seller ClaimCredit if it needs to be created.
+    /// Has no economic authority over the credit.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(
+        seeds = [SEED_GLOBAL_CONFIG],
+        bump = global_config.bump,
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POSITION, global_config.key().as_ref(), &position.position_id.to_le_bytes()],
+        bump = position.bump,
+        constraint = position.owner == seller.key() @ RodeoError::InvalidOwner,
+        constraint = position.status == PositionStatus::Active @ RodeoError::InvalidRole,
+        constraint = !position.pending_action_active @ RodeoError::PendingActionConflict,
+    )]
+    pub position: Box<Account<'info, Position>>,
+
+    #[account(mut)]
+    pub reward_state: Box<Account<'info, RewardState>>,
+
+    #[account(mut)]
+    pub bull_accumulator: Box<Account<'info, BullAccumulator>>,
+
+    #[account(mut)]
+    pub bull_registry: Box<Account<'info, BullRegistry>>,
+
+    #[account(mut)]
+    pub global_game_state: Box<Account<'info, GlobalGameState>>,
+
+    /// CHECK: Optional composite transfer BullProofBuffer (required when Position.role == Bull).
+    #[account(mut)]
+    pub bull_proof_buffer: Option<UncheckedAccount<'info>>,
+
+    /// CHECK: MPL Core PositionReceipt asset account.
+    #[account(mut)]
+    pub receipt_asset: UncheckedAccount<'info>,
+
+    /// CHECK: Official receipt collection.
+    #[account(mut)]
+    pub receipt_collection: UncheckedAccount<'info>,
+
+    /// CHECK: Stateless ReceiptAuthority PDA.
+    #[account(
+        seeds = [SEED_RECEIPT_AUTHORITY, global_config.key().as_ref()],
+        bump,
+    )]
+    pub receipt_authority: UncheckedAccount<'info>,
+
+    #[account(
+        init_if_needed,
+        payer = payer,
         space = 8 + ClaimCredit::INIT_SPACE,
         seeds = [SEED_CLAIM_CREDIT, seller.key().as_ref(), &CLAIM_POLICY_VERSION_V1, &[claim_class_of_position(&position) as u8]],
         bump,
@@ -900,7 +1001,7 @@ pub fn prepare_transfer(ctx: Context<PrepareTransfer>) -> Result<()> {
     set_receipt_frozen(
         &ctx.accounts.receipt_asset,
         &ctx.accounts.receipt_collection,
-        &ctx.accounts.owner,
+        &ctx.accounts.owner.to_account_info(),
         &ctx.accounts.receipt_authority,
         &ctx.accounts.mpl_core_program,
         &ctx.accounts.system_program,
@@ -978,7 +1079,7 @@ pub fn activate_position(ctx: Context<ActivatePosition>) -> Result<()> {
     set_receipt_frozen(
         &ctx.accounts.receipt_asset,
         &ctx.accounts.receipt_collection,
-        &ctx.accounts.new_owner,
+        &ctx.accounts.new_owner.to_account_info(),
         &ctx.accounts.receipt_authority,
         &ctx.accounts.mpl_core_program,
         &ctx.accounts.system_program,
@@ -1056,17 +1157,30 @@ pub fn claim_credit(ctx: Context<ClaimCreditAccounts>) -> Result<()> {
     Ok(())
 }
 
-pub fn native_transfer_position(ctx: Context<NativeTransferPosition>) -> Result<()> {
-    let now = Clock::get()?.unix_timestamp;
-    crate::require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
-
-    let live_owner = parse_core_asset_owner(&ctx.accounts.receipt_asset.to_account_info())?;
-    require_keys_eq!(live_owner, ctx.accounts.seller.key(), RodeoError::InvalidCoreAssetOwner);
-
-    let position = &mut ctx.accounts.position;
+fn perform_native_transfer<'info>(
+    position: &mut Account<'info, Position>,
+    seller_account: &AccountInfo<'info>,
+    new_owner_account: &AccountInfo<'info>,
+    receipt_asset: &UncheckedAccount<'info>,
+    receipt_collection: &UncheckedAccount<'info>,
+    receipt_authority: &UncheckedAccount<'info>,
+    mpl_core_program: &UncheckedAccount<'info>,
+    system_program: &Program<'info, System>,
+    global_config: &Account<'info, GlobalConfig>,
+    reward_state: &mut Account<'info, RewardState>,
+    bull_accumulator: &mut Account<'info, BullAccumulator>,
+    bull_registry: &mut Account<'info, BullRegistry>,
+    global_game_state: &mut Account<'info, GlobalGameState>,
+    bull_proof_buffer: Option<&UncheckedAccount<'info>>,
+    seller_claim_credit: &mut Account<'info, ClaimCredit>,
+    payer: &AccountInfo<'info>,
+    receipt_authority_bump: u8,
+    seller_claim_credit_bump: u8,
+) -> Result<u64> {
     let position_key = position.key();
-    let seller = ctx.accounts.seller.key();
-    let buyer = ctx.accounts.buyer.key();
+    let seller = seller_account.key();
+    let new_owner = new_owner_account.key();
+    let now = Clock::get()?.unix_timestamp;
 
     require!(position.owner == seller, RodeoError::InvalidOwner);
     require!(position.status == PositionStatus::Active, RodeoError::InvalidRole);
@@ -1075,21 +1189,18 @@ pub fn native_transfer_position(ctx: Context<NativeTransferPosition>) -> Result<
     sync_position_rewards(
         position,
         position_key,
-        &mut ctx.accounts.reward_state,
-        &mut ctx.accounts.bull_accumulator,
+        reward_state,
+        bull_accumulator,
     )?;
     let credit_amount = checkpoint_position_claimable(
         position,
-        &mut ctx.accounts.seller_claim_credit,
+        seller_claim_credit,
         seller,
-        ctx.bumps.seller_claim_credit,
+        seller_claim_credit_bump,
     )?;
 
     if position.role == Role::Bull {
-        let buffer_info = ctx
-            .accounts
-            .bull_proof_buffer
-            .as_ref()
+        let buffer_info = bull_proof_buffer
             .ok_or(RodeoError::BullProofBufferIncomplete)?
             .to_account_info();
         let buffer_data = buffer_info.try_borrow_data()?;
@@ -1098,65 +1209,147 @@ pub fn native_transfer_position(ctx: Context<NativeTransferPosition>) -> Result<
             &buffer_data,
             &position_key,
             &seller,
-            &ctx.accounts.bull_registry,
+            bull_registry,
             now,
         )?;
         execute_native_transfer_composite(
             position,
             position_key,
-            &mut ctx.accounts.bull_registry,
+            bull_registry,
             &payload,
             &seller,
-            &buyer,
+            &new_owner,
         )?;
         drop(buffer_data);
         mark_transfer_buffer_consumed(&buffer_info)?;
     }
-    remove_role_from_active_counts(position, &mut ctx.accounts.global_game_state)?;
+    remove_role_from_active_counts(position, global_game_state)?;
 
     transfer_receipt_via_delegate(
-        &ctx.accounts.receipt_asset,
-        &ctx.accounts.receipt_collection,
-        &ctx.accounts.seller,
-        &ctx.accounts.receipt_authority,
-        &ctx.accounts.buyer,
-        &ctx.accounts.mpl_core_program,
-        &ctx.accounts.system_program,
+        receipt_asset,
+        receipt_collection,
+        payer,
+        receipt_authority,
+        new_owner_account,
+        mpl_core_program,
+        system_program,
         &[
             SEED_RECEIPT_AUTHORITY,
-            ctx.accounts.global_config.key().as_ref(),
-            &[ctx.bumps.receipt_authority],
+            global_config.key().as_ref(),
+            &[receipt_authority_bump],
         ],
     )?;
 
-    position.owner = buyer;
-    reset_reward_baseline(position, &ctx.accounts.reward_state, &ctx.accounts.bull_accumulator);
+    position.owner = new_owner;
+    reset_reward_baseline(position, reward_state, bull_accumulator);
 
     if position.role == Role::Bull {
         distribute_unallocated_bull_pool(
-            &mut ctx.accounts.bull_accumulator,
-            &mut ctx.accounts.reward_state,
-            &ctx.accounts.global_game_state,
+            bull_accumulator,
+            reward_state,
+            global_game_state,
         )?;
     }
-    add_role_to_active_counts(position, &mut ctx.accounts.global_game_state)?;
-
-    let claim_class = claim_class_of_position(position);
+    add_role_to_active_counts(position, global_game_state)?;
     position.state_version = math::checked_add_u64(position.state_version, 1)?;
 
+    Ok(credit_amount)
+}
+
+pub fn native_transfer_position(ctx: Context<NativeTransferPosition>) -> Result<()> {
+    let now = Clock::get()?.unix_timestamp;
+    crate::require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
+
+    let live_owner = parse_core_asset_owner(&ctx.accounts.receipt_asset.to_account_info())?;
+    require_keys_eq!(live_owner, ctx.accounts.seller.key(), RodeoError::InvalidCoreAssetOwner);
+
+    let seller = ctx.accounts.seller.key();
+    let buyer = ctx.accounts.buyer.key();
+
+    let credit_amount = perform_native_transfer(
+        &mut ctx.accounts.position,
+        &ctx.accounts.seller.to_account_info(),
+        &ctx.accounts.buyer.to_account_info(),
+        &ctx.accounts.receipt_asset,
+        &ctx.accounts.receipt_collection,
+        &ctx.accounts.receipt_authority,
+        &ctx.accounts.mpl_core_program,
+        &ctx.accounts.system_program,
+        &ctx.accounts.global_config,
+        &mut ctx.accounts.reward_state,
+        &mut ctx.accounts.bull_accumulator,
+        &mut ctx.accounts.bull_registry,
+        &mut ctx.accounts.global_game_state,
+        ctx.accounts.bull_proof_buffer.as_ref(),
+        &mut ctx.accounts.seller_claim_credit,
+        &ctx.accounts.seller.to_account_info(),
+        ctx.bumps.receipt_authority,
+        ctx.bumps.seller_claim_credit,
+    )?;
+
     emit!(PositionOwnershipTransferred {
-        position: position_key,
+        position: ctx.accounts.position.key(),
         seller,
         buyer,
         claim_policy_version: 1,
-        claim_class,
+        claim_class: claim_class_of_position(&ctx.accounts.position),
     });
 
     emit!(ClaimCreditCheckpointed {
-        position: position_key,
+        position: ctx.accounts.position.key(),
         wallet: seller,
         claim_policy_version: 1,
-        claim_class,
+        claim_class: claim_class_of_position(&ctx.accounts.position),
+        amount_atomic: credit_amount,
+    });
+
+    Ok(())
+}
+
+pub fn market_transfer_position(ctx: Context<MarketTransferPosition>) -> Result<()> {
+    let now = Clock::get()?.unix_timestamp;
+    crate::require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
+
+    let live_owner = parse_core_asset_owner(&ctx.accounts.receipt_asset.to_account_info())?;
+    require_keys_eq!(live_owner, ctx.accounts.seller.key(), RodeoError::InvalidCoreAssetOwner);
+
+    let seller = ctx.accounts.seller.key();
+    let buyer = ctx.accounts.buyer.key();
+
+    let credit_amount = perform_native_transfer(
+        &mut ctx.accounts.position,
+        &ctx.accounts.seller.to_account_info(),
+        &ctx.accounts.buyer.to_account_info(),
+        &ctx.accounts.receipt_asset,
+        &ctx.accounts.receipt_collection,
+        &ctx.accounts.receipt_authority,
+        &ctx.accounts.mpl_core_program,
+        &ctx.accounts.system_program,
+        &ctx.accounts.global_config,
+        &mut ctx.accounts.reward_state,
+        &mut ctx.accounts.bull_accumulator,
+        &mut ctx.accounts.bull_registry,
+        &mut ctx.accounts.global_game_state,
+        ctx.accounts.bull_proof_buffer.as_ref(),
+        &mut ctx.accounts.seller_claim_credit,
+        &ctx.accounts.market_authority.to_account_info(),
+        ctx.bumps.receipt_authority,
+        ctx.bumps.seller_claim_credit,
+    )?;
+
+    emit!(PositionOwnershipTransferred {
+        position: ctx.accounts.position.key(),
+        seller,
+        buyer,
+        claim_policy_version: 1,
+        claim_class: claim_class_of_position(&ctx.accounts.position),
+    });
+
+    emit!(ClaimCreditCheckpointed {
+        position: ctx.accounts.position.key(),
+        wallet: seller,
+        claim_policy_version: 1,
+        claim_class: claim_class_of_position(&ctx.accounts.position),
         amount_atomic: credit_amount,
     });
 
@@ -1224,7 +1417,7 @@ pub fn gift_position(ctx: Context<GiftPosition>) -> Result<()> {
     transfer_receipt_via_delegate(
         &ctx.accounts.receipt_asset,
         &ctx.accounts.receipt_collection,
-        &ctx.accounts.seller,
+        &ctx.accounts.seller.to_account_info(),
         &ctx.accounts.receipt_authority,
         &ctx.accounts.recipient,
         &ctx.accounts.mpl_core_program,

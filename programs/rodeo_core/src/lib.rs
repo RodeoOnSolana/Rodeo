@@ -1014,6 +1014,10 @@ pub mod rodeo_core {
         crate::marketplace::native_transfer_position(ctx)
     }
 
+    pub fn market_transfer_position(ctx: Context<MarketTransferPosition>) -> Result<()> {
+        crate::marketplace::market_transfer_position(ctx)
+    }
+
     pub fn gift_position(ctx: Context<GiftPosition>) -> Result<()> {
         crate::marketplace::gift_position(ctx)
     }
