@@ -4,11 +4,11 @@ use mpl_core::instructions::{TransferV1CpiBuilder, UpdatePluginV1CpiBuilder};
 use mpl_core::types::Plugin;
 
 use crate::{
-    bull_registry::{add_bull_to_registry, remove_bull_from_registry, BullLeaf},
     borrowed_proof::{
         verify_bull_ref, verify_owner_ref, BullProofPayloadRef, BullProofRef,
         NativeTransferBullPayloadRef, OwnerProofRef,
     },
+    bull_registry::{add_bull_to_registry, remove_bull_from_registry, BullLeaf},
     constants::*,
     math,
     receipt::parse_core_asset_owner,
@@ -704,8 +704,10 @@ fn remove_role_from_active_counts(
         Role::Bull => {
             global_game_state.active_bull_count =
                 math::checked_sub_u64(global_game_state.active_bull_count, 1)?;
-            global_game_state.total_active_bull_power =
-                math::checked_sub_u64(global_game_state.total_active_bull_power, position.buck_power as u64)?;
+            global_game_state.total_active_bull_power = math::checked_sub_u64(
+                global_game_state.total_active_bull_power,
+                position.buck_power as u64,
+            )?;
         }
         Role::Unassigned => {}
     }
@@ -728,8 +730,10 @@ fn add_role_to_active_counts(
         Role::Bull => {
             global_game_state.active_bull_count =
                 math::checked_add_u64(global_game_state.active_bull_count, 1)?;
-            global_game_state.total_active_bull_power =
-                math::checked_add_u64(global_game_state.total_active_bull_power, position.buck_power as u64)?;
+            global_game_state.total_active_bull_power = math::checked_add_u64(
+                global_game_state.total_active_bull_power,
+                position.buck_power as u64,
+            )?;
         }
         Role::Unassigned => {}
     }
@@ -765,8 +769,12 @@ fn remove_bull_from_current_registry_with_payload(
     bull_registry: &mut BullRegistry,
     payload: &BullProofPayloadRef<'_>,
 ) -> Result<()> {
-    let current_owner = payload.current_owner()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
-    let remove_bull = payload.remove_bull()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let current_owner = payload
+        .current_owner()?
+        .ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let remove_bull = payload
+        .remove_bull()?
+        .ok_or(RodeoError::BullProofBufferIncomplete)?;
 
     require_keys_eq!(
         current_owner.leaf.owner,
@@ -822,8 +830,12 @@ fn add_bull_to_current_registry_with_payload(
     bull_registry: &mut BullRegistry,
     payload: &BullProofPayloadRef<'_>,
 ) -> Result<()> {
-    let current_owner = payload.current_owner()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
-    let current_bull = payload.current_bull()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let current_owner = payload
+        .current_owner()?
+        .ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let current_bull = payload
+        .current_bull()?
+        .ok_or(RodeoError::BullProofBufferIncomplete)?;
 
     let bull_leaf = BullLeaf {
         position: position_key,
@@ -861,10 +873,18 @@ fn execute_native_transfer_composite(
     seller: &Pubkey,
     buyer: &Pubkey,
 ) -> Result<()> {
-    let seller_owner = payload.seller_owner()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
-    let remove_bull = payload.remove_bull()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
-    let buyer_owner = payload.buyer_owner()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
-    let add_bull = payload.add_bull()?.ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let seller_owner = payload
+        .seller_owner()?
+        .ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let remove_bull = payload
+        .remove_bull()?
+        .ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let buyer_owner = payload
+        .buyer_owner()?
+        .ok_or(RodeoError::BullProofBufferIncomplete)?;
+    let add_bull = payload
+        .add_bull()?
+        .ok_or(RodeoError::BullProofBufferIncomplete)?;
 
     require_keys_eq!(
         seller_owner.leaf.owner,
@@ -905,7 +925,11 @@ fn execute_native_transfer_composite(
 
     // 1. Verify and apply removal against starting R0/V.
     verify_owner_ref(&bull_registry.owner_tree_root, seller, seller_owner)?;
-    verify_bull_ref(&seller_owner.leaf.bull_tree_root, &position_key, remove_bull)?;
+    verify_bull_ref(
+        &seller_owner.leaf.bull_tree_root,
+        &position_key,
+        remove_bull,
+    )?;
 
     remove_bull_from_registry(
         bull_registry,
@@ -936,7 +960,11 @@ fn execute_native_transfer_composite(
     Ok(())
 }
 
-fn reset_reward_baseline(position: &mut Position, reward_state: &RewardState, bull_accumulator: &BullAccumulator) {
+fn reset_reward_baseline(
+    position: &mut Position,
+    reward_state: &RewardState,
+    bull_accumulator: &BullAccumulator,
+) {
     position.last_cowboy_reward_index = reward_state.cowboy_reward_index;
     position.last_bull_reward_per_weight = bull_accumulator.reward_per_weight_scaled;
     position.cowboy_accrual_remainder_scaled = 0;
@@ -952,7 +980,11 @@ pub fn prepare_transfer(ctx: Context<PrepareTransfer>) -> Result<()> {
     crate::require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
     let live_owner = parse_core_asset_owner(&ctx.accounts.receipt_asset.to_account_info())?;
-    require_keys_eq!(live_owner, ctx.accounts.owner.key(), RodeoError::InvalidCoreAssetOwner);
+    require_keys_eq!(
+        live_owner,
+        ctx.accounts.owner.key(),
+        RodeoError::InvalidCoreAssetOwner
+    );
 
     let position = &mut ctx.accounts.position;
     let position_key = position.key();
@@ -987,13 +1019,22 @@ pub fn prepare_transfer(ctx: Context<PrepareTransfer>) -> Result<()> {
             &ctx.accounts.bull_registry,
             now,
         )?;
-        remove_bull_from_current_registry_with_payload(position, position_key, &mut ctx.accounts.bull_registry, &payload)?;
+        remove_bull_from_current_registry_with_payload(
+            position,
+            position_key,
+            &mut ctx.accounts.bull_registry,
+            &payload,
+        )?;
         drop(buffer_data);
         mark_transfer_buffer_consumed(&buffer_info)?;
     }
     remove_role_from_active_counts(position, &mut ctx.accounts.global_game_state)?;
 
-    reset_reward_baseline(position, &ctx.accounts.reward_state, &ctx.accounts.bull_accumulator);
+    reset_reward_baseline(
+        position,
+        &ctx.accounts.reward_state,
+        &ctx.accounts.bull_accumulator,
+    );
     position.status = PositionStatus::TransferReady;
     position.state_version = math::checked_add_u64(position.state_version, 1)?;
 
@@ -1038,13 +1079,21 @@ pub fn activate_position(ctx: Context<ActivatePosition>) -> Result<()> {
     crate::require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
     let live_owner = parse_core_asset_owner(&ctx.accounts.receipt_asset.to_account_info())?;
-    require_keys_eq!(live_owner, ctx.accounts.new_owner.key(), RodeoError::InvalidCoreAssetOwner);
+    require_keys_eq!(
+        live_owner,
+        ctx.accounts.new_owner.key(),
+        RodeoError::InvalidCoreAssetOwner
+    );
 
     let position = &mut ctx.accounts.position;
     let position_key = position.key();
 
     position.owner = ctx.accounts.new_owner.key();
-    reset_reward_baseline(position, &ctx.accounts.reward_state, &ctx.accounts.bull_accumulator);
+    reset_reward_baseline(
+        position,
+        &ctx.accounts.reward_state,
+        &ctx.accounts.bull_accumulator,
+    );
 
     if position.role == Role::Bull {
         let buffer_info = ctx
@@ -1067,7 +1116,12 @@ pub fn activate_position(ctx: Context<ActivatePosition>) -> Result<()> {
             &mut ctx.accounts.reward_state,
             &ctx.accounts.global_game_state,
         )?;
-        add_bull_to_current_registry_with_payload(position, position_key, &mut ctx.accounts.bull_registry, &payload)?;
+        add_bull_to_current_registry_with_payload(
+            position,
+            position_key,
+            &mut ctx.accounts.bull_registry,
+            &payload,
+        )?;
         drop(buffer_data);
         mark_transfer_buffer_consumed(&buffer_info)?;
     }
@@ -1140,7 +1194,10 @@ pub fn claim_credit(ctx: Context<ClaimCreditAccounts>) -> Result<()> {
         position: ctx.accounts.claim_credit.key(),
         owner: ctx.accounts.owner.key(),
         amount_atomic: settled.owner_amount,
-        recognized_reward_balance_atomic: ctx.accounts.reward_state.recognized_reward_balance_atomic,
+        recognized_reward_balance_atomic: ctx
+            .accounts
+            .reward_state
+            .recognized_reward_balance_atomic,
         reason: settled.reason,
     });
 
@@ -1182,15 +1239,16 @@ fn perform_native_transfer<'info>(
     let now = Clock::get()?.unix_timestamp;
 
     require!(position.owner == seller, RodeoError::InvalidOwner);
-    require!(position.status == PositionStatus::Active, RodeoError::InvalidRole);
-    require!(!position.pending_action_active, RodeoError::PendingActionConflict);
+    require!(
+        position.status == PositionStatus::Active,
+        RodeoError::InvalidRole
+    );
+    require!(
+        !position.pending_action_active,
+        RodeoError::PendingActionConflict
+    );
 
-    sync_position_rewards(
-        position,
-        position_key,
-        reward_state,
-        bull_accumulator,
-    )?;
+    sync_position_rewards(position, position_key, reward_state, bull_accumulator)?;
     let credit_amount = checkpoint_position_claimable(
         position,
         seller_claim_credit,
@@ -1243,11 +1301,7 @@ fn perform_native_transfer<'info>(
     reset_reward_baseline(position, reward_state, bull_accumulator);
 
     if position.role == Role::Bull {
-        distribute_unallocated_bull_pool(
-            bull_accumulator,
-            reward_state,
-            global_game_state,
-        )?;
+        distribute_unallocated_bull_pool(bull_accumulator, reward_state, global_game_state)?;
     }
     add_role_to_active_counts(position, global_game_state)?;
     position.state_version = math::checked_add_u64(position.state_version, 1)?;
@@ -1260,7 +1314,11 @@ pub fn native_transfer_position(ctx: Context<NativeTransferPosition>) -> Result<
     crate::require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
     let live_owner = parse_core_asset_owner(&ctx.accounts.receipt_asset.to_account_info())?;
-    require_keys_eq!(live_owner, ctx.accounts.seller.key(), RodeoError::InvalidCoreAssetOwner);
+    require_keys_eq!(
+        live_owner,
+        ctx.accounts.seller.key(),
+        RodeoError::InvalidCoreAssetOwner
+    );
 
     let seller = ctx.accounts.seller.key();
     let buyer = ctx.accounts.buyer.key();
@@ -1310,7 +1368,11 @@ pub fn market_transfer_position(ctx: Context<MarketTransferPosition>) -> Result<
     crate::require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
     let live_owner = parse_core_asset_owner(&ctx.accounts.receipt_asset.to_account_info())?;
-    require_keys_eq!(live_owner, ctx.accounts.seller.key(), RodeoError::InvalidCoreAssetOwner);
+    require_keys_eq!(
+        live_owner,
+        ctx.accounts.seller.key(),
+        RodeoError::InvalidCoreAssetOwner
+    );
 
     let seller = ctx.accounts.seller.key();
     let buyer = ctx.accounts.buyer.key();
@@ -1360,7 +1422,11 @@ pub fn gift_position(ctx: Context<GiftPosition>) -> Result<()> {
     crate::require_elapsed_epochs_closed(&ctx.accounts.reward_state, now)?;
 
     let live_owner = parse_core_asset_owner(&ctx.accounts.receipt_asset.to_account_info())?;
-    require_keys_eq!(live_owner, ctx.accounts.seller.key(), RodeoError::InvalidCoreAssetOwner);
+    require_keys_eq!(
+        live_owner,
+        ctx.accounts.seller.key(),
+        RodeoError::InvalidCoreAssetOwner
+    );
 
     let position = &mut ctx.accounts.position;
     let position_key = position.key();
@@ -1368,8 +1434,14 @@ pub fn gift_position(ctx: Context<GiftPosition>) -> Result<()> {
     let recipient = ctx.accounts.recipient.key();
 
     require!(position.owner == seller, RodeoError::InvalidOwner);
-    require!(position.status == PositionStatus::Active, RodeoError::InvalidRole);
-    require!(!position.pending_action_active, RodeoError::PendingActionConflict);
+    require!(
+        position.status == PositionStatus::Active,
+        RodeoError::InvalidRole
+    );
+    require!(
+        !position.pending_action_active,
+        RodeoError::PendingActionConflict
+    );
 
     sync_position_rewards(
         position,
@@ -1429,7 +1501,11 @@ pub fn gift_position(ctx: Context<GiftPosition>) -> Result<()> {
     )?;
 
     position.owner = recipient;
-    reset_reward_baseline(position, &ctx.accounts.reward_state, &ctx.accounts.bull_accumulator);
+    reset_reward_baseline(
+        position,
+        &ctx.accounts.reward_state,
+        &ctx.accounts.bull_accumulator,
+    );
 
     if position.role == Role::Bull {
         distribute_unallocated_bull_pool(
@@ -1668,7 +1744,8 @@ mod tests {
         let expected = Pubkey::find_program_address(
             &[crate::constants::SEED_MARKET_AUTHORITY],
             &crate::constants::RODEO_MARKET_PROGRAM_ID,
-        ).0;
+        )
+        .0;
         assert_eq!(pda, expected);
     }
 
@@ -1679,7 +1756,8 @@ mod tests {
         let wrong_pda = Pubkey::find_program_address(
             &[crate::constants::SEED_MARKET_AUTHORITY],
             &wrong_program,
-        ).0;
+        )
+        .0;
         assert_ne!(pda, wrong_pda);
     }
 
@@ -1689,7 +1767,8 @@ mod tests {
         let alternate = Pubkey::find_program_address(
             &[b"market_authority"],
             &crate::constants::RODEO_MARKET_PROGRAM_ID,
-        ).0;
+        )
+        .0;
         assert_ne!(pda, alternate);
     }
 
@@ -1699,7 +1778,10 @@ mod tests {
         let payer = Pubkey::new_unique();
         let (seller_credit, _) = claim_credit_pda(&seller, 1, ClaimClass::NormalCowboy);
         let (payer_credit, _) = claim_credit_pda(&payer, 1, ClaimClass::NormalCowboy);
-        assert_eq!(seller_credit, claim_credit_pda(&seller, 1, ClaimClass::NormalCowboy).0);
+        assert_eq!(
+            seller_credit,
+            claim_credit_pda(&seller, 1, ClaimClass::NormalCowboy).0
+        );
         assert_ne!(seller_credit, payer_credit);
     }
 }

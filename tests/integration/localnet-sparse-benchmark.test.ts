@@ -21,6 +21,7 @@ const localnetAvailable = Boolean(process.env.ANCHOR_PROVIDER_URL && process.env
 const skipBenchmarkSuite = process.env.RODEO_TEST_SUITE !== "benchmark";
 const BENCHMARK_HEAP_BYTES = Number(process.env.RODEO_HEAP_BYTES ?? 32_768);
 const root = resolve(import.meta.dirname, "../..");
+mkdirSync(resolve(root, ".ci-artifacts"), { recursive: true });
 const PARITY_SAMPLE_SIZE = 10_000;
 
 function loadIdl(name: string): Idl {

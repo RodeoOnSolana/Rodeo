@@ -2,8 +2,8 @@
 //! against accidental account-size changes and provide a single place to verify
 //! migration math when fields are added.
 
-use anchor_lang::Space;
 use crate::state::*;
+use anchor_lang::Space;
 
 pub const GLOBAL_CONFIG_BASE_SPACE: usize = 8 + GlobalConfig::INIT_SPACE;
 pub const POSITION_BASE_SPACE: usize = 8 + Position::INIT_SPACE;
@@ -39,14 +39,21 @@ mod tests {
         // payload length at init time, but the static INIT_SPACE includes the
         // configured maximum.
         let expected_fixed = 8 + 182 + 4;
-        assert_eq!(8 + BullProofBuffer::INIT_SPACE, expected_fixed + crate::constants::BULL_PROOF_BUFFER_MAX_PAYLOAD);
+        assert_eq!(
+            8 + BullProofBuffer::INIT_SPACE,
+            expected_fixed + crate::constants::BULL_PROOF_BUFFER_MAX_PAYLOAD
+        );
     }
 
     #[test]
     fn claim_splits_sum_to_bps() {
-        assert_eq!(crate::constants::CLAIM_OWNER_BPS + crate::constants::CLAIM_BULL_POOL_BPS, 10_000);
         assert_eq!(
-            crate::constants::DESPERADO_CLAIM_OWNER_BPS + crate::constants::DESPERADO_CLAIM_BULL_POOL_BPS,
+            crate::constants::CLAIM_OWNER_BPS + crate::constants::CLAIM_BULL_POOL_BPS,
+            10_000
+        );
+        assert_eq!(
+            crate::constants::DESPERADO_CLAIM_OWNER_BPS
+                + crate::constants::DESPERADO_CLAIM_BULL_POOL_BPS,
             10_000
         );
     }

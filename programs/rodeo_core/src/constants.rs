@@ -1,4 +1,4 @@
-use anchor_lang::prelude::{Pubkey, pubkey};
+use anchor_lang::prelude::{pubkey, Pubkey};
 
 pub const RODEO_DECIMALS_MAX: u8 = 9;
 pub const RODEO_TOTAL_SUPPLY_WHOLE: u64 = 1_000_000_000;

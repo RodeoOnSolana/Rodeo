@@ -158,7 +158,9 @@ jobs:
           solana config set --url localhost
 
       - name: Anchor localnet integration tests (${{ matrix.suite }} profile)
-        run: RODEO_TEST_SUITE=${{ matrix.suite }} anchor test --skip-build --no-idl
+        run: |
+          mkdir -p .ci-artifacts
+          RODEO_TEST_SUITE=${{ matrix.suite }} anchor test --skip-build --no-idl
 
       - name: Ensure no stray validator process survives
         if: always()

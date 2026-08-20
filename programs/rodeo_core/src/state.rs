@@ -227,7 +227,6 @@ pub struct ClaimCredit {
     pub bump: u8,
 }
 
-
 #[account]
 #[derive(InitSpace)]
 pub struct PendingRandomness {
