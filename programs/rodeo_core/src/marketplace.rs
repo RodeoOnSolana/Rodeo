@@ -886,9 +886,8 @@ fn execute_native_transfer_composite(
         position.owner,
         RodeoError::BullRegistryOwnerMismatch
     );
-    require_keys_eq!(
-        buyer_owner.leaf.owner,
-        *buyer,
+    require!(
+        buyer_owner.leaf.is_empty() || buyer_owner.leaf.owner == *buyer,
         RodeoError::BullRegistryOwnerMismatch
     );
 

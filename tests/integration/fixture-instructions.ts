@@ -170,3 +170,33 @@ export function buildTestFixtureCloseReceiptFunderIx(
     data,
   });
 }
+
+export function buildTestFixtureForceTransferPositionReceiptInCollectionIx(
+  authority: web3.PublicKey,
+  globalConfig: web3.PublicKey,
+  position: web3.PublicKey,
+  receiptAsset: web3.PublicKey,
+  collection: web3.PublicKey,
+  receiptAuthority: web3.PublicKey,
+  newOwner: web3.PublicKey,
+): web3.TransactionInstruction {
+  const data = Buffer.concat([
+    discriminator("test_fixture_force_transfer_position_receipt_in_collection"),
+    newOwner.toBuffer(),
+  ]);
+  return new web3.TransactionInstruction({
+    keys: [
+      { pubkey: authority, isSigner: true, isWritable: true },
+      { pubkey: globalConfig, isSigner: false, isWritable: false },
+      { pubkey: position, isSigner: false, isWritable: false },
+      { pubkey: receiptAsset, isSigner: false, isWritable: true },
+      { pubkey: collection, isSigner: false, isWritable: true },
+      { pubkey: receiptAuthority, isSigner: false, isWritable: false },
+      { pubkey: newOwner, isSigner: false, isWritable: false },
+      { pubkey: new web3.PublicKey("CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d"), isSigner: false, isWritable: false },
+      { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    programId: PROGRAM_ID,
+    data,
+  });
+}
