@@ -1467,25 +1467,69 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
     }
   }
 
-  async function ensureEpochsClosed() {
+  const TEST_EPOCH_DURATION_SECONDS = 2;
+
+  async function getChainClockTime(): Promise<number> {
+    const clockInfo = await provider.connection.getAccountInfo(web3.SYSVAR_CLOCK_PUBKEY);
+    if (!clockInfo) throw new Error("Clock sysvar not found");
+    // Clock layout: slot(8), epoch_start_slot(8), epoch(8), leader_schedule_epoch(8), unix_timestamp(8)
+    return Number(clockInfo.data.readBigInt64LE(32));
+  }
+
+  async function ensureEpochsClosed(safeMarginSeconds = 0.5) {
     const batch = 16;
     for (let i = 0; i < 100; i++) {
       const before = (
         await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState)
       ).currentEpoch;
+      let caughtNoElapsed = false;
       try {
         await closeEpochsRaw(batch);
       } catch (err) {
-        if (isNoElapsedEpoch(err)) return;
-        throw err;
+        if (isNoElapsedEpoch(err)) {
+          caughtNoElapsed = true;
+        } else {
+          throw err;
+        }
       }
       const after = (
         await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState)
       ).currentEpoch;
-      // If fewer than the max batch was processed, there were no more elapsed
-      // epochs at the moment the transaction executed.
-      if (after.sub(before).toNumber() < batch) return;
+
+      if (after.sub(before).toNumber() >= batch) {
+        // There may still be more elapsed epochs; keep closing.
+        continue;
+      }
+
+      if (caughtNoElapsed) {
+        // No elapsed epoch right now.  Wait for a safe margin before the next
+        // boundary so the following transaction has room to land.
+        const state = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+        const now = await getChainClockTime();
+        const nextBoundary = state.epochStartedAt.toNumber() + TEST_EPOCH_DURATION_SECONDS;
+        const secondsUntilBoundary = nextBoundary - now;
+        if (secondsUntilBoundary > safeMarginSeconds) {
+          return;
+        }
+        const waitSeconds = Math.max(0.05, secondsUntilBoundary + 0.05);
+        await sleep(waitSeconds * 1000);
+        continue;
+      }
+
+      // Caught up and a fresh epoch started.  Ensure the transaction we are
+      // about to issue has a safe margin before the *next* boundary.
+      const state = await rodeoAccounts(rodeoCoreProgram).rewardState.fetch(rewardState);
+      const now = await getChainClockTime();
+      const nextBoundary = state.epochStartedAt.toNumber() + TEST_EPOCH_DURATION_SECONDS;
+      const secondsUntilBoundary = nextBoundary - now;
+      if (secondsUntilBoundary <= safeMarginSeconds) {
+        const waitSeconds = Math.max(0.05, secondsUntilBoundary + 0.05);
+        await sleep(waitSeconds * 1000);
+        continue;
+      }
+      return;
     }
+    throw new Error("ensureEpochsClosed: exhausted 100 iterations");
   }
 
   function isEpochsNotClosed(err: unknown): boolean {
@@ -1496,11 +1540,11 @@ describe.skipIf(skipEpochSuite)("Anchor localnet workspace (epoch profile)", () 
       message?: string;
     };
     if (e.error?.errorCode?.code === "EpochsNotClosed") return true;
-    if (e.error?.errorCode?.number === 6027) return true;
+    if (e.error?.errorCode?.number === 6028) return true;
     if (e.error?.errorMessage?.includes("All elapsed epochs must be closed")) return true;
-    if (e.code === 6027) return true;
+    if (e.code === 6028) return true;
     if (e.message?.includes("All elapsed epochs must be closed")) return true;
-    if (e.message?.includes("custom program error: 0x178b")) return true;
+    if (e.message?.includes("custom program error: 0x178c")) return true;
     return false;
   }
 

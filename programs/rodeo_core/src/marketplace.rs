@@ -1662,4 +1662,45 @@ mod tests {
         assert_eq!(math::floor_bps(0, owner).unwrap(), 0);
         assert_eq!(0u64.checked_sub(0).unwrap(), 0);
     }
+
+    #[test]
+    fn market_authority_pda_is_canonical() {
+        let (pda, _bump) = market_authority_pda();
+        let expected = Pubkey::find_program_address(
+            &[crate::constants::SEED_MARKET_AUTHORITY],
+            &crate::constants::RODEO_MARKET_PROGRAM_ID,
+        ).0;
+        assert_eq!(pda, expected);
+    }
+
+    #[test]
+    fn market_authority_differs_under_wrong_program() {
+        let (pda, _bump) = market_authority_pda();
+        let wrong_program = Pubkey::new_from_array([7u8; 32]);
+        let wrong_pda = Pubkey::find_program_address(
+            &[crate::constants::SEED_MARKET_AUTHORITY],
+            &wrong_program,
+        ).0;
+        assert_ne!(pda, wrong_pda);
+    }
+
+    #[test]
+    fn market_authority_differs_with_alternate_seed() {
+        let (pda, _bump) = market_authority_pda();
+        let alternate = Pubkey::find_program_address(
+            &[b"market_authority"],
+            &crate::constants::RODEO_MARKET_PROGRAM_ID,
+        ).0;
+        assert_ne!(pda, alternate);
+    }
+
+    #[test]
+    fn claim_credit_pda_binds_to_seller_not_payer() {
+        let seller = Pubkey::new_unique();
+        let payer = Pubkey::new_unique();
+        let (seller_credit, _) = claim_credit_pda(&seller, 1, ClaimClass::NormalCowboy);
+        let (payer_credit, _) = claim_credit_pda(&payer, 1, ClaimClass::NormalCowboy);
+        assert_eq!(seller_credit, claim_credit_pda(&seller, 1, ClaimClass::NormalCowboy).0);
+        assert_ne!(seller_credit, payer_credit);
+    }
 }
