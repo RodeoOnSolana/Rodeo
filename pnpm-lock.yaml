@@ -77,6 +77,10 @@ importers:
       '@switchboard-xyz/on-demand':
         specifier: 3.10.6
         version: 3.10.6(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.8.3)(utf-8-validate@6.0.6)
+    devDependencies:
+      vitest:
+        specifier: 3.2.4
+        version: 3.2.4(@types/node@22.15.3)(yaml@2.9.0)
 
 packages:
 
