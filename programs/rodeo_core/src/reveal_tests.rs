@@ -1687,6 +1687,193 @@ fn buffer_close_sets_consumed_and_transfers_lamports() {
     assert_eq!(buffer_lamports_after, 0u64);
 }
 
+// ─── Section 17: Native transfer empty-buyer owner proof binding ───────────
+
+#[test]
+fn native_transfer_empty_buyer_valid_absence_proof_passes() {
+    // A. Buyer has no owner bucket. A valid non-membership proof for BUYER's
+    //    exact 256-bit path must satisfy the empty-leaf fallback.
+    let seller = pk(1);
+    let buyer = pk(2);
+
+    let seller_leaf = OwnerLeaf {
+        owner: seller,
+        active_bull_count: 1,
+        total_buck_power: 4,
+        bull_tree_root: empty_bull_tree_root(),
+    };
+    let mut owner_tree =
+        TestTree::new(&OwnerLeaf::empty().to_node(), PREFIX_BULL_OWNER_NODE);
+    owner_tree.insert(seller.to_bytes(), seller_leaf.to_node());
+    let root = owner_tree.root();
+
+    let buyer_proof = CompressedOwnerProof {
+        leaf: OwnerLeaf::empty(),
+        proof: owner_tree.proof(&buyer.to_bytes()),
+    };
+    let payload_bytes = payload_with_sections(None, None, None, Some(&buyer_proof), None);
+    let payload_ref = BullProofPayloadRef::new(&payload_bytes).unwrap();
+    let buyer_owner = payload_ref.current_owner().unwrap().unwrap();
+
+    // The marketplace condition: empty leaf OR owner matches buyer.
+    assert!(buyer_owner.leaf.is_empty() || buyer_owner.leaf.owner == buyer);
+
+    // Crucially, the proof is verified against the buyer's own deterministic path.
+    borrowed_proof::verify_owner_ref(&root.hash, &buyer, buyer_owner).unwrap();
+}
+
+#[test]
+fn native_transfer_empty_buyer_proof_for_different_path_rejects() {
+    // B. Buyer is absent, but the prover offers an empty proof for some OTHER
+    //    pubkey path. That must NOT verify against the buyer path.
+    //
+    // Construct a tree with owners on BOTH sides of level 0 so that an empty
+    // path on one side has a different non-default sibling than an empty path
+    // on the other side. The buyer and decoy are empty but on opposite sides.
+    let seller_left = Pubkey::new_from_array([0u8; 32]);
+    let seller_right = Pubkey::new_from_array([1u8; 32]);
+    let buyer = Pubkey::new_from_array([2u8; 32]); // bit0 == 0, empty
+    let decoy = Pubkey::new_from_array([5u8; 32]); // bit0 == 1, empty
+
+    let left_leaf = OwnerLeaf {
+        owner: seller_left,
+        active_bull_count: 1,
+        total_buck_power: 4,
+        bull_tree_root: empty_bull_tree_root(),
+    };
+    let right_leaf = OwnerLeaf {
+        owner: seller_right,
+        active_bull_count: 1,
+        total_buck_power: 6,
+        bull_tree_root: empty_bull_tree_root(),
+    };
+    let mut owner_tree =
+        TestTree::new(&OwnerLeaf::empty().to_node(), PREFIX_BULL_OWNER_NODE);
+    owner_tree.insert(seller_left.to_bytes(), left_leaf.to_node());
+    owner_tree.insert(seller_right.to_bytes(), right_leaf.to_node());
+    let root = owner_tree.root();
+
+    // Non-membership proof is for DECOY, not for BUYER.
+    let decoy_proof = CompressedOwnerProof {
+        leaf: OwnerLeaf::empty(),
+        proof: owner_tree.proof(&decoy.to_bytes()),
+    };
+    let payload_bytes = payload_with_sections(None, None, None, Some(&decoy_proof), None);
+    let payload_ref = BullProofPayloadRef::new(&payload_bytes).unwrap();
+    let buyer_owner = payload_ref.current_owner().unwrap().unwrap();
+
+    assert!(buyer_owner.leaf.is_empty());
+    // The decoy proof recomputed along the buyer path must fail because the
+    // non-default sibling is on the wrong side for buyer's level-0 bit.
+    assert!(borrowed_proof::verify_owner_ref(&root.hash, &buyer, buyer_owner).is_err());
+}
+
+#[test]
+fn native_transfer_existing_buyer_matching_owner_passes() {
+    // C. Buyer already owns Bulls. A valid membership proof with leaf.owner == buyer
+    //    must pass.
+    let buyer = pk(2);
+    let buyer_leaf = OwnerLeaf {
+        owner: buyer,
+        active_bull_count: 1,
+        total_buck_power: 6,
+        bull_tree_root: empty_bull_tree_root(),
+    };
+    let mut owner_tree =
+        TestTree::new(&OwnerLeaf::empty().to_node(), PREFIX_BULL_OWNER_NODE);
+    owner_tree.insert(buyer.to_bytes(), buyer_leaf.to_node());
+    let root = owner_tree.root();
+
+    let buyer_proof = CompressedOwnerProof {
+        leaf: buyer_leaf,
+        proof: owner_tree.proof(&buyer.to_bytes()),
+    };
+    let payload_bytes = payload_with_sections(None, None, None, Some(&buyer_proof), None);
+    let payload_ref = BullProofPayloadRef::new(&payload_bytes).unwrap();
+    let buyer_owner = payload_ref.current_owner().unwrap().unwrap();
+
+    assert!(!buyer_owner.leaf.is_empty());
+    assert_eq!(buyer_owner.leaf.owner, buyer);
+    borrowed_proof::verify_owner_ref(&root.hash, &buyer, buyer_owner).unwrap();
+}
+
+#[test]
+fn native_transfer_existing_buyer_wrong_owner_field_rejects() {
+    // D. Buyer path exists, but the leaf's owner field does not match the buyer.
+    //    The proof is structurally valid for buyer's path, but leaf.owner is wrong.
+    let buyer = pk(2);
+    let other = pk(3);
+    let stored_leaf = OwnerLeaf {
+        owner: buyer,
+        active_bull_count: 1,
+        total_buck_power: 6,
+        bull_tree_root: empty_bull_tree_root(),
+    };
+    let mut owner_tree =
+        TestTree::new(&OwnerLeaf::empty().to_node(), PREFIX_BULL_OWNER_NODE);
+    owner_tree.insert(buyer.to_bytes(), stored_leaf.to_node());
+    let root = owner_tree.root();
+
+    // Present a proof whose leaf owner is OTHER, while still claiming buyer path.
+    let forged_leaf = OwnerLeaf {
+        owner: other,
+        active_bull_count: stored_leaf.active_bull_count,
+        total_buck_power: stored_leaf.total_buck_power,
+        bull_tree_root: stored_leaf.bull_tree_root,
+    };
+    let forged_proof = CompressedOwnerProof {
+        leaf: forged_leaf,
+        proof: owner_tree.proof(&buyer.to_bytes()),
+    };
+    let payload_bytes = payload_with_sections(None, None, None, Some(&forged_proof), None);
+    let payload_ref = BullProofPayloadRef::new(&payload_bytes).unwrap();
+    let buyer_owner = payload_ref.current_owner().unwrap().unwrap();
+
+    assert!(!buyer_owner.leaf.is_empty());
+    assert_ne!(buyer_owner.leaf.owner, buyer);
+    assert!(borrowed_proof::verify_owner_ref(&root.hash, &buyer, buyer_owner).is_err());
+}
+
+#[test]
+fn native_transfer_forged_empty_proof_rejects() {
+    // E. Buyer is absent, but the prover tampers with the absence-proof siblings.
+    let seller = pk(1);
+    let buyer = pk(2);
+
+    let seller_leaf = OwnerLeaf {
+        owner: seller,
+        active_bull_count: 1,
+        total_buck_power: 4,
+        bull_tree_root: empty_bull_tree_root(),
+    };
+    let mut owner_tree =
+        TestTree::new(&OwnerLeaf::empty().to_node(), PREFIX_BULL_OWNER_NODE);
+    owner_tree.insert(seller.to_bytes(), seller_leaf.to_node());
+    let root = owner_tree.root();
+
+    let mut forged_proof = CompressedOwnerProof {
+        leaf: OwnerLeaf::empty(),
+        proof: owner_tree.proof(&buyer.to_bytes()),
+    };
+    if !forged_proof.proof.siblings.is_empty() {
+        forged_proof.proof.siblings[0] = SparseMerkleNode {
+            hash: [0u8; 32],
+            count: 0,
+            power: 0,
+        };
+    } else {
+        // No siblings means the forged leaf itself must change the root.
+        forged_proof.leaf.active_bull_count = 1;
+    }
+
+    let payload_bytes = payload_with_sections(None, None, None, Some(&forged_proof), None);
+    let payload_ref = BullProofPayloadRef::new(&payload_bytes).unwrap();
+    let buyer_owner = payload_ref.current_owner().unwrap().unwrap();
+
+    // In all variants the proof must not verify.
+    assert!(borrowed_proof::verify_owner_ref(&root.hash, &buyer, buyer_owner).is_err());
+}
+
 // ─── Section 17: Historical vs current root ─────────────────────────────────
 
 #[test]

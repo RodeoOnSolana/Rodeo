@@ -38,7 +38,7 @@ const BULL_PROOF_BUFFER_EXPIRY_OFFSET: usize = BULL_PROOF_BUFFER_REFUND_RECIPIEN
 const BULL_PROOF_BUFFER_NONCE_OFFSET: usize = BULL_PROOF_BUFFER_EXPIRY_OFFSET + 8;
 const BULL_PROOF_BUFFER_EXPECTED_PAYLOAD_LEN_OFFSET: usize = BULL_PROOF_BUFFER_NONCE_OFFSET + 8;
 const BULL_PROOF_BUFFER_FINALIZED_OFFSET: usize = BULL_PROOF_BUFFER_EXPECTED_PAYLOAD_LEN_OFFSET + 4;
-const BULL_PROOF_BUFFER_CONSUMED_OFFSET: usize = BULL_PROOF_BUFFER_FINALIZED_OFFSET + 1;
+pub const BULL_PROOF_BUFFER_CONSUMED_OFFSET: usize = BULL_PROOF_BUFFER_FINALIZED_OFFSET + 1;
 const BULL_PROOF_BUFFER_FILLED_OFFSET: usize = BULL_PROOF_BUFFER_CONSUMED_OFFSET + 1;
 const BULL_PROOF_BUFFER_BUMP_OFFSET: usize = BULL_PROOF_BUFFER_FILLED_OFFSET + 4;
 const BULL_PROOF_BUFFER_PAYLOAD_LEN_OFFSET: usize = BULL_PROOF_BUFFER_BUMP_OFFSET + 1;
@@ -330,6 +330,106 @@ impl<'a> BullProofPayloadRef<'a> {
 
     pub fn remove_bull(&self) -> Result<Option<BullProofRef<'a>>> {
         match self.sections[5] {
+            Some(data) => Ok(Some(BullProofRef::from_bytes(data)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Native Bull ownership transfer payload: seller owner + remove + buyer owner + add
+// ---------------------------------------------------------------------------
+
+pub const NATIVE_TRANSFER_BULL_PAYLOAD_SCHEMA_VERSION: u8 = 1;
+const NATIVE_TRANSFER_SECTION_SELLER_OWNER: usize = 0;
+const NATIVE_TRANSFER_SECTION_REMOVE_BULL: usize = 1;
+const NATIVE_TRANSFER_SECTION_BUYER_OWNER: usize = 2;
+const NATIVE_TRANSFER_SECTION_ADD_BULL: usize = 3;
+
+#[derive(Clone, Copy)]
+pub struct NativeTransferBullPayloadRef<'a> {
+    pub schema_version: u8,
+    pub section_bitmap: u8,
+    pub sections: [Option<&'a [u8]>; 4],
+}
+
+impl<'a> NativeTransferBullPayloadRef<'a> {
+    pub fn new(data: &'a [u8]) -> Result<Self> {
+        let mut cursor = Cursor::new(data);
+        let schema_version = cursor.read_u8()?;
+        require_eq!(
+            schema_version,
+            NATIVE_TRANSFER_BULL_PAYLOAD_SCHEMA_VERSION,
+            RodeoError::BullProofBufferIncomplete
+        );
+
+        let section_bitmap = cursor.read_u8()?;
+        require!(
+            section_bitmap & !0b0000_1111 == 0,
+            RodeoError::BullProofBufferIncomplete
+        );
+
+        let mut sections: [Option<&'a [u8]>; 4] = [None; 4];
+        for i in 0..4 {
+            let present = cursor.read_u8()?;
+            let expected = (section_bitmap & (1u8 << i)) != 0;
+            require!(
+                (present == 0 || present == 1),
+                RodeoError::BullProofBufferIncomplete
+            );
+            require!(
+                (present == 1) == expected,
+                RodeoError::BullProofBufferIncomplete
+            );
+
+            if present == 1 {
+                let start = cursor.pos();
+                match i {
+                    NATIVE_TRANSFER_SECTION_SELLER_OWNER | NATIVE_TRANSFER_SECTION_BUYER_OWNER => {
+                        OwnerProofRef::skip(&mut cursor)?;
+                    }
+                    NATIVE_TRANSFER_SECTION_REMOVE_BULL | NATIVE_TRANSFER_SECTION_ADD_BULL => {
+                        BullProofRef::skip(&mut cursor)?;
+                    }
+                    _ => return Err(error!(RodeoError::BullProofBufferIncomplete)),
+                }
+                let end = cursor.pos();
+                sections[i] = Some(&data[start..end]);
+            }
+        }
+
+        require!(cursor.is_empty(), RodeoError::BullProofBufferIncomplete);
+
+        Ok(Self {
+            schema_version,
+            section_bitmap,
+            sections,
+        })
+    }
+
+    pub fn seller_owner(&self) -> Result<Option<OwnerProofRef<'a>>> {
+        match self.sections[NATIVE_TRANSFER_SECTION_SELLER_OWNER] {
+            Some(data) => Ok(Some(OwnerProofRef::from_bytes(data)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn remove_bull(&self) -> Result<Option<BullProofRef<'a>>> {
+        match self.sections[NATIVE_TRANSFER_SECTION_REMOVE_BULL] {
+            Some(data) => Ok(Some(BullProofRef::from_bytes(data)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn buyer_owner(&self) -> Result<Option<OwnerProofRef<'a>>> {
+        match self.sections[NATIVE_TRANSFER_SECTION_BUYER_OWNER] {
+            Some(data) => Ok(Some(OwnerProofRef::from_bytes(data)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn add_bull(&self) -> Result<Option<BullProofRef<'a>>> {
+        match self.sections[NATIVE_TRANSFER_SECTION_ADD_BULL] {
             Some(data) => Ok(Some(BullProofRef::from_bytes(data)?)),
             None => Ok(None),
         }

@@ -202,6 +202,31 @@ pub struct WalletClaimCooldown {
     pub bump: u8,
 }
 
+/// V1 claim-class buckets used when checkpointing accrued-but-not-yet-claimed
+/// ANSEM on ownership transfer.  The class is frozen at the moment the credit
+/// is created so a later protocol economics change cannot retroactively alter
+/// already-earned rewards.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
+pub enum ClaimClass {
+    NormalCowboy,
+    Desperado,
+    Bull,
+}
+
+/// Aggregate wallet-level claim credit.  One PDA per (wallet, claim_policy_version,
+/// claim_class) keeps the state bounded while still versioning the economics that
+/// apply to the credit.
+#[account]
+#[derive(InitSpace)]
+pub struct ClaimCredit {
+    pub version: u8,
+    pub wallet: Pubkey,
+    pub claim_policy_version: u64,
+    pub claim_class: ClaimClass,
+    pub amount_atomic: u64,
+    pub bump: u8,
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct PendingRandomness {
@@ -235,15 +260,22 @@ pub enum Role {
 pub enum PositionStatus {
     RevealPending,
     Active,
+    TransferReady,
 }
 
-/// Stable, append-only discriminant for randomness actions.
+/// Stable, append-only discriminant for actions that stage BullProofBuffers.
 /// Variants must never be reordered. Existing discriminants:
-/// Reveal = 0, Unstake = 1.
+/// Reveal = 0, Unstake = 1, PrepareTransfer = 2, ActivatePosition = 3,
+/// NativeTransferRemove = 4, NativeTransferAdd = 5, NativeTransferComposite = 6.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]
 pub enum ActionType {
     Reveal,
     Unstake,
+    PrepareTransfer,
+    ActivatePosition,
+    NativeTransferRemove,
+    NativeTransferAdd,
+    NativeTransferComposite,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, PartialEq, Eq, Debug)]

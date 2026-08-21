@@ -152,7 +152,9 @@ jobs:
           solana balance "${PAYER_PUBKEY}" --url http://127.0.0.1:8899
 
       - name: Run focused sparse-tree SBF benchmark
-        run: RODEO_TEST_SUITE=benchmark anchor test --skip-build --skip-local-validator --skip-deploy
+        run: |
+          mkdir -p .ci-artifacts
+          RODEO_TEST_SUITE=benchmark anchor test --skip-build --skip-local-validator --skip-deploy
 
       - name: Stop solana-test-validator
         if: always()

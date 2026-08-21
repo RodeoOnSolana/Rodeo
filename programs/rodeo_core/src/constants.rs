@@ -1,3 +1,5 @@
+use anchor_lang::prelude::{pubkey, Pubkey};
+
 pub const RODEO_DECIMALS_MAX: u8 = 9;
 pub const RODEO_TOTAL_SUPPLY_WHOLE: u64 = 1_000_000_000;
 pub const STAKE_AMOUNT_WHOLE_RODEO: u64 = 100_000;
@@ -87,16 +89,24 @@ pub const SEED_GLOBAL_GAME_STATE: &[u8] = b"global-game-state";
 pub const SEED_BULL_ACCUMULATOR: &[u8] = b"bull-accumulator";
 pub const SEED_BULL_REGISTRY: &[u8] = b"bull-registry";
 pub const SEED_BULL_PROOF_BUFFER: &[u8] = b"bull-proof-buffer";
+pub const SEED_BULL_TRANSFER_PROOF_BUFFER: &[u8] = b"bull-transfer-proof-buffer";
 pub const SEED_PRINCIPAL_VAULT: &[u8] = b"principal-vault";
 pub const SEED_REWARD_VAULT: &[u8] = b"reward-vault";
 pub const SEED_POSITION: &[u8] = b"position";
 pub const SEED_CLAIM_COOLDOWN: &[u8] = b"claim_cooldown";
+pub const SEED_CLAIM_POLICY: &[u8] = b"claim-policy";
+pub const SEED_CLAIM_CREDIT: &[u8] = b"claim-credit";
 pub const SEED_RANDOMNESS: &[u8] = b"randomness";
 pub const SEED_PROTOCOL_CONFIG: &[u8] = b"protocol-config";
 pub const SEED_RECEIPT_AUTHORITY: &[u8] = b"receipt-authority";
 pub const SEED_POSITION_RECEIPT: &[u8] = b"receipt";
 pub const SEED_RECEIPT_COLLECTION: &[u8] = b"receipt-collection";
 pub const SEED_RECEIPT_FUNDER: &[u8] = b"receipt-funder";
+
+/// Canonical Rodeo Marketplace program ID and authority seeds.
+/// Only this program's market_authority PDA may invoke seller-offline native transfers.
+pub const RODEO_MARKET_PROGRAM_ID: Pubkey = pubkey!("9vhrgTdridvE1uuxPenqDW9RVKdu3A5Dc2DzKVbaew8n");
+pub const SEED_MARKET_AUTHORITY: &[u8] = b"market-authority";
 
 // PositionReceipt v1 configuration. The reserve covers the measured MPL
 // Core `CreateV2` rent for a collection-member frozen receipt plus a small
@@ -119,6 +129,7 @@ pub const ACCOUNT_VERSION_GLOBAL_GAME_STATE: u8 = 4;
 pub const ACCOUNT_VERSION_BULL_ACCUMULATOR: u8 = 3;
 pub const ACCOUNT_VERSION_POSITION: u8 = 4;
 pub const ACCOUNT_VERSION_WALLET_CLAIM_COOLDOWN: u8 = 1;
+pub const ACCOUNT_VERSION_CLAIM_CREDIT: u8 = 1;
 pub const ACCOUNT_VERSION_PENDING_RANDOMNESS: u8 = 4;
 pub const ACCOUNT_VERSION_PROTOCOL_CONFIG: u8 = 1;
 pub const ACCOUNT_VERSION_BULL_REGISTRY: u8 = 1;

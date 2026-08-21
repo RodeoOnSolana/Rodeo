@@ -11,6 +11,11 @@ import {
   setAuthority,
 } from "@solana/spl-token";
 import { beforeAll, describe, expect, it } from "vitest";
+import {
+  buildTestFixtureSetBullRegistryIx,
+  buildTestFixtureSetGlobalGameStateIx,
+  buildTestFixtureSetRewardStateIx,
+} from "./fixture-instructions.js";
 import { stageBullProofBuffer, deriveBullRegistryPda } from "./bull-registry-tracker.js";
 import {
   buildBullTreeForOwner,
@@ -570,68 +575,66 @@ describe.skipIf(!localnetAvailable || skipBenchmarkSuite)("SBF SettleReveal benc
       const payloadBytes = serializeBullProofPayload(payload);
 
       // 4. Configure the on-chain state.
-      await rodeoCoreProgram.methods
-        .testFixtureSetGlobalGameState(
-          new BN(100),
-          positionId,
-          new BN(0),
-          new BN(0),
-        )
-        .accounts({
-          authority: payer.publicKey,
-          globalConfig,
-          globalGameState,
-        })
-        .signers([payer])
-        .rpc();
+      const setGlobalGameStateIx = buildTestFixtureSetGlobalGameStateIx(
+        payer.publicKey,
+        globalConfig,
+        globalGameState,
+        new BN(100),
+        positionId,
+        new BN(0),
+        new BN(0),
+      );
+      await provider.sendAndConfirm(
+        new web3.Transaction().add(setGlobalGameStateIx),
+        [payer],
+      );
 
-      await rodeoCoreProgram.methods
-        .testFixtureSetRewardState(new BN(0))
-        .accounts({
-          authority: payer.publicKey,
-          globalConfig,
-          rewardState,
-        })
-        .signers([payer])
-        .rpc();
+      const setRewardStateIx = buildTestFixtureSetRewardStateIx(
+        payer.publicKey,
+        globalConfig,
+        rewardState,
+        new BN(0),
+      );
+      await provider.sendAndConfirm(
+        new web3.Transaction().add(setRewardStateIx),
+        [payer],
+      );
 
       const registryCount = Number(totalCount);
       const registryPower = Number(totalPower);
       const registryVersion = 0;
 
-      await rodeoCoreProgram.methods
-        .testFixtureSetBullRegistry(
-          Buffer.from(new Uint8Array(ownerTree.getRoot().hash)),
-          new BN(registryCount),
-          new BN(registryPower),
-          new BN(registryVersion),
-        )
-        .accounts({
-          authority: payer.publicKey,
-          globalConfig,
-          bullRegistry,
-        })
-        .signers([payer])
-        .rpc();
+      const setBullRegistryIx = buildTestFixtureSetBullRegistryIx(
+        payer.publicKey,
+        globalConfig,
+        bullRegistry,
+        Buffer.from(new Uint8Array(ownerTree.getRoot().hash)),
+        new BN(registryCount),
+        new BN(registryPower),
+        new BN(registryVersion),
+      );
+      await provider.sendAndConfirm(
+        new web3.Transaction().add(setBullRegistryIx),
+        [payer],
+      );
 
       // 5. stake_and_commit (captures the above snapshot in pending_randomness).
       await stakeAndCommit(positionId);
 
       // 6. Move registry to the current state the proof is built against.
-      await rodeoCoreProgram.methods
-        .testFixtureSetBullRegistry(
-          Buffer.from(new Uint8Array(ownerTree.getRoot().hash)),
-          new BN(registryCount),
-          new BN(registryPower),
-          new BN(registryVersion),
-        )
-        .accounts({
-          authority: payer.publicKey,
-          globalConfig,
-          bullRegistry,
-        })
-        .signers([payer])
-        .rpc();
+      const updateBullRegistryIx = buildTestFixtureSetBullRegistryIx(
+        payer.publicKey,
+        globalConfig,
+        bullRegistry,
+        Buffer.from(new Uint8Array(ownerTree.getRoot().hash)),
+        new BN(registryCount),
+        new BN(registryPower),
+        new BN(registryVersion),
+      );
+      await provider.sendAndConfirm(
+        new web3.Transaction().add(updateBullRegistryIx),
+        [payer],
+      );
 
       // 7. Stage the BullProofBuffer.
       const nonce = new BN(1);

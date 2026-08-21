@@ -1,0 +1,184 @@
+name: Phase 4A transfer verification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SOLANA_VERSION: v2.2.20
+  ANCHOR_VERSION: 0.31.1
+  RUST_VERSION: 1.85.1
+  SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install/active_release
+  MPL_CORE_EXPECTED_SHA256: "f03e75373ae9cae07b5875f7818c55147b73c5607ca0f96968bab93cd583dc6e"
+
+jobs:
+  phase-4-transfer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: architecture-f
+            features: mock-randomness,test-fixtures
+          - suite: benchmark
+            features: mock-randomness,test-fixtures
+          - suite: production-buffer
+            features: mock-randomness
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy,rustfmt
+          rustup override set "$RUST_VERSION"
+
+      - name: Restore Rust, Anchor, and Solana toolchains
+        id: toolchain-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/anchor
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.local/share/solana/install
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-anchor-${{ env.ANCHOR_VERSION }}-solana-${{ env.SOLANA_VERSION }}
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Install Agave CLI
+        run: |
+          if [ ! -x "$SOLANA_INSTALL_DIR/bin/solana" ]; then
+            sh -c "$(curl -sSfL https://release.anza.xyz/$SOLANA_VERSION/install)"
+          fi
+          echo "$SOLANA_INSTALL_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor CLI
+        run: |
+          if ! command -v anchor >/dev/null || [ "$(anchor --version)" != "anchor-cli $ANCHOR_VERSION" ]; then
+            cargo install anchor-cli --version "$ANCHOR_VERSION" --locked
+          fi
+
+      - name: Save Rust, Anchor, and Solana toolchains
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/bin/anchor
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.local/share/solana/install
+          key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
+
+      - name: Report toolchain
+        run: |
+          rustc --version
+          cargo --version
+          solana --version
+          solana-test-validator --version
+          anchor --version
+          node --version
+          pnpm --version
+          cargo build-sbf --version
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript build
+        run: pnpm build
+
+      - name: TypeScript typecheck
+        run: pnpm typecheck
+
+      - name: Production Anchor build (default profile)
+        run: |
+          chmod +x scripts/check-sbf-stack-safety.sh
+          scripts/check-sbf-stack-safety.sh anchor build
+
+      - name: Verify production IDL has no fixture instructions
+        run: |
+          if grep -qE '"name": "(test_fixture_|benchmark_)' target/idl/rodeo_core.json; then
+            echo "::error::Production IDL contains fixture/benchmark instructions" >&2
+            exit 1
+          fi
+
+      - name: Generate SDK from production IDLs
+        run: pnpm sdk:generate
+
+      - name: Validate SDK build
+        run: |
+          pnpm build
+          pnpm typecheck
+
+      - name: Build rodeo_core for ${{ matrix.suite }} profile
+        run: |
+          chmod +x scripts/check-sbf-stack-safety.sh
+          scripts/check-sbf-stack-safety.sh anchor build --program-name rodeo_core -- --features ${{ matrix.features }}
+          SBF_ARTIFACT=$(ls target/sbpf-solana-solana/release/rodeo_core.so 2>/dev/null || ls target/sbpfv2-solana-solana/release/rodeo_core.so 2>/dev/null)
+          cp "$SBF_ARTIFACT" target/deploy/rodeo_core.so
+          echo "suite=${{ matrix.suite }}"
+          echo "features=${{ matrix.features }}"
+          echo "artifact=$SBF_ARTIFACT"
+          echo "deployed=target/deploy/rodeo_core.so"
+          echo "program_id=$(solana-keygen pubkey target/deploy/rodeo_core.so 2>/dev/null || echo 'n/a')"
+
+      - name: Prepare localnet identities
+        run: pnpm program-keys:localnet
+
+      - name: Verify Metaplex Core program binary
+        run: |
+          chmod +x scripts/verify-mpl-core-program.sh
+          MPL_CORE_EXPECTED_SHA256="${MPL_CORE_EXPECTED_SHA256:-}" scripts/verify-mpl-core-program.sh
+
+      - name: Configure local validator wallet
+        run: |
+          mkdir -p "$HOME/.config/solana"
+          solana-keygen new --no-bip39-passphrase --silent --force -o "$HOME/.config/solana/id.json"
+          solana config set --url localhost
+
+      - name: Anchor localnet integration tests (${{ matrix.suite }} profile)
+        run: |
+          mkdir -p .ci-artifacts
+          RODEO_TEST_SUITE=${{ matrix.suite }} anchor test --skip-build --no-idl
+
+      - name: Ensure no stray validator process survives
+        if: always()
+        run: |
+          pkill -f solana-test-validator || true
+          sleep 2
+
+      - name: Upload test-validator ledger log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-validator-ledger-log-${{ matrix.suite }}
+          path: .anchor/test-ledger/test-ledger-log.txt
+          if-no-files-found: warn
+
+  phase-4-verify:
+    runs-on: ubuntu-24.04
+    needs: [phase-4-transfer]
+    steps:
+      - name: Phase 4A gate verified
+        run: echo "Phase 4A transfer suites passed"

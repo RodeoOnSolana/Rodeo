@@ -11,21 +11,26 @@ pub mod borrowed_proof;
 pub mod bull_registry;
 pub mod constants;
 pub mod empty_nodes;
+pub mod layout;
+pub mod marketplace;
 pub mod math;
 pub mod probability;
 pub mod receipt;
 pub mod sparse_tree;
 pub mod state;
+pub mod transfer_proof_buffer;
 
 use borrowed_proof::*;
 use bull_registry::*;
 use constants::*;
+use marketplace::*;
 use mpl_core::instructions::{
     BurnV1Builder, CreateCollectionV2Builder, CreateV2Builder, TransferV1Builder, UpdateV1Builder,
 };
 use mpl_core::types::{DataState, Plugin, PluginAuthority, PluginAuthorityPair, PluginType};
 use receipt::*;
 use state::*;
+use transfer_proof_buffer::*;
 
 #[cfg(not(feature = "mock-randomness"))]
 use switchboard_on_demand::accounts::RandomnessAccountData;
@@ -922,173 +927,102 @@ pub mod rodeo_core {
             RodeoError::ClaimCooldownNotMet
         );
 
-        // Validate vault and destination.
-        require_keys_eq!(
-            ctx.accounts.reward_vault.key(),
-            ctx.accounts.global_config.reward_vault,
-            RodeoError::InvalidRewardVault
-        );
-        require_keys_eq!(
-            ctx.accounts.reward_vault.mint,
-            ctx.accounts.global_config.ansem_mint,
-            RodeoError::InvalidAnsemMint
-        );
-        require_keys_eq!(
-            ctx.accounts.owner_ansem_account.mint,
-            ctx.accounts.global_config.ansem_mint,
-            RodeoError::InvalidRewardDestination
-        );
-        require_keys_eq!(
-            ctx.accounts.owner_ansem_account.owner,
+        let claim_class = crate::marketplace::derive_claim_class(position)?;
+        let settled = crate::marketplace::settle_claim_amount(
+            claimable,
+            claim_class,
+            &mut ctx.accounts.reward_state,
+            &mut ctx.accounts.bull_accumulator,
+            &ctx.accounts.global_game_state,
+            &ctx.accounts.global_config,
+            &ctx.accounts.reward_vault,
+            &ctx.accounts.owner_ansem_account,
+            &ctx.accounts.token_program,
+        )?;
+
+        emit!(RewardPaid {
+            position: position_key,
             owner,
-            RodeoError::InvalidRewardDestination
-        );
-
-        let reward_state = &mut ctx.accounts.reward_state;
-        let game_state = &ctx.accounts.global_game_state;
-        let bull_accumulator = &mut ctx.accounts.bull_accumulator;
-
-        // Pay according to role.
-        let owner_amount: u64;
-        let bull_pool_amount: u64;
-        let reward_paid_reason: RewardPaidReason;
-        match position.role {
-            Role::Cowboy => {
-                let (owner_bps, _bull_pool_bps) = if position.cowboy_kind == CowboyKind::Desperado {
-                    (DESPERADO_CLAIM_OWNER_BPS, DESPERADO_CLAIM_BULL_POOL_BPS)
-                } else {
-                    (CLAIM_OWNER_BPS, CLAIM_BULL_POOL_BPS)
-                };
-                owner_amount = math::floor_bps(claimable, owner_bps)?;
-                bull_pool_amount = math::checked_sub_u64(claimable, owner_amount)?;
-                reward_paid_reason = if position.cowboy_kind == CowboyKind::Desperado {
-                    RewardPaidReason::DesperadoClaim
-                } else {
-                    RewardPaidReason::CowboyClaim
-                };
-
-                require_gte!(
-                    reward_state.position_claimable_liability_atomic,
-                    claimable,
-                    RodeoError::LiabilityUnderflow
-                );
-                require_gte!(
-                    reward_state.recognized_reward_balance_atomic,
-                    owner_amount,
-                    RodeoError::InsufficientRecognizedRewards
-                );
-                require_gte!(
-                    reward_state.total_ansem_liability_atomic,
-                    owner_amount,
-                    RodeoError::LiabilityUnderflow
-                );
-
-                reward_state.position_claimable_liability_atomic = math::checked_sub_u64(
-                    reward_state.position_claimable_liability_atomic,
-                    claimable,
-                )?;
-                reward_state.total_ansem_liability_atomic =
-                    math::checked_sub_u64(reward_state.total_ansem_liability_atomic, owner_amount)?;
-                reward_state.recognized_reward_balance_atomic = math::checked_sub_u64(
-                    reward_state.recognized_reward_balance_atomic,
-                    owner_amount,
-                )?;
-                reward_state.ansem_claimed_atomic =
-                    math::checked_add_u64(reward_state.ansem_claimed_atomic, owner_amount)?;
-
-                transfer_ansem_from_vault(
-                    owner_amount,
-                    &*ctx.accounts.global_config,
-                    ctx.accounts.reward_vault.to_account_info(),
-                    ctx.accounts.owner_ansem_account.to_account_info(),
-                    ctx.accounts.token_program.to_account_info(),
-                )?;
-
-                let source = if position.cowboy_kind == CowboyKind::Desperado {
-                    BullPoolSource::DesperadoClaimTax
-                } else {
-                    BullPoolSource::CowboyClaimTax
-                };
-                distribute_bull_pool_contribution(
-                    source,
-                    bull_pool_amount,
-                    reward_state,
-                    bull_accumulator,
-                    game_state,
-                )?;
-
-                emit!(RewardPaid {
-                    position: position.key(),
-                    owner,
-                    amount_atomic: owner_amount,
-                    recognized_reward_balance_atomic: reward_state.recognized_reward_balance_atomic,
-                    reason: reward_paid_reason,
-                });
-            }
-            Role::Bull => {
-                owner_amount = claimable;
-                bull_pool_amount = 0;
-                reward_paid_reason = RewardPaidReason::BullClaim;
-
-                require_gte!(
-                    reward_state.position_claimable_liability_atomic,
-                    claimable,
-                    RodeoError::LiabilityUnderflow
-                );
-                require_gte!(
-                    reward_state.recognized_reward_balance_atomic,
-                    claimable,
-                    RodeoError::InsufficientRecognizedRewards
-                );
-                require_gte!(
-                    reward_state.total_ansem_liability_atomic,
-                    claimable,
-                    RodeoError::LiabilityUnderflow
-                );
-
-                reward_state.position_claimable_liability_atomic = math::checked_sub_u64(
-                    reward_state.position_claimable_liability_atomic,
-                    claimable,
-                )?;
-                reward_state.total_ansem_liability_atomic =
-                    math::checked_sub_u64(reward_state.total_ansem_liability_atomic, claimable)?;
-                reward_state.recognized_reward_balance_atomic = math::checked_sub_u64(
-                    reward_state.recognized_reward_balance_atomic,
-                    claimable,
-                )?;
-                reward_state.ansem_claimed_atomic =
-                    math::checked_add_u64(reward_state.ansem_claimed_atomic, claimable)?;
-
-                transfer_ansem_from_vault(
-                    claimable,
-                    &*ctx.accounts.global_config,
-                    ctx.accounts.reward_vault.to_account_info(),
-                    ctx.accounts.owner_ansem_account.to_account_info(),
-                    ctx.accounts.token_program.to_account_info(),
-                )?;
-
-                emit!(RewardPaid {
-                    position: position.key(),
-                    owner,
-                    amount_atomic: claimable,
-                    recognized_reward_balance_atomic: reward_state.recognized_reward_balance_atomic,
-                    reason: reward_paid_reason,
-                });
-            }
-            _ => return err!(RodeoError::InvalidRole),
-        }
+            amount_atomic: settled.owner_amount,
+            recognized_reward_balance_atomic: ctx
+                .accounts
+                .reward_state
+                .recognized_reward_balance_atomic,
+            reason: settled.reason,
+        });
 
         position.claimable_ansem_atomic = 0;
         cooldown.last_claimed_at = now;
 
         emit!(PositionClaimed {
-            position: position.key(),
+            position: position_key,
             owner,
-            owner_amount,
-            bull_pool_amount,
+            owner_amount: settled.owner_amount,
+            bull_pool_amount: settled.bull_pool_amount,
         });
 
         Ok(())
+    }
+
+    pub fn initialize_transfer_bull_proof(
+        ctx: Context<InitializeTransferBullProof>,
+        action_type: ActionType,
+        expected_payload_length: u32,
+        nonce: u64,
+    ) -> Result<()> {
+        crate::transfer_proof_buffer::initialize_transfer_bull_proof(
+            ctx,
+            action_type,
+            expected_payload_length,
+            nonce,
+        )
+    }
+
+    pub fn append_transfer_bull_proof(
+        ctx: Context<AppendTransferBullProof>,
+        nonce: u64,
+        offset: u32,
+        chunk: Vec<u8>,
+    ) -> Result<()> {
+        crate::transfer_proof_buffer::append_transfer_bull_proof(ctx, nonce, offset, chunk)
+    }
+
+    pub fn finalize_transfer_bull_proof(
+        ctx: Context<FinalizeTransferBullProof>,
+        nonce: u64,
+    ) -> Result<()> {
+        crate::transfer_proof_buffer::finalize_transfer_bull_proof(ctx, nonce)
+    }
+
+    pub fn close_transfer_bull_proof(
+        ctx: Context<CloseTransferBullProof>,
+        nonce: u64,
+    ) -> Result<()> {
+        crate::transfer_proof_buffer::close_transfer_bull_proof(ctx, nonce)
+    }
+
+    pub fn prepare_transfer(ctx: Context<PrepareTransfer>) -> Result<()> {
+        crate::marketplace::prepare_transfer(ctx)
+    }
+
+    pub fn activate_position(ctx: Context<ActivatePosition>) -> Result<()> {
+        crate::marketplace::activate_position(ctx)
+    }
+
+    pub fn claim_credit(ctx: Context<ClaimCreditAccounts>) -> Result<()> {
+        crate::marketplace::claim_credit(ctx)
+    }
+
+    pub fn native_transfer_position(ctx: Context<NativeTransferPosition>) -> Result<()> {
+        crate::marketplace::native_transfer_position(ctx)
+    }
+
+    pub fn market_transfer_position(ctx: Context<MarketTransferPosition>) -> Result<()> {
+        crate::marketplace::market_transfer_position(ctx)
+    }
+
+    pub fn gift_position(ctx: Context<GiftPosition>) -> Result<()> {
+        crate::marketplace::gift_position(ctx)
     }
 
     pub fn request_unstake(ctx: Context<RequestUnstake>) -> Result<()> {
@@ -1163,6 +1097,7 @@ pub mod rodeo_core {
         position.pending_action_type = ActionType::Unstake;
         position.pending_action_nonce = action_nonce;
         position.next_action_nonce = math::checked_add_u64(action_nonce, 1)?;
+        position.state_version = math::checked_add_u64(position.state_version, 1)?;
 
         let pending_randomness = &mut ctx.accounts.pending_randomness;
         pending_randomness.version = ACCOUNT_VERSION_PENDING_RANDOMNESS;
@@ -4768,6 +4703,8 @@ pub enum RodeoError {
     InvalidVault,
     #[msg("Invalid decimals or atomic conversion failed")]
     InvalidDecimals,
+    #[msg("Claim policy version does not match the current protocol config")]
+    InvalidConfigVersion,
     #[msg("Principal must be greater than zero")]
     ZeroPrincipal,
     #[msg("Randomness has already been settled")]
@@ -4953,7 +4890,7 @@ fn derive_commitment(
 }
 
 /// Require that all currently elapsed epochs have been closed.
-fn require_elapsed_epochs_closed(reward_state: &RewardState, now: i64) -> Result<()> {
+pub(crate) fn require_elapsed_epochs_closed(reward_state: &RewardState, now: i64) -> Result<()> {
     let next_boundary = reward_state
         .last_closed_epoch_timestamp
         .checked_add(EPOCH_DURATION_SECONDS)
@@ -4963,7 +4900,10 @@ fn require_elapsed_epochs_closed(reward_state: &RewardState, now: i64) -> Result
 }
 
 /// Synchronize a Cowboy (or Desperado) position with the global Cowboy reward index.
-fn sync_cowboy_rewards(position: &mut Position, reward_state: &mut RewardState) -> Result<()> {
+pub(crate) fn sync_cowboy_rewards(
+    position: &mut Position,
+    reward_state: &mut RewardState,
+) -> Result<()> {
     if position.role != Role::Cowboy {
         return Ok(());
     }
@@ -5002,7 +4942,7 @@ fn sync_cowboy_rewards(position: &mut Position, reward_state: &mut RewardState) 
 }
 
 /// Synchronize a Bull position with the global Bull reward-per-weight accumulator.
-fn sync_bull_rewards(
+pub(crate) fn sync_bull_rewards(
     position: &mut Position,
     position_key: Pubkey,
     bull_accumulator: &mut BullAccumulator,
@@ -5054,7 +4994,7 @@ fn sync_bull_rewards(
 
 /// Route a claim-tax contribution into the Bull reward pool, updating the
 /// accumulator when there is active Bull power.
-fn distribute_bull_pool_contribution(
+pub(crate) fn distribute_bull_pool_contribution(
     source: BullPoolSource,
     contribution: u64,
     reward_state: &mut RewardState,
@@ -5095,7 +5035,7 @@ fn distribute_bull_pool_contribution(
 }
 
 /// Transfer ANSEM out of the program-controlled reward vault.
-fn transfer_ansem_from_vault<'info>(
+pub(crate) fn transfer_ansem_from_vault<'info>(
     amount: u64,
     global_config: &Account<'info, GlobalConfig>,
     reward_vault: AccountInfo<'info>,
@@ -6538,6 +6478,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(
+        not(feature = "test-short-epoch"),
+        not(feature = "test-short-min-stake"),
+        not(feature = "test-short-timeout"),
+        not(feature = "test-short-claim-cooldown")
+    ))]
     fn constants_match_typescript_expectations() {
         assert_eq!(RODEO_TOTAL_SUPPLY_WHOLE, 1_000_000_000u64);
         assert_eq!(STAKE_AMOUNT_WHOLE_RODEO, 100_000u64);
@@ -6588,6 +6534,31 @@ mod tests {
         buf.clear();
         state::ActionType::Unstake.serialize(&mut buf).unwrap();
         assert_eq!(buf[0], 1);
+        buf.clear();
+        state::ActionType::PrepareTransfer
+            .serialize(&mut buf)
+            .unwrap();
+        assert_eq!(buf[0], 2);
+        buf.clear();
+        state::ActionType::ActivatePosition
+            .serialize(&mut buf)
+            .unwrap();
+        assert_eq!(buf[0], 3);
+        buf.clear();
+        state::ActionType::NativeTransferRemove
+            .serialize(&mut buf)
+            .unwrap();
+        assert_eq!(buf[0], 4);
+        buf.clear();
+        state::ActionType::NativeTransferAdd
+            .serialize(&mut buf)
+            .unwrap();
+        assert_eq!(buf[0], 5);
+        buf.clear();
+        state::ActionType::NativeTransferComposite
+            .serialize(&mut buf)
+            .unwrap();
+        assert_eq!(buf[0], 6);
     }
 
     #[test]
